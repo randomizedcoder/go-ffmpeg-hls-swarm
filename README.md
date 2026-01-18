@@ -1,3 +1,411 @@
 # go-ffmpeg-hls-swarm
 
-This is a small go utility to control a swarm of ffmpeg clients that will pull hls streams
+<p align="center">
+  <img src="go-ffmpeg-hls-swarm.png" alt="go-ffmpeg-hls-swarm logo" width="200">
+</p>
+
+<p align="center">
+  <strong>Find where your streaming infrastructure breaks — before your viewers do.</strong>
+</p>
+
+<p align="center">
+  <kbd>📐 <b>STATUS: DESIGN COMPLETE</b> — Implementation starting soon!</kbd>
+</p>
+
+<p align="center">
+  <em>We've done the hard work: FFmpeg source code analysis, architecture design, and specification.<br/>
+  The CLI and behavior below are <b>stable design targets</b> — what you see is what you'll get.</em>
+  <br/><br/>
+  ⭐ <b>Star</b> to show interest &nbsp;•&nbsp; 👁️ <b>Watch</b> for release notifications &nbsp;•&nbsp; 💬 <b>Open an issue</b> to shape the direction
+</p>
+
+---
+
+A Go-based load testing tool that orchestrates a swarm of FFmpeg processes to stress-test HLS (HTTP Live Streaming) infrastructure. HLS is the dominant protocol for live and on-demand video streaming, powering services like Twitch, YouTube Live, and Apple's ecosystem.
+
+---
+
+## Why This Tool?
+
+Most load testing tools (k6, Locust, Gatling) generate HTTP requests but **don't understand HLS**. They can't:
+
+- Parse master playlists and follow variant playlist URLs
+- Track segment sequencing in live streams
+- Handle playlist refresh timing correctly
+- Simulate realistic client reconnection behavior
+
+**FFmpeg's HLS demuxer handles all of this natively**, making it ideal for realistic load testing. This tool orchestrates many FFmpeg processes to simulate concurrent viewers hitting your CDN or origin server.
+
+### Comparison with Alternatives
+
+| Feature | go-ffmpeg-hls-swarm | k6 / Locust | curl loops |
+|---------|----------|-------------|------------|
+| **HLS Protocol Understanding** | ✅ Native (via FFmpeg) | ❌ HTTP only | ❌ HTTP only |
+| **Follows Variant Playlists** | ✅ Automatic | ❌ Manual scripting | ❌ Manual |
+| **Handles Live Playlist Refresh** | ✅ Yes | ❌ Must implement | ❌ No |
+| **Multi-variant Testing** | ✅ All/highest/lowest | ❌ Manual | ❌ No |
+| **Reconnection on Failure** | ✅ Built-in | ⚠️ Must implement | ❌ No |
+| **Prometheus Metrics** | ✅ Yes | ✅ Yes | ❌ No |
+| **Setup Complexity** | Single binary + FFmpeg | Python/JS ecosystem | Shell scripts |
+
+### Use Cases
+
+| Scenario | How This Helps |
+|----------|----------------|
+| CDN capacity planning | Find the breaking point before a major event |
+| Origin server stress testing | Bypass CDN cache to test origin directly |
+| Edge node validation | Test specific servers by IP |
+| Failover testing | See how infrastructure handles mass reconnection |
+
+---
+
+## What It Does
+
+- 🎬 **Spawns 50–200+ concurrent HLS clients** using FFmpeg subprocesses
+- 📊 **No video decoding** — exercises playlist fetching and segment downloads only
+- 🎚️ **Variant selection** — test with all bitrates, highest only, or lowest only
+- 🌐 **DNS override** — test specific servers by IP (bypass CDN routing)
+- 🚫 **Cache bypass** — no-cache headers to stress origin servers directly
+- 🚀 **Controlled ramp-up** — avoid thundering herd with configurable start rates
+- 🔄 **Auto-restart with backoff** — handles transient failures gracefully
+- 📈 **Prometheus metrics** — monitor active clients, restarts, and failure rates
+- 🛑 **Graceful shutdown** — clean signal propagation to all child processes
+
+---
+
+## Try the Core Concept Now
+
+**Don't wait for go-ffmpeg-hls-swarm** — see what it will automate by running FFmpeg directly:
+
+```bash
+# This single FFmpeg command simulates one HLS viewer
+# go-ffmpeg-hls-swarm will orchestrate hundreds of these
+
+ffmpeg -hide_banner -loglevel info \
+  -reconnect 1 -reconnect_streamed 1 \
+  -i "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" \
+  -map 0 -c copy -f null -
+```
+
+Watch FFmpeg fetch the master playlist, select variants, and download segments. This is exactly what each go-ffmpeg-hls-swarm client does — we just manage 50–200+ of them with supervision, metrics, and graceful shutdown.
+
+Press `Ctrl+C` to stop.
+
+---
+
+## Quick Start
+
+For a complete 5-minute tutorial, see **[Quick Start Guide](docs/QUICKSTART.md)**.
+
+**TL;DR** (once implementation is complete):
+
+```bash
+# Clone and build (update URL when repo is published)
+git clone https://github.com/randomizedcoder/go-ffmpeg-hls-swarm.git
+cd go-ffmpeg-hls-swarm
+go build -o go-ffmpeg-hls-swarm ./cmd/go-ffmpeg-hls-swarm
+
+# Run with 50 clients against your HLS stream
+./go-ffmpeg-hls-swarm -clients 50 https://your-cdn.com/live/master.m3u8
+
+# Monitor metrics
+curl http://localhost:9090/metrics | grep hlsswarm
+```
+
+**Expected output:**
+```
+Preflight checks:
+  ✓ ffmpeg: found at /usr/bin/ffmpeg (version 6.1)
+  ✓ file_descriptors: 8192 available (need 1100 for 50 clients)
+
+Starting 50 clients at 5/sec...
+  [00:00] client_started id=0 pid=12345
+  [00:00] client_started id=1 pid=12346
+  ...
+  [00:10] ramp_complete clients=50
+
+Press Ctrl+C to stop.
+```
+
+---
+
+## Usage
+
+```bash
+go-ffmpeg-hls-swarm [flags] <HLS_URL>
+
+Orchestration Flags:
+  -clients int        Number of concurrent clients (default 10)
+  -ramp-rate int      Clients to start per second (default 5)
+  -duration duration  Run duration, 0 = forever (default 0)
+
+Variant Selection:
+  -variant string     Bitrate selection: "all", "highest", "lowest", "first" (default "all")
+
+Network / Testing:
+  -resolve string     Connect to this IP (bypasses DNS, requires --dangerous)
+  -no-cache           Add no-cache headers (bypass CDN cache)
+  -header string      Add custom HTTP header (can repeat)
+
+Safety & Diagnostics:
+  --dangerous         Required for -resolve (disables TLS verification)
+  --print-cmd         Print the FFmpeg command that would be run, then exit
+  --check             Validate config and run 1 client for 10 seconds, then exit
+
+Observability:
+  -metrics string     Prometheus metrics address (default "0.0.0.0:9090")
+  -v                  Verbose logging
+
+FFmpeg:
+  -ffmpeg string      Path to FFmpeg binary (default "ffmpeg")
+```
+
+> **Flag convention**: Single-dash flags (`-clients`, `-resolve`) are normal options. Double-dash flags (`--dangerous`, `--check`, `--print-cmd`) are safety gates or diagnostic modes that change the tool's behavior significantly.
+
+See [CONFIGURATION.md](docs/CONFIGURATION.md) for complete flag reference and examples.
+
+---
+
+## Variant Selection
+
+| Mode | Description | Best For |
+|------|-------------|----------|
+| `all` | Download ALL quality levels simultaneously | Maximum CDN stress |
+| `highest` | Highest bitrate only (via ffprobe) | Simulating premium viewers |
+| `lowest` | Lowest bitrate only (via ffprobe) | Simulating mobile users |
+| `first` | First variant in playlist (no probe) | Fast startup, unpredictable quality |
+
+> ⚠️ **Note on `-variant all`**: This downloads every quality level simultaneously, which is NOT how real viewers behave. With 4 variants and 50 clients, you generate **200 concurrent streams** (4× bandwidth). Use for maximum stress testing; use `highest` or `lowest` for more realistic simulation.
+
+> ℹ️ **Note on `-variant first`**: "First" means first listed in the master playlist. Playlist ordering varies by encoder—it might be highest, lowest, or something else. Use this mode for quick tests when you don't care about specific quality.
+
+---
+
+## Examples
+
+```bash
+# Quick smoke test with a public stream
+./go-ffmpeg-hls-swarm -clients 5 https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+
+# Simulate premium viewers: highest bitrate only
+./go-ffmpeg-hls-swarm -clients 100 -variant highest https://cdn.example.com/live/master.m3u8
+
+# Bypass CDN cache (stress origin directly)
+./go-ffmpeg-hls-swarm -clients 50 -no-cache https://cdn.example.com/live/master.m3u8
+
+# Test specific server by IP (⚠️ disables TLS verification!)
+./go-ffmpeg-hls-swarm -clients 50 -resolve 192.168.1.100 --dangerous \
+  https://cdn.example.com/live/master.m3u8
+
+# Full stress test: specific origin + cache bypass + all variants
+./go-ffmpeg-hls-swarm -clients 100 -variant all \
+  -resolve 10.0.0.50 --dangerous -no-cache \
+  https://cdn.example.com/live/master.m3u8
+
+# 30-minute timed load test
+./go-ffmpeg-hls-swarm -clients 200 -ramp-rate 5 -duration 30m \
+  https://cdn.example.com/live/master.m3u8
+```
+
+---
+
+## What This Tool Is (and Isn't)
+
+> 💡 **This is a stress testing tool, not a viewer simulator.**
+
+| ✅ Great For | ❌ Not Designed For |
+|-------------|---------------------|
+| Finding CDN/origin breaking points | Simulating realistic viewer behavior |
+| Validating infrastructure before events | Quality of Experience (QoE) testing |
+| Testing specific servers by IP | ABR algorithm testing |
+| Bypassing cache to stress origins | Network impairment simulation |
+
+### Key Limitations
+
+| Limitation | Why It Matters | Workaround |
+|------------|----------------|------------|
+| **Downloads at full speed** | FFmpeg fetches segments ASAP, not at playback rate | This maximizes stress — use external rate limiting if needed |
+| **Linux recommended** | High concurrency needs OS tuning (FDs, processes) | See [OS Tuning](#os-tuning-for-high-concurrency) |
+| **Single stream URL** | All clients target the same URL per run | Run multiple instances for multiple streams |
+| **No ABR simulation** | Clients don't switch bitrates dynamically | Use `-variant` flag to select quality level |
+
+See [OPERATIONS.md](docs/OPERATIONS.md) for detailed discussion of limitations and failure modes.
+
+---
+
+## Requirements
+
+- **Go 1.21+**
+- **FFmpeg** with HLS demuxer support (most builds include this)
+- **Linux** recommended (for high process/FD limits)
+
+### OS Tuning for High Concurrency
+
+```bash
+# Increase file descriptor limit (required for 100+ clients)
+ulimit -n 8192
+
+# Or permanently via /etc/security/limits.conf
+# your-user soft nofile 8192
+# your-user hard nofile 16384
+```
+
+See [OPERATIONS.md](docs/OPERATIONS.md) for complete tuning guide.
+
+---
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Orchestrator                            │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+│  │ CLI / Config │  │ Ramp Scheduler│  │ Metrics Server       │  │
+│  │   Parser     │  │              │  │ (Prometheus /metrics)│  │
+│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
+│                           │                                     │
+│                           ▼                                     │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │                   Client Manager                          │  │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐       ┌─────────┐   │  │
+│  │  │Client 0 │ │Client 1 │ │Client 2 │  ...  │Client N │   │  │
+│  │  │Supervisor│ │Supervisor│ │Supervisor│     │Supervisor│   │  │
+│  │  └────┬────┘ └────┬────┘ └────┬────┘       └────┬────┘   │  │
+│  └───────┼───────────┼───────────┼─────────────────┼────────┘  │
+└──────────┼───────────┼───────────┼─────────────────┼───────────┘
+           │           │           │                 │
+           ▼           ▼           ▼                 ▼
+       ┌───────┐   ┌───────┐   ┌───────┐         ┌───────┐
+       │FFmpeg │   │FFmpeg │   │FFmpeg │   ...   │FFmpeg │
+       │Process│   │Process│   │Process│         │Process│
+       └───────┘   └───────┘   └───────┘         └───────┘
+```
+
+1. **Orchestrator** parses config and starts the metrics server
+2. **Ramp scheduler** starts clients at the configured rate with jitter
+3. **Each client supervisor** spawns an FFmpeg process:
+   ```bash
+   ffmpeg -hide_banner -nostdin -loglevel info \
+     -reconnect 1 -reconnect_streamed 1 \
+     -user_agent "go-ffmpeg-hls-swarm/1.0" \
+     -i "<HLS_URL>" -map 0 -c copy -f null -
+   ```
+4. **On failure**, clients restart with exponential backoff
+5. **On SIGTERM/SIGINT**, signals propagate to all FFmpeg processes
+
+---
+
+## Why Trust This Design?
+
+This tool is built on careful research, not guesswork:
+
+- **[FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md)** — Deep source code analysis of FFmpeg's HLS implementation
+- **Every CLI flag** maps to documented, tested FFmpeg options
+- **Process supervision** follows proven patterns from production orchestrators
+- **Failure modes** are explicitly documented with mitigations
+
+The design phase lets us get the architecture right before writing code that's hard to change.
+
+---
+
+## Interpreting Your Results
+
+After running a load test, look for these patterns:
+
+| Scenario | What You'll See | What It Means |
+|----------|-----------------|---------------|
+| 🟢 **Healthy** | Active clients ≈ target, low restart rate | Infrastructure handling load well |
+| 🟡 **At Limit** | Active < target (e.g., 150/200), steady restarts | Found the breaking point — this is useful data! |
+| 🔴 **Failing** | All clients restarting rapidly, high error rate | Origin/CDN severely overloaded or misconfigured |
+
+**Key insight**: "Failure" in load testing is often success — you're finding where things break before your users do.
+
+---
+
+## Metrics
+
+Available at `/metrics` (default port 9090):
+
+| Metric | Description |
+|--------|-------------|
+| `hlsswarm_clients_active` | Currently running FFmpeg processes |
+| `hlsswarm_clients_target` | Configured target client count |
+| `hlsswarm_clients_started_total` | Total clients ever started |
+| `hlsswarm_clients_restarted_total` | Total restart events |
+| `hlsswarm_process_exits_total{code}` | Exits by exit code |
+
+---
+
+## Documentation
+
+### Start Here
+
+| Your Goal | Start With | Then Read |
+|-----------|------------|-----------|
+| **"I want to try this tool"** | [Quick Start Guide](docs/QUICKSTART.md) | [Configuration](docs/CONFIGURATION.md) |
+| **"I'm running a load test"** | [Operations Guide](docs/OPERATIONS.md) | [Observability](docs/OBSERVABILITY.md) |
+| **"I want to contribute"** | [Contributing](CONTRIBUTING.md) | [Design](docs/DESIGN.md) |
+| **"I use Nix"** | [Nix Flake Design](docs/NIX_FLAKE_DESIGN.md) | — |
+
+### All Documentation
+
+<details>
+<summary><b>📚 User Documentation</b> — For running load tests</summary>
+
+| Document | Description |
+|----------|-------------|
+| **[Quick Start Guide](docs/QUICKSTART.md)** | 5-minute tutorial to get running |
+| **[Configuration Reference](docs/CONFIGURATION.md)** | All CLI flags with examples |
+| **[Operations Guide](docs/OPERATIONS.md)** | OS tuning, troubleshooting, failure modes |
+| **[Observability](docs/OBSERVABILITY.md)** | Metrics, logging, exit summary |
+
+</details>
+
+<details>
+<summary><b>🔧 Contributor Documentation</b> — For understanding internals</summary>
+
+| Document | Description |
+|----------|-------------|
+| **[Design Document](docs/DESIGN.md)** | Architecture, interfaces, implementation plan |
+| **[Supervision](docs/SUPERVISION.md)** | Process lifecycle, restart policy, signals |
+| **[FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md)** | Deep dive into FFmpeg's HLS implementation |
+| **[Security](docs/SECURITY.md)** | TLS verification, `--dangerous` flag |
+| **[Nix Flake Design](docs/NIX_FLAKE_DESIGN.md)** | Reproducible builds with Nix *(optional)* |
+
+</details>
+
+---
+
+## Project Status
+
+This project is in the **design phase**. We're finalizing the architecture and specifications before implementation.
+
+### Roadmap
+
+- [x] Design documentation
+- [x] FFmpeg HLS research
+- [ ] Core orchestration
+- [ ] FFmpeg process runner
+- [ ] Prometheus metrics
+- [ ] CLI interface
+- [ ] Integration testing
+
+### Contributing
+
+Contributions welcome! This is an early-stage project with lots of opportunity to shape the direction.
+
+- **Design feedback**: Open an issue to discuss architecture decisions
+- **Documentation**: Improvements to clarity always appreciated
+- **Code**: Once implementation begins, see [CONTRIBUTING.md](CONTRIBUTING.md)
+
+---
+
+## License
+
+[MIT](LICENSE)
+
+---
+
+<p align="center">
+  <em>Built for finding where your streaming infrastructure breaks, so you can fix it before your viewers do.</em>
+</p>
