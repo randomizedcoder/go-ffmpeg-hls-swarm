@@ -235,7 +235,7 @@ See [OPERATIONS.md](docs/OPERATIONS.md) for detailed discussion of limitations a
 
 ## Requirements
 
-- **Go 1.21+**
+- **Go 1.25+**
 - **FFmpeg** with HLS demuxer support (most builds include this)
 - **Linux** recommended (for high process/FD limits)
 

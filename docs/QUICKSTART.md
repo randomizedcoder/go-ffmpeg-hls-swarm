@@ -26,7 +26,7 @@ Before starting, ensure you have:
 
 | Requirement | How to Check | Install |
 |-------------|--------------|---------|
-| Go 1.21+ | `go version` | [golang.org/dl](https://golang.org/dl/) |
+| Go 1.25+ | `go version` | [golang.org/dl](https://golang.org/dl/) |
 | FFmpeg | `ffmpeg -version` | `apt install ffmpeg` / `brew install ffmpeg` |
 
 ### Verify FFmpeg HLS Support

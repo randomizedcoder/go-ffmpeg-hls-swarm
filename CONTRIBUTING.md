@@ -57,7 +57,7 @@ When code exists, you'll be able to:
 
 ### Prerequisites
 
-- Go 1.21 or later
+- Go 1.25 or later
 - FFmpeg (for integration testing)
 - Git
 
