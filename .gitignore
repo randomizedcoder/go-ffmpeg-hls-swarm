@@ -1,0 +1,33 @@
+# Nix
+result
+result-*
+.direnv/
+
+# Go
+.go/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Binary (at repo root only)
+/go-ffmpeg-hls-swarm
+
+# IDE
+.vscode/
+.cursor/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+coverage.out
+coverage.html
