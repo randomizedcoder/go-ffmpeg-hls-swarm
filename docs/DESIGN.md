@@ -72,6 +72,7 @@ A **prototype** load testing tool that generates 50–200+ concurrent HLS live s
 - Single stream URL per run (all clients target same endpoint)
 - Runs on Linux with tunable process/FD limits
 - FFmpeg auto-selects rendition (typically highest quality)
+- **Memory efficient at scale**: Linux shares FFmpeg code across processes (~72% memory savings vs naive expectation—see [MEMORY.md](MEMORY.md))
 
 ---
 
@@ -156,7 +157,8 @@ go-ffmpeg-hls-swarm/
 │   ├── OPERATIONS.md
 │   ├── SECURITY.md
 │   ├── FFMPEG_HLS_REFERENCE.md
-│   └── NIX_FLAKE_DESIGN.md
+│   ├── NIX_FLAKE_DESIGN.md
+│   └── MEMORY.md
 ├── README.md
 ├── CONTRIBUTING.md
 ├── go.mod
