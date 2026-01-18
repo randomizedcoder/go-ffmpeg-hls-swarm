@@ -370,6 +370,7 @@ Available at `/metrics` (default port 9090):
 | **[Supervision](docs/SUPERVISION.md)** | Process lifecycle, restart policy, signals |
 | **[FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md)** | Deep dive into FFmpeg's HLS implementation |
 | **[Security](docs/SECURITY.md)** | TLS verification, `--dangerous` flag |
+| **[Memory Efficiency](docs/MEMORY.md)** | How Linux shares FFmpeg code across processes |
 | **[Nix Flake Design](docs/NIX_FLAKE_DESIGN.md)** | Reproducible builds with Nix *(optional)* |
 
 </details>
