@@ -24,7 +24,8 @@ GOFLAGS     ?=
 LDFLAGS     ?= -s -w
 
 # Streaming settings
-STREAM_URL  ?= http://localhost:8080/stream.m3u8
+ORIGIN_PORT ?= 8080
+STREAM_URL  ?= http://localhost:$(ORIGIN_PORT)/stream.m3u8
 
 # Nix settings
 NIX         := nix
@@ -195,17 +196,17 @@ check-nix-full: ## Run full Nix flake check (builds everything)
 # Test Origin Server
 # ============================================================================
 
-test-origin: ## Run test HLS origin server (default profile)
-	$(NIX_RUN) .#test-origin
+test-origin: ## Run test HLS origin server (default profile, PORT=$(ORIGIN_PORT))
+	PORT=$(ORIGIN_PORT) $(NIX_RUN) .#test-origin
 
 test-origin-low-latency: ## Run test origin with low-latency profile
-	$(NIX_RUN) .#test-origin-low-latency
+	PORT=$(ORIGIN_PORT) $(NIX_RUN) .#test-origin-low-latency
 
 test-origin-4k-abr: ## Run test origin with 4K ABR profile
-	$(NIX_RUN) .#test-origin-4k-abr
+	PORT=$(ORIGIN_PORT) $(NIX_RUN) .#test-origin-4k-abr
 
 test-origin-stress: ## Run test origin with stress-test profile
-	$(NIX_RUN) .#test-origin-stress
+	PORT=$(ORIGIN_PORT) $(NIX_RUN) .#test-origin-stress
 
 # ============================================================================
 # Swarm Client targets

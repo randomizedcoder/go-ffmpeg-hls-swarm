@@ -122,8 +122,9 @@ pkgs.writeShellApplication {
     fi
 
     # Generate nginx config with optimized caching
+    # Note: Using unquoted heredoc to allow shell variable expansion ($PORT, $HLS_DIR)
     NGINX_CONF=$(mktemp --suffix=.conf)
-    cat > "$NGINX_CONF" << 'NGINX_EOF'
+    cat > "$NGINX_CONF" << NGINX_EOF
     worker_processes 1;
     error_log /dev/stderr warn;
     pid /tmp/nginx-hls-$$.pid;
@@ -151,14 +152,14 @@ pkgs.writeShellApplication {
             }
 
             # Variant playlists - immediate delivery
-            location ~ \.m3u8$ {
+            location ~ \.m3u8\$ {
                 tcp_nodelay    on;
                 add_header Cache-Control "${nginx.manifestCacheControl}";
                 add_header Access-Control-Allow-Origin "*";
             }
 
             # Segments - throughput optimized
-            location ~ \.ts$ {
+            location ~ \.ts\$ {
                 sendfile       on;
                 tcp_nopush     on;
                 add_header Cache-Control "${nginx.segmentCacheControl}";
@@ -170,7 +171,7 @@ pkgs.writeShellApplication {
             location /nginx_status { stub_status on; }
         }
     }
-    NGINX_EOF
+NGINX_EOF
 
     echo "▶ Starting Nginx on port $PORT..."
     nginx -c "$NGINX_CONF" -g "daemon off;" &

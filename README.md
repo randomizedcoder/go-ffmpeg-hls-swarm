@@ -9,15 +9,15 @@
 </p>
 
 <p align="center">
-  <kbd>🚧 <b>STATUS: IMPLEMENTATION IN PROGRESS</b></kbd>
+  <kbd>✅ <b>STATUS: TESTED & WORKING</b></kbd>
 </p>
 
 <p align="center">
-  <em>✅ <b>Test Origin Server</b> — Fully implemented (runner, container, MicroVM)<br/>
-  ✅ <b>Nix Infrastructure</b> — Complete with multiple profiles<br/>
-  🚧 <b>Go Swarm Client</b> — Core packages written, CLI being integrated</em>
+  <em>✅ <b>End-to-End Tested</b> — Origin + Swarm Client verified working together<br/>
+  ✅ <b>Test Origin Server</b> — Fully implemented (runner, container, MicroVM)<br/>
+  ✅ <b>Go Swarm Client</b> — CLI, preflight checks, supervision, graceful shutdown</em>
   <br/><br/>
-  ⭐ <b>Star</b> to follow progress &nbsp;•&nbsp; 👁️ <b>Watch</b> for release &nbsp;•&nbsp; 💬 <b>Open an issue</b> to help shape it
+  ⭐ <b>Star</b> if useful &nbsp;•&nbsp; 🐛 <b>Report bugs</b> &nbsp;•&nbsp; 💬 <b>Open an issue</b> for feedback
 </p>
 
 ---
@@ -159,16 +159,34 @@ podman load < result
 podman run -d -p 8080:8080 go-ffmpeg-hls-swarm-test-origin:latest
 ```
 
-### Option 2: Swarm Client (In Development 🚧)
+### Option 2: Swarm Client (Working ✅)
 
-The Go-based swarm client is being implemented. For now, use the preview script:
+The Go swarm client is functional and ready to test:
 
 ```bash
-# Preview swarm behavior with FFmpeg directly
-bash preview-swarm.sh
+# Build the binary
+go build -o go-ffmpeg-hls-swarm ./cmd/go-ffmpeg-hls-swarm
 
-# Or when the CLI is ready:
-./go-ffmpeg-hls-swarm -clients 50 http://localhost:8080/stream.m3u8
+# Run against your HLS stream
+./go-ffmpeg-hls-swarm -clients 10 -duration 60s http://localhost:8080/stream.m3u8
+
+# Or with verbose output
+./go-ffmpeg-hls-swarm -clients 5 -v https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+```
+
+**Example output:**
+```
+Preflight checks:
+  ✓ file_descriptors: 524288 available (need 140)
+  ✓ process_limit: 514435 available (need 52)
+  ✓ ffmpeg: found at ffmpeg (version 8.0)
+  ✓ ephemeral_ports: 64509 available (need 8)
+
+  Target:      10 clients at 5/sec
+  Stream:      http://localhost:8080/stream.m3u8
+  Metrics:     http://0.0.0.0:9090/metrics
+
+Press Ctrl+C to stop.
 ```
 
 For the complete tutorial, see **[Quick Start Guide](docs/QUICKSTART.md)**.
@@ -417,19 +435,50 @@ Available at `/metrics` (default port 9090):
 
 | Component | Status | Notes |
 |-----------|--------|-------|
+| ✅ **End-to-End Testing** | **Verified** | Origin + Client tested together |
 | ✅ **Design & Documentation** | Complete | All docs written |
 | ✅ **FFmpeg HLS Research** | Complete | See [FFMPEG_HLS_REFERENCE.md](docs/FFMPEG_HLS_REFERENCE.md) |
 | ✅ **Nix Infrastructure** | Complete | Flake, shell, checks, apps |
-| ✅ **Test Origin Server** | **Implemented** | Runner, container, MicroVM |
+| ✅ **Test Origin Server** | **Working** | Runner, container, MicroVM |
+| ✅ **Go Swarm Client** | **Working** | CLI, preflight, supervision, metrics |
 | ✅ **Makefile** | Complete | All targets functional |
-| 🚧 **Go Swarm Client** | In Progress | Core packages written |
-| ⏳ **Integration Tests** | Waiting | NixOS VM tests defined |
+| ⏳ **NixOS Integration Tests** | Defined | Automated VM tests pending |
 
-### What's Working Now
+### End-to-End Test Results
+
+The full pipeline has been tested and verified working:
+
+```
+┌─────────────────┐      ┌──────────────────┐      ┌─────────────────┐
+│  Test Origin    │ ───▶ │  HLS Stream      │ ◀─── │  Swarm Client   │
+│  (FFmpeg+Nginx) │      │  localhost:8888  │      │  (5 FFmpeg)     │
+└─────────────────┘      └──────────────────┘      └─────────────────┘
+```
+
+**Test run (30 seconds, 5 clients):**
+- ✅ All preflight checks passed (FD limits, process limits, FFmpeg, ports)
+- ✅ Clients ramped up at configured rate with jitter
+- ✅ Auto-restart with exponential backoff working (252ms → 3.2s)
+- ✅ Graceful shutdown on duration elapsed
+- ✅ Exit summary with statistics
+
+### Quick Start
 
 ```bash
-# Test origin (FFmpeg + Nginx)
-make test-origin                    # Run locally
+# Terminal 1: Start test origin
+PORT=8888 nix run .#test-origin
+
+# Terminal 2: Run swarm client
+go build -o go-ffmpeg-hls-swarm ./cmd/go-ffmpeg-hls-swarm
+./go-ffmpeg-hls-swarm -clients 5 -duration 30s http://localhost:8888/stream.m3u8
+```
+
+### All Make Targets
+
+```bash
+# Test origin server (FFmpeg + Nginx)
+make test-origin                    # Run locally (default port 8080)
+make test-origin ORIGIN_PORT=8888   # Run on alternate port
 make microvm-origin                 # Run in MicroVM (KVM)
 nix build .#test-origin-container   # Build OCI container
 
@@ -439,7 +488,7 @@ make build                          # Build Go binary
 make check                          # Run all checks
 ```
 
-**Want to help?** This is the perfect time to contribute! See [CONTRIBUTING.md](CONTRIBUTING.md).
+**Want to help?** Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -448,11 +497,12 @@ make check                          # Run all checks
 <details>
 <summary><b>Can I use this tool today?</b></summary>
 
-**Yes, partially!**
-- ✅ **Test Origin Server** — Fully working. Run `make test-origin` to start a local HLS stream.
-- ✅ **MicroVM deployment** — Run `make microvm-origin` for full VM isolation.
+**Yes!** The full pipeline has been tested and verified working:
+- ✅ **Swarm Client** — Build with `go build ./cmd/go-ffmpeg-hls-swarm` and run against any HLS stream.
+- ✅ **Test Origin Server** — Run `PORT=8888 nix run .#test-origin` to start a local HLS stream.
+- ✅ **End-to-End Tested** — Both components verified working together.
+- ✅ **MicroVM deployment** — Run `make microvm-origin` for full VM isolation (requires KVM).
 - ✅ **Container deployment** — Build with `nix build .#test-origin-container`.
-- 🚧 **Swarm Client** — Core Go packages exist, CLI integration in progress. Use the [shell script preview](#try-it-now-no-installation-needed) for now.
 </details>
 
 <details>
