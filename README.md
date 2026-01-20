@@ -344,6 +344,7 @@ Available at `/metrics` (default port 9090):
 |-----------|------------|-----------|
 | **"I want to try this tool"** | [Quick Start Guide](docs/QUICKSTART.md) | [Configuration](docs/CONFIGURATION.md) |
 | **"I'm running a load test"** | [Operations Guide](docs/OPERATIONS.md) | [Observability](docs/OBSERVABILITY.md) |
+| **"I want containers/VMs"** | [Client Deployment](docs/CLIENT_DEPLOYMENT.md) | [Test Origin](docs/TEST_ORIGIN.md) |
 | **"I want to contribute"** | [Contributing](CONTRIBUTING.md) | [Design](docs/DESIGN.md) |
 | **"I use Nix"** | [Nix Flake Design](docs/NIX_FLAKE_DESIGN.md) | — |
 
@@ -371,7 +372,11 @@ Available at `/metrics` (default port 9090):
 | **[FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md)** | Deep dive into FFmpeg's HLS implementation |
 | **[Security](docs/SECURITY.md)** | TLS verification, `--dangerous` flag |
 | **[Memory Efficiency](docs/MEMORY.md)** | How Linux shares FFmpeg code across processes |
+| **[Test Origin Server](docs/TEST_ORIGIN.md)** | Self-contained HLS origin for testing |
+| **[Client Deployment](docs/CLIENT_DEPLOYMENT.md)** | Deploy swarm client in containers/VMs |
+| **[Makefile Guide](docs/MAKEFILE.md)** | Build system targets and usage |
 | **[Nix Flake Design](docs/NIX_FLAKE_DESIGN.md)** | Reproducible builds with Nix *(optional)* |
+| **[Nginx Reference](docs/NIX_NGINX_REFERENCE.md)** | Nginx configuration in Nix |
 
 </details>
 

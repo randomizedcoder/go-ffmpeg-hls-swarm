@@ -93,7 +93,7 @@ pkgs.testers.nixosTest {
       { config, pkgs, ... }:
       {
         environment.systemPackages = [
-          self.packages.${pkgs.system}.default
+          self.packages.${pkgs.stdenv.hostPlatform.system}.default
           pkgs.ffmpeg
           pkgs.curl
         ];

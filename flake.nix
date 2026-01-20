@@ -16,13 +16,30 @@
 #   # ^ Then: ./result/bin/nixos-test-driver --interactive
 #
 # File Structure:
-#   flake.nix       - Entry point (this file)
-#   nix/lib.nix     - Shared metadata and helpers
-#   nix/package.nix - buildGoModule derivation
-#   nix/shell.nix   - Development shell
-#   nix/checks.nix  - Go linting/testing checks
-#   nix/apps.nix    - Runnable app definitions
-#   nix/tests/      - NixOS integration tests
+#   flake.nix           - Entry point (this file)
+#   nix/lib.nix         - Shared metadata and helpers
+#   nix/package.nix     - buildGoModule derivation
+#   nix/shell.nix       - Development shell
+#   nix/checks.nix      - Go linting/testing checks
+#   nix/apps.nix        - Runnable app definitions
+#   nix/tests/          - NixOS integration tests
+#   nix/test-origin/    - Test HLS origin server components
+#   nix/swarm-client/   - Client deployment (container, MicroVM)
+#
+# Test Origin Server:
+#   nix run .#test-origin                 # Run local test origin (default profile)
+#   nix run .#test-origin-low-latency     # Run with low-latency profile
+#   nix run .#test-origin-4k-abr          # Run with 4K ABR profile
+#   nix build .#test-origin-container     # Build OCI container
+#
+# Swarm Client (Load Tester):
+#   nix run .#swarm-client                # Run with default profile (50 clients)
+#   nix run .#swarm-client-stress         # Run with stress profile (200 clients)
+#   nix build .#swarm-client-container    # Build OCI container
+#
+# Available profiles:
+#   test-origin: default, low-latency, 4k-abr, stress-test
+#   swarm-client: default, stress, gentle, burst, extreme
 #
 {
   description = "HLS load testing tool using FFmpeg process swarm";
@@ -75,7 +92,7 @@
           inherit pkgs lib meta;
         };
 
-        apps = import ./nix/apps.nix {
+        appsBase = import ./nix/apps.nix {
           inherit pkgs lib meta package;
           welcome-app = shell.welcome-app;
         };
@@ -84,6 +101,19 @@
           inherit pkgs lib meta src package;
         };
 
+        # Test origin server components (with profile support)
+        testOrigin = import ./nix/test-origin { inherit pkgs lib; };
+        testOriginLowLatency = import ./nix/test-origin { inherit pkgs lib; profile = "low-latency"; };
+        testOrigin4kAbr = import ./nix/test-origin { inherit pkgs lib; profile = "4k-abr"; };
+        testOriginStress = import ./nix/test-origin { inherit pkgs lib; profile = "stress-test"; };
+
+        # Swarm client components (with profile support)
+        swarmClient = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; };
+        swarmClientStress = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; profile = "stress"; };
+        swarmClientGentle = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; profile = "gentle"; };
+        swarmClientBurst = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; profile = "burst"; };
+        swarmClientExtreme = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; profile = "extreme"; };
+
       in
       {
         formatter = pkgs.nixfmt;
@@ -91,13 +121,72 @@
         packages = {
           ${meta.pname} = package;
           default = package;
+
+          # Test origin server packages (default profile)
+          test-origin = testOrigin.runner;
+          test-origin-container = testOrigin.container;
+
+          # Profile-specific test origins
+          test-origin-low-latency = testOriginLowLatency.runner;
+          test-origin-4k-abr = testOrigin4kAbr.runner;
+          test-origin-stress = testOriginStress.runner;
+
+          # Swarm client packages (default profile)
+          swarm-client = swarmClient.runner;
+          swarm-client-container = swarmClient.container;
+
+          # Profile-specific swarm clients
+          swarm-client-stress = swarmClientStress.runner;
+          swarm-client-gentle = swarmClientGentle.runner;
+          swarm-client-burst = swarmClientBurst.runner;
+          swarm-client-extreme = swarmClientExtreme.runner;
         };
 
         devShells = {
           inherit (shell) default;
         };
 
-        inherit apps;
+        apps = appsBase // {
+          # Test origin server apps (different profiles)
+          test-origin = {
+            type = "app";
+            program = "${testOrigin.runner}/bin/test-hls-origin";
+          };
+          test-origin-low-latency = {
+            type = "app";
+            program = "${testOriginLowLatency.runner}/bin/test-hls-origin";
+          };
+          test-origin-4k-abr = {
+            type = "app";
+            program = "${testOrigin4kAbr.runner}/bin/test-hls-origin";
+          };
+          test-origin-stress = {
+            type = "app";
+            program = "${testOriginStress.runner}/bin/test-hls-origin";
+          };
+
+          # Swarm client apps (different profiles)
+          swarm-client = {
+            type = "app";
+            program = "${swarmClient.runner}/bin/swarm-client";
+          };
+          swarm-client-stress = {
+            type = "app";
+            program = "${swarmClientStress.runner}/bin/swarm-client";
+          };
+          swarm-client-gentle = {
+            type = "app";
+            program = "${swarmClientGentle.runner}/bin/swarm-client";
+          };
+          swarm-client-burst = {
+            type = "app";
+            program = "${swarmClientBurst.runner}/bin/swarm-client";
+          };
+          swarm-client-extreme = {
+            type = "app";
+            program = "${swarmClientExtreme.runner}/bin/swarm-client";
+          };
+        };
 
         checks =
           goChecks

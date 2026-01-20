@@ -158,9 +158,14 @@ go-ffmpeg-hls-swarm/
 │   ├── SECURITY.md
 │   ├── FFMPEG_HLS_REFERENCE.md
 │   ├── NIX_FLAKE_DESIGN.md
-│   └── MEMORY.md
+│   ├── NIX_NGINX_REFERENCE.md        # Nginx configuration in Nix
+│   ├── MEMORY.md
+│   ├── TEST_ORIGIN.md                # Test HLS origin server
+│   ├── CLIENT_DEPLOYMENT.md          # Client OCI/MicroVM deployment
+│   └── MAKEFILE.md                   # Build system documentation
 ├── README.md
 ├── CONTRIBUTING.md
+├── Makefile                          # Build system (see docs/MAKEFILE.md)
 ├── go.mod
 └── go.sum
 ```
@@ -384,6 +389,27 @@ See [CONFIGURATION.md](CONFIGURATION.md#6-generated-ffmpeg-commands) for complet
 ---
 
 ## 8. Testing Strategy
+
+### Test HLS Origin Server
+
+For reproducible testing, we provide a self-contained HLS origin server using FFmpeg test patterns and Nginx. See [TEST_ORIGIN.md](TEST_ORIGIN.md) for full design.
+
+**Nginx Configuration Reference**: The test origin uses NixOS's Nginx module. For comprehensive coverage of available options (HTTP/3, performance tuning, modules), see [NIX_NGINX_REFERENCE.md](NIX_NGINX_REFERENCE.md).
+
+### Client Deployment
+
+The `go-ffmpeg-hls-swarm` client can also be packaged into OCI containers and MicroVMs for distributed testing. See [CLIENT_DEPLOYMENT.md](CLIENT_DEPLOYMENT.md) for:
+- Container and MicroVM configurations
+- Client-side sysctl tuning (mirrors origin server)
+- Resource sizing (memory, FDs, ports)
+- Kubernetes deployment examples
+
+```bash
+# Quick start (with Nix)
+nix run .#test-origin
+
+# Stream URL: http://localhost:8080/stream.m3u8
+```
 
 ### Unit Tests
 
