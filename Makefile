@@ -59,6 +59,7 @@ RESET := \033[0m
 .PHONY: container container-load container-run
 .PHONY: swarm-client swarm-client-stress swarm-client-gentle swarm-client-burst swarm-client-extreme
 .PHONY: swarm-container swarm-container-load swarm-container-run
+.PHONY: microvm-check-kvm microvm-origin microvm-origin-build microvm-origin-stop
 .PHONY: git-add
 
 # ============================================================================
@@ -86,8 +87,12 @@ help: ## Show this help message
 	@echo "$(GREEN)Containers:$(RESET)"
 	@grep -E '^container[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
+	@echo "$(GREEN)MicroVMs (requires KVM):$(RESET)"
+	@grep -E '^microvm-[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@echo ""
 	@echo "$(YELLOW)Note:$(RESET) Most commands require Nix with flakes enabled."
 	@echo "      Run 'make dev' to enter the development shell first."
+	@echo "      MicroVM targets require KVM (run 'make microvm-check-kvm' to verify)."
 
 # ============================================================================
 # Build targets
@@ -251,6 +256,52 @@ container-run: container-load ## Build, load, and run test origin container
 	docker run --rm -p 8080:80 test-hls-origin:latest
 
 # ============================================================================
+# MicroVM targets (requires KVM)
+# ============================================================================
+
+microvm-check-kvm: ## Check if KVM is available for MicroVMs
+	@echo "$(CYAN)Checking KVM availability...$(RESET)"
+	@if [ -e /dev/kvm ]; then \
+		echo "$(GREEN)✓ /dev/kvm exists$(RESET)"; \
+		ls -la /dev/kvm; \
+	else \
+		echo "$(YELLOW)✗ /dev/kvm not found$(RESET)"; \
+		echo "  Enable KVM: sudo modprobe kvm_intel (or kvm_amd)"; \
+		exit 1; \
+	fi
+	@if grep -qE 'vmx|svm' /proc/cpuinfo 2>/dev/null; then \
+		echo "$(GREEN)✓ CPU virtualization supported$(RESET)"; \
+	else \
+		echo "$(YELLOW)⚠ CPU virtualization flags not found$(RESET)"; \
+	fi
+	@echo ""
+	@echo "$(GREEN)KVM is ready for MicroVMs$(RESET)"
+
+microvm-origin-build: ## Build the test origin MicroVM
+	@echo "$(CYAN)Building test origin MicroVM...$(RESET)"
+	@echo "This may take a while on first build (downloads NixOS components)"
+	$(NIX_BUILD) .#test-origin-vm
+	@echo "$(GREEN)MicroVM built successfully$(RESET)"
+
+microvm-origin: microvm-check-kvm ## Run test origin as MicroVM (requires KVM)
+	@echo "$(CYAN)Starting test origin MicroVM...$(RESET)"
+	@echo ""
+	@echo "$(GREEN)Stream URL:$(RESET) http://localhost:8080/stream.m3u8"
+	@echo "$(GREEN)Health:$(RESET)     http://localhost:8080/health"
+	@echo ""
+	@echo "Press Ctrl+C to stop the VM"
+	@echo ""
+	$(NIX_RUN) .#test-origin-vm
+
+microvm-origin-low-latency: microvm-check-kvm ## Run low-latency test origin as MicroVM
+	@echo "$(CYAN)Starting low-latency test origin MicroVM...$(RESET)"
+	$(NIX_RUN) .#test-origin-vm-low-latency
+
+microvm-origin-stress: microvm-check-kvm ## Run stress-test origin as MicroVM
+	@echo "$(CYAN)Starting stress-test origin MicroVM...$(RESET)"
+	$(NIX_RUN) .#test-origin-vm-stress
+
+# ============================================================================
 # Git helpers
 # ============================================================================
 
@@ -304,6 +355,11 @@ info: ## Show project info and available profiles
 	@echo "  gentle         20 clients, 1/sec ramp"
 	@echo "  burst          100 clients, 50/sec ramp (thundering herd)"
 	@echo "  extreme        500 clients, 50/sec ramp"
+	@echo ""
+	@echo "$(GREEN)Deployment Options:$(RESET)"
+	@echo "  Runner script  Local dev (make test-origin)"
+	@echo "  OCI Container  Docker/Podman (make container)"
+	@echo "  MicroVM        KVM isolation (make microvm-origin)"
 	@echo ""
 	@echo "$(GREEN)Documentation:$(RESET)"
 	@echo "  docs/TEST_ORIGIN.md       Test HLS origin server"

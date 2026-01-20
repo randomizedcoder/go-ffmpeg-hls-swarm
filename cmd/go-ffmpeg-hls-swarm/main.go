@@ -5,53 +5,133 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/config"
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/logging"
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/orchestrator"
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/process"
 )
 
-// version is set at build time via ldflags
+// version is set at build time via ldflags:
+//
+//	go build -ldflags "-X main.version=1.0.0" ./cmd/go-ffmpeg-hls-swarm
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "-v" || os.Args[1] == "--version" || os.Args[1] == "version") {
-		fmt.Printf("go-ffmpeg-hls-swarm %s\n", version)
-		return
+	os.Exit(run())
+}
+
+func run() int {
+	// Handle version flag early (before flag parsing)
+	if len(os.Args) > 1 {
+		arg := os.Args[1]
+		if arg == "-version" || arg == "--version" || arg == "version" {
+			fmt.Printf("go-ffmpeg-hls-swarm %s\n", version)
+			return 0
+		}
 	}
 
-	fmt.Print(`
-╔═══════════════════════════════════════════════════════════════════╗
-║                     go-ffmpeg-hls-swarm                           ║
-║     HLS Load Testing with FFmpeg Process Orchestration            ║
-╚═══════════════════════════════════════════════════════════════════╝
+	// Parse command-line flags
+	cfg, err := config.ParseFlags()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		return 1
+	}
 
-🚧 Implementation in progress!
+	// Initialize logger
+	logger := logging.NewLogger(cfg.LogFormat, "info", cfg.Verbose)
+	logging.SetDefault(logger)
 
-This tool will orchestrate 50-200+ concurrent FFmpeg processes to
-stress-test your HLS infrastructure.
+	// Validate configuration
+	if err := config.Validate(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Configuration error: %v\n", err)
+		return 1
+	}
 
-┌─────────────────────────────────────────────────────────────────────┐
-│ What's Coming:                                                      │
-│                                                                     │
-│   • Controlled ramp-up to avoid thundering herd                    │
-│   • Process supervision with exponential backoff                   │
-│   • Prometheus metrics at /metrics                                 │
-│   • Graceful shutdown with signal propagation                      │
-│   • DNS override for testing specific servers                      │
-│   • Cache bypass for origin stress testing                         │
-└─────────────────────────────────────────────────────────────────────┘
+	// Apply --check mode modifications
+	if cfg.Check {
+		config.ApplyCheckMode(cfg)
+		logger.Info("check_mode_enabled", "clients", cfg.Clients, "duration", cfg.Duration)
+	}
 
-📖 Documentation:
-   • README.md           - Overview and quick start
-   • docs/QUICKSTART.md  - 5-minute tutorial
-   • docs/DESIGN.md      - Architecture for contributors
+	// Handle --print-cmd mode
+	if cfg.PrintCmd {
+		printFFmpegCommand(cfg)
+		return 0
+	}
 
-🔧 Try the core concept now (with just FFmpeg):
+	// Log startup
+	logger.Info("starting",
+		"version", version,
+		"clients", cfg.Clients,
+		"ramp_rate", cfg.RampRate,
+		"stream_url", cfg.StreamURL,
+		"variant", cfg.Variant,
+		"metrics_addr", cfg.MetricsAddr,
+	)
 
-   ffmpeg -hide_banner -loglevel info \
-     -reconnect 1 -reconnect_streamed 1 \
-     -i "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" \
-     -map 0 -c copy -f null -
+	// Print startup banner
+	printBanner(cfg)
 
-💬 Want to contribute? See CONTRIBUTING.md
-`)
+	// Create and run orchestrator
+	orch := orchestrator.New(cfg, logger)
+	if err := orch.Run(context.Background()); err != nil {
+		logger.Error("orchestrator_failed", "error", err)
+		return 1
+	}
+
+	return 0
+}
+
+// printBanner prints the startup banner.
+func printBanner(cfg *config.Config) {
+	fmt.Println()
+	fmt.Println("╔═══════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                     go-ffmpeg-hls-swarm                           ║")
+	fmt.Println("║     HLS Load Testing with FFmpeg Process Orchestration            ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+	fmt.Printf("  Target:      %d clients at %d/sec\n", cfg.Clients, cfg.RampRate)
+	fmt.Printf("  Stream:      %s\n", cfg.StreamURL)
+	fmt.Printf("  Variant:     %s\n", cfg.Variant)
+	fmt.Printf("  Metrics:     http://%s/metrics\n", cfg.MetricsAddr)
+	if cfg.NoCache {
+		fmt.Println("  Cache:       BYPASS (no-cache headers)")
+	}
+	if cfg.ResolveIP != "" {
+		fmt.Printf("  Resolve:     %s (⚠️  TLS verification disabled)\n", cfg.ResolveIP)
+	}
+	fmt.Println()
+	fmt.Println("Press Ctrl+C to stop.")
+	fmt.Println()
+}
+
+// printFFmpegCommand prints the FFmpeg command that would be generated.
+func printFFmpegCommand(cfg *config.Config) {
+	// Create a runner to generate the command
+	ffmpegConfig := &process.FFmpegConfig{
+		BinaryPath:        cfg.FFmpegPath,
+		StreamURL:         cfg.StreamURL,
+		Variant:           process.VariantSelection(cfg.Variant),
+		UserAgent:         cfg.UserAgent,
+		Timeout:           cfg.Timeout,
+		Reconnect:         cfg.Reconnect,
+		ReconnectDelayMax: cfg.ReconnectDelayMax,
+		SegMaxRetry:       cfg.SegMaxRetry,
+		LogLevel:          cfg.LogLevel,
+		ResolveIP:         cfg.ResolveIP,
+		DangerousMode:     cfg.DangerousMode,
+		NoCache:           cfg.NoCache,
+		Headers:           cfg.Headers,
+		ProgramID:         -1,
+	}
+
+	runner := process.NewFFmpegRunner(ffmpegConfig)
+
+	fmt.Println("# FFmpeg command that would be run for each client:")
+	fmt.Println()
+	fmt.Println(runner.CommandString())
 }

@@ -65,7 +65,16 @@ pkgs.writeShellApplication {
     echo ""
 
     mkdir -p "$HLS_DIR"
-    trap 'echo "Shutting down..."; kill $(jobs -p) 2>/dev/null; rm -rf "$HLS_DIR"' EXIT INT TERM
+
+    # Track child PIDs for cleanup
+    CHILD_PIDS=""
+    cleanup() {
+      echo "Shutting down..."
+      # shellcheck disable=SC2086 # Word splitting is intentional
+      [ -n "$CHILD_PIDS" ] && kill $CHILD_PIDS 2>/dev/null || true
+      rm -rf "$HLS_DIR"
+    }
+    trap cleanup EXIT INT TERM
 
     # Start FFmpeg HLS generator
     echo "▶ Starting FFmpeg HLS generator..."
@@ -86,16 +95,17 @@ pkgs.writeShellApplication {
       -hls_flags ${hlsFlags} \
       -hls_segment_filename "$HLS_DIR/${h.segmentPattern}" \
       "$HLS_DIR/${h.playlistName}" 2>&1 | grep -v "^frame=" &
-
-    FFMPEG_PID=$!
+    CHILD_PIDS="$CHILD_PIDS $!"
 
     # Wait for HLS stream
     echo "⏳ Waiting for HLS stream..."
-    for i in $(seq 1 30); do
+    attempt=0
+    while [ $attempt -lt 30 ]; do
       if [ -f "$HLS_DIR/${h.playlistName}" ]; then
         echo "✓ HLS stream ready"
         break
       fi
+      attempt=$((attempt + 1))
       sleep 1
     done
 
@@ -164,6 +174,7 @@ pkgs.writeShellApplication {
 
     echo "▶ Starting Nginx on port $PORT..."
     nginx -c "$NGINX_CONF" -g "daemon off;" &
+    CHILD_PIDS="$CHILD_PIDS $!"
 
     echo ""
     echo "╔════════════════════════════════════════════════════════════════════════╗"

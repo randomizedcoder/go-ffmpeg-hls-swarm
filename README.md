@@ -9,14 +9,15 @@
 </p>
 
 <p align="center">
-  <kbd>📐 <b>STATUS: DESIGN COMPLETE</b> — Implementation starting soon!</kbd>
+  <kbd>🚧 <b>STATUS: IMPLEMENTATION IN PROGRESS</b></kbd>
 </p>
 
 <p align="center">
-  <em>We've done the hard work: FFmpeg source code analysis, architecture design, and specification.<br/>
-  The CLI and behavior below are <b>stable design targets</b> — what you see is what you'll get.</em>
+  <em>✅ <b>Test Origin Server</b> — Fully implemented (runner, container, MicroVM)<br/>
+  ✅ <b>Nix Infrastructure</b> — Complete with multiple profiles<br/>
+  🚧 <b>Go Swarm Client</b> — Core packages written, CLI being integrated</em>
   <br/><br/>
-  ⭐ <b>Star</b> to show interest &nbsp;•&nbsp; 👁️ <b>Watch</b> for release notifications &nbsp;•&nbsp; 💬 <b>Open an issue</b> to shape the direction
+  ⭐ <b>Star</b> to follow progress &nbsp;•&nbsp; 👁️ <b>Watch</b> for release &nbsp;•&nbsp; 💬 <b>Open an issue</b> to help shape it
 </p>
 
 ---
@@ -73,59 +74,104 @@ Most load testing tools (k6, Locust, Gatling) generate HTTP requests but **don't
 
 ---
 
-## Try the Core Concept Now
+## Try It Now (No Installation Needed)
 
-**Don't wait for go-ffmpeg-hls-swarm** — see what it will automate by running FFmpeg directly:
+**Can't wait for go-ffmpeg-hls-swarm?** Try the core concept immediately with just FFmpeg:
+
+### Single Client Test
 
 ```bash
 # This single FFmpeg command simulates one HLS viewer
-# go-ffmpeg-hls-swarm will orchestrate hundreds of these
-
 ffmpeg -hide_banner -loglevel info \
   -reconnect 1 -reconnect_streamed 1 \
   -i "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" \
   -map 0 -c copy -f null -
 ```
 
-Watch FFmpeg fetch the master playlist, select variants, and download segments. This is exactly what each go-ffmpeg-hls-swarm client does — we just manage 50–200+ of them with supervision, metrics, and graceful shutdown.
+Watch FFmpeg fetch the master playlist, select variants, and download segments. Press `Ctrl+C` to stop.
 
-Press `Ctrl+C` to stop.
+### Multi-Client Preview (Shell Script)
+
+Want to see what go-ffmpeg-hls-swarm will automate? Run this shell script to spawn 5 concurrent FFmpeg clients:
+
+```bash
+#!/bin/bash
+# preview-swarm.sh — Preview what go-ffmpeg-hls-swarm will do
+URL="https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+CLIENTS=5
+
+trap 'kill $(jobs -p) 2>/dev/null; echo "Stopped $CLIENTS clients"' EXIT
+
+echo "Starting $CLIENTS FFmpeg clients..."
+for i in $(seq 1 $CLIENTS); do
+  ffmpeg -hide_banner -loglevel warning \
+    -reconnect 1 -reconnect_streamed 1 \
+    -i "$URL" -map 0 -c copy -f null - &
+  echo "  Started client $i (PID: $!)"
+  sleep 0.2  # Slight ramp-up
+done
+
+echo -e "\n$CLIENTS clients running. Press Ctrl+C to stop."
+echo "Monitor with: ps aux | grep ffmpeg"
+wait
+```
+
+Save as `preview-swarm.sh`, run with `bash preview-swarm.sh`, and you'll see exactly what this tool automates — minus the metrics, supervision, and graceful restart handling.
+
+> ⚠️ **Be respectful of public test streams** — keep client count ≤10. For serious testing, use your own infrastructure.
 
 ---
 
 ## Quick Start
 
-For a complete 5-minute tutorial, see **[Quick Start Guide](docs/QUICKSTART.md)**.
+### Option 1: Test Origin Server (Fully Implemented ✅)
 
-**TL;DR** (once implementation is complete):
+The test origin server is fully implemented and ready to use. It generates HLS streams locally using FFmpeg and serves them via Nginx:
 
 ```bash
-# Clone and build (update URL when repo is published)
-git clone https://github.com/randomizedcoder/go-ffmpeg-hls-swarm.git
-cd go-ffmpeg-hls-swarm
-go build -o go-ffmpeg-hls-swarm ./cmd/go-ffmpeg-hls-swarm
+# Using Nix (recommended)
+nix run .#test-origin
 
-# Run with 50 clients against your HLS stream
-./go-ffmpeg-hls-swarm -clients 50 https://your-cdn.com/live/master.m3u8
+# Or with Makefile
+make test-origin
 
-# Monitor metrics
-curl http://localhost:9090/metrics | grep hlsswarm
+# Stream available at: http://localhost:8080/stream.m3u8
 ```
 
-**Expected output:**
+**Available profiles:**
+```bash
+make test-origin              # Default: 720p, 2s segments
+make test-origin-low-latency  # 1s segments, optimized for speed
+make test-origin-4k-abr       # Multi-bitrate 4K streaming
+make test-origin-stress       # Maximum throughput
 ```
-Preflight checks:
-  ✓ ffmpeg: found at /usr/bin/ffmpeg (version 6.1)
-  ✓ file_descriptors: 8192 available (need 1100 for 50 clients)
 
-Starting 50 clients at 5/sec...
-  [00:00] client_started id=0 pid=12345
-  [00:00] client_started id=1 pid=12346
-  ...
-  [00:10] ramp_complete clients=50
-
-Press Ctrl+C to stop.
+**MicroVM mode** (full VM isolation, requires KVM):
+```bash
+make microvm-check-kvm        # Verify KVM support
+make microvm-origin           # Run as lightweight VM
 ```
+
+**Container mode** (requires Podman/Docker):
+```bash
+nix build .#test-origin-container
+podman load < result
+podman run -d -p 8080:8080 go-ffmpeg-hls-swarm-test-origin:latest
+```
+
+### Option 2: Swarm Client (In Development 🚧)
+
+The Go-based swarm client is being implemented. For now, use the preview script:
+
+```bash
+# Preview swarm behavior with FFmpeg directly
+bash preview-swarm.sh
+
+# Or when the CLI is ready:
+./go-ffmpeg-hls-swarm -clients 50 http://localhost:8080/stream.m3u8
+```
+
+For the complete tutorial, see **[Quick Start Guide](docs/QUICKSTART.md)**.
 
 ---
 
@@ -338,71 +384,100 @@ Available at `/metrics` (default port 9090):
 
 ## Documentation
 
-### Start Here
-
-| Your Goal | Start With | Then Read |
-|-----------|------------|-----------|
-| **"I want to try this tool"** | [Quick Start Guide](docs/QUICKSTART.md) | [Configuration](docs/CONFIGURATION.md) |
-| **"I'm running a load test"** | [Operations Guide](docs/OPERATIONS.md) | [Observability](docs/OBSERVABILITY.md) |
-| **"I want containers/VMs"** | [Client Deployment](docs/CLIENT_DEPLOYMENT.md) | [Test Origin](docs/TEST_ORIGIN.md) |
-| **"I want to contribute"** | [Contributing](CONTRIBUTING.md) | [Design](docs/DESIGN.md) |
-| **"I use Nix"** | [Nix Flake Design](docs/NIX_FLAKE_DESIGN.md) | — |
-
-### All Documentation
+| Your Goal | Read This |
+|-----------|-----------|
+| **Start a test HLS origin** | [Quick Start](#quick-start) (above) or `make test-origin` |
+| **Run origin as MicroVM/Container** | [Test Origin Guide](docs/TEST_ORIGIN.md) |
+| **Understand the swarm client CLI** | [Configuration Reference](docs/CONFIGURATION.md) |
+| **Run at scale (OS tuning)** | [Operations Guide](docs/OPERATIONS.md) |
+| **Contribute to development** | [Contributing](CONTRIBUTING.md) → [Design](docs/DESIGN.md) |
 
 <details>
-<summary><b>📚 User Documentation</b> — For running load tests</summary>
+<summary><b>📚 All Documentation</b></summary>
 
-| Document | Description |
-|----------|-------------|
-| **[Quick Start Guide](docs/QUICKSTART.md)** | 5-minute tutorial to get running |
-| **[Configuration Reference](docs/CONFIGURATION.md)** | All CLI flags with examples |
-| **[Operations Guide](docs/OPERATIONS.md)** | OS tuning, troubleshooting, failure modes |
-| **[Observability](docs/OBSERVABILITY.md)** | Metrics, logging, exit summary |
+**User Documentation:**
+- [Quick Start Guide](docs/QUICKSTART.md) — 5-minute tutorial
+- [Configuration Reference](docs/CONFIGURATION.md) — All CLI flags
+- [Operations Guide](docs/OPERATIONS.md) — OS tuning, troubleshooting
+- [Observability](docs/OBSERVABILITY.md) — Metrics, logging
 
-</details>
-
-<details>
-<summary><b>🔧 Contributor Documentation</b> — For understanding internals</summary>
-
-| Document | Description |
-|----------|-------------|
-| **[Design Document](docs/DESIGN.md)** | Architecture, interfaces, implementation plan |
-| **[Supervision](docs/SUPERVISION.md)** | Process lifecycle, restart policy, signals |
-| **[FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md)** | Deep dive into FFmpeg's HLS implementation |
-| **[Security](docs/SECURITY.md)** | TLS verification, `--dangerous` flag |
-| **[Memory Efficiency](docs/MEMORY.md)** | How Linux shares FFmpeg code across processes |
-| **[Test Origin Server](docs/TEST_ORIGIN.md)** | Self-contained HLS origin for testing |
-| **[Client Deployment](docs/CLIENT_DEPLOYMENT.md)** | Deploy swarm client in containers/VMs |
-| **[Makefile Guide](docs/MAKEFILE.md)** | Build system targets and usage |
-| **[Nix Flake Design](docs/NIX_FLAKE_DESIGN.md)** | Reproducible builds with Nix *(optional)* |
-| **[Nginx Reference](docs/NIX_NGINX_REFERENCE.md)** | Nginx configuration in Nix |
+**Contributor/Advanced:**
+- [Design Document](docs/DESIGN.md) — Architecture for contributors
+- [FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md) — FFmpeg source analysis
+- [Supervision](docs/SUPERVISION.md) — Process lifecycle details
+- [Test Origin Server](docs/TEST_ORIGIN.md) — Local HLS origin for testing
+- [Client Deployment](docs/CLIENT_DEPLOYMENT.md) — Containers/VMs
+- [Nix Flake Design](docs/NIX_FLAKE_DESIGN.md) — For Nix users
 
 </details>
 
 ---
 
-## Project Status
+## Project Status & Roadmap
 
-This project is in the **design phase**. We're finalizing the architecture and specifications before implementation.
+| Component | Status | Notes |
+|-----------|--------|-------|
+| ✅ **Design & Documentation** | Complete | All docs written |
+| ✅ **FFmpeg HLS Research** | Complete | See [FFMPEG_HLS_REFERENCE.md](docs/FFMPEG_HLS_REFERENCE.md) |
+| ✅ **Nix Infrastructure** | Complete | Flake, shell, checks, apps |
+| ✅ **Test Origin Server** | **Implemented** | Runner, container, MicroVM |
+| ✅ **Makefile** | Complete | All targets functional |
+| 🚧 **Go Swarm Client** | In Progress | Core packages written |
+| ⏳ **Integration Tests** | Waiting | NixOS VM tests defined |
 
-### Roadmap
+### What's Working Now
 
-- [x] Design documentation
-- [x] FFmpeg HLS research
-- [ ] Core orchestration
-- [ ] FFmpeg process runner
-- [ ] Prometheus metrics
-- [ ] CLI interface
-- [ ] Integration testing
+```bash
+# Test origin (FFmpeg + Nginx)
+make test-origin                    # Run locally
+make microvm-origin                 # Run in MicroVM (KVM)
+nix build .#test-origin-container   # Build OCI container
 
-### Contributing
+# Development
+make dev                            # Enter Nix shell
+make build                          # Build Go binary
+make check                          # Run all checks
+```
 
-Contributions welcome! This is an early-stage project with lots of opportunity to shape the direction.
+**Want to help?** This is the perfect time to contribute! See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-- **Design feedback**: Open an issue to discuss architecture decisions
-- **Documentation**: Improvements to clarity always appreciated
-- **Code**: Once implementation begins, see [CONTRIBUTING.md](CONTRIBUTING.md)
+---
+
+## FAQ
+
+<details>
+<summary><b>Can I use this tool today?</b></summary>
+
+**Yes, partially!**
+- ✅ **Test Origin Server** — Fully working. Run `make test-origin` to start a local HLS stream.
+- ✅ **MicroVM deployment** — Run `make microvm-origin` for full VM isolation.
+- ✅ **Container deployment** — Build with `nix build .#test-origin-container`.
+- 🚧 **Swarm Client** — Core Go packages exist, CLI integration in progress. Use the [shell script preview](#try-it-now-no-installation-needed) for now.
+</details>
+
+<details>
+<summary><b>Why FFmpeg instead of a custom HLS client?</b></summary>
+
+FFmpeg's HLS demuxer handles all protocol edge cases: master playlist parsing, variant selection, live playlist refresh, segment sequencing, and reconnection. We'd spend months reimplementing what FFmpeg already does perfectly.
+</details>
+
+<details>
+<summary><b>How many clients can I run?</b></summary>
+
+Depends on your system. Typically 50-200+ on a well-tuned Linux box. Each FFmpeg process uses ~20-50MB RAM. See [Operations Guide](docs/OPERATIONS.md) for OS tuning.
+</details>
+
+<details>
+<summary><b>Will this work on macOS/Windows?</b></summary>
+
+Linux is recommended for high concurrency (easier FD/process tuning). macOS should work for smaller tests. Windows is untested.
+</details>
+
+<details>
+<summary><b>Is this a DDoS tool?</b></summary>
+
+No. This is for testing **your own** infrastructure. Please don't use it against services you don't own or have permission to test.
+</details>
 
 ---
 

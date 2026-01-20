@@ -1217,6 +1217,327 @@ nix/
 
 ---
 
+## Container Runtime Requirements
+
+### Overview
+
+OCI containers require a container runtime on the host system. On NixOS, we **recommend Podman** over Docker for several reasons:
+
+| Feature | Podman | Docker |
+|---------|--------|--------|
+| **Rootless by default** | ✅ Yes | ❌ Requires config |
+| **Daemonless** | ✅ No background service | ❌ Requires dockerd |
+| **Systemd integration** | ✅ Native | ⚠️ Limited |
+| **OCI compliance** | ✅ Full | ✅ Full |
+| **NixOS support** | ✅ Excellent | ✅ Good |
+| **Resource usage** | Lower (no daemon) | Higher (daemon always running) |
+| **Security model** | User namespaces | Root daemon |
+
+### NixOS Podman Configuration (Recommended)
+
+Add to your NixOS `configuration.nix`:
+
+```nix
+{ config, pkgs, ... }:
+
+{
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Podman - Recommended container runtime
+  # ═══════════════════════════════════════════════════════════════════════════
+  virtualisation.podman = {
+    enable = true;
+
+    # Provide 'docker' command alias for compatibility
+    dockerCompat = true;
+
+    # Enable DNS for containers (required for network access)
+    defaultNetwork.settings.dns_enabled = true;
+
+    # Auto-prune unused images/containers weekly
+    autoPrune = {
+      enable = true;
+      dates = "weekly";
+      flags = [ "--all" ];
+    };
+  };
+
+  # Optional: Allow rootless containers to bind to privileged ports
+  # (Needed if you want to run the origin on port 80 instead of 8080)
+  boot.kernel.sysctl."net.ipv4.ip_unprivileged_port_start" = 80;
+
+  # Storage driver (overlay is recommended, btrfs if using btrfs filesystem)
+  virtualisation.containers.storage.settings = {
+    storage = {
+      driver = "overlay";
+      # For better performance with many layers:
+      options.overlay.mountopt = "nodev,metacopy=on";
+    };
+  };
+}
+```
+
+### Running the OCI Container
+
+```bash
+# Build the container image
+nix build .#test-origin-container
+
+# Load into Podman
+podman load < result
+
+# Run the test origin container
+podman run -d \
+  --name hls-origin \
+  -p 8080:8080 \
+  go-ffmpeg-hls-swarm-test-origin:latest
+
+# Verify it's running
+curl http://localhost:8080/health
+curl http://localhost:8080/stream.m3u8
+
+# View logs
+podman logs -f hls-origin
+
+# Stop and remove
+podman stop hls-origin && podman rm hls-origin
+```
+
+### Running with Docker (Alternative)
+
+If you prefer Docker, add to `configuration.nix`:
+
+```nix
+{
+  virtualisation.docker = {
+    enable = true;
+    # Rootless mode (recommended for security)
+    rootless = {
+      enable = true;
+      setSocketVariable = true;
+    };
+  };
+
+  # Add your user to the docker group (if not using rootless)
+  # users.users.youruser.extraGroups = [ "docker" ];
+}
+```
+
+```bash
+# Load and run with Docker
+docker load < result
+docker run -d -p 8080:8080 --name hls-origin go-ffmpeg-hls-swarm-test-origin:latest
+```
+
+---
+
+## MicroVM Requirements
+
+### Overview
+
+MicroVMs provide **full VM isolation** with near-container startup times (~10 seconds). They're ideal for:
+
+- Production-like testing with real kernel isolation
+- Testing kernel sysctl tuning (containers share host kernel)
+- Security-sensitive environments
+- Environments where containers aren't available
+
+### Host Requirements
+
+MicroVMs require:
+
+1. **Linux host** with KVM support (`/dev/kvm` must exist)
+2. **microvm.nix flake** input in your project
+3. **Sufficient RAM** (1GB+ recommended for the origin VM)
+
+Check KVM availability:
+
+```bash
+# Verify KVM is available
+ls -la /dev/kvm
+# Should show: crw-rw-rw- 1 root kvm ...
+
+# If missing, load the module
+sudo modprobe kvm_intel  # Intel CPUs
+sudo modprobe kvm_amd    # AMD CPUs
+
+# Verify virtualization support
+grep -E 'vmx|svm' /proc/cpuinfo
+```
+
+### NixOS KVM Configuration
+
+```nix
+{ config, pkgs, ... }:
+
+{
+  # Enable KVM for MicroVMs
+  boot.kernelModules = [ "kvm-intel" ];  # or "kvm-amd" for AMD CPUs
+
+  # Allow user access to /dev/kvm
+  users.groups.kvm = {};
+  users.users.youruser.extraGroups = [ "kvm" ];
+
+  # Alternatively, use libvirtd for more features
+  virtualisation.libvirtd = {
+    enable = true;
+    qemu = {
+      package = pkgs.qemu_kvm;
+      runAsRoot = false;
+    };
+  };
+}
+```
+
+### Flake Configuration for MicroVM
+
+Add the microvm input to your `flake.nix`:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    # MicroVM support
+    microvm = {
+      url = "github:astro/microvm.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  # Enable microvm binary cache for faster builds
+  nixConfig = {
+    extra-substituters = [ "https://microvm.cachix.org" ];
+    extra-trusted-public-keys = [
+      "microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys="
+    ];
+  };
+
+  outputs = { self, nixpkgs, microvm }: {
+    # ... expose microvm packages ...
+  };
+}
+```
+
+### Running a MicroVM
+
+```bash
+# Build and run the MicroVM
+nix run .#test-origin-vm
+
+# The VM will:
+# 1. Boot a minimal NixOS (~10 seconds)
+# 2. Start FFmpeg HLS generator
+# 3. Start Nginx on port 8080 (forwarded to host)
+# 4. Apply all sysctl tuning from sysctl.nix
+
+# Test from host
+curl http://localhost:8080/health
+curl http://localhost:8080/stream.m3u8
+```
+
+### Available Hypervisors
+
+MicroVM supports multiple hypervisors:
+
+| Hypervisor | Startup | Features | Recommendation |
+|------------|---------|----------|----------------|
+| **qemu** | ~10s | Full-featured, broad compatibility | ✅ Default, works everywhere |
+| **cloud-hypervisor** | ~3s | Fast, modern, fewer features | Good for speed |
+| **firecracker** | ~1s | Fastest, minimal features | AWS Lambda-style workloads |
+| **crosvm** | ~5s | Chrome OS hypervisor | Experimental |
+| **kvmtool** | ~2s | Minimal, fast | Lightweight testing |
+
+Configure in `microvm.nix`:
+
+```nix
+microvm = {
+  hypervisor = "qemu";  # or "cloud-hypervisor", "firecracker", etc.
+  # ...
+};
+```
+
+---
+
+## Container vs MicroVM: When to Use Which
+
+### Decision Matrix
+
+| Scenario | Container | MicroVM | Why |
+|----------|-----------|---------|-----|
+| **Local development** | ✅ | ⚠️ | Faster iteration, simpler setup |
+| **CI/CD pipelines** | ✅ | ⚠️ | Containers work in most CI systems |
+| **Production load testing** | ⚠️ | ✅ | MicroVM has real kernel isolation |
+| **Testing sysctl tuning** | ❌ | ✅ | Containers share host kernel |
+| **Air-gapped/security-sensitive** | ⚠️ | ✅ | Full VM isolation |
+| **Resource-constrained host** | ✅ | ❌ | Containers have lower overhead |
+| **Testing at scale (100+ instances)** | ✅ | ⚠️ | Container orchestration is mature |
+
+### Key Tradeoffs
+
+#### Containers (Podman/Docker)
+
+**Advantages:**
+- ✅ Fast startup (~5 seconds)
+- ✅ Low resource overhead (shares host kernel)
+- ✅ Easy orchestration (Kubernetes, Docker Compose, Podman pods)
+- ✅ Works in CI/CD (GitHub Actions, GitLab CI)
+- ✅ Simple networking (host port mapping)
+- ✅ Widely understood by teams
+
+**Limitations:**
+- ❌ Shares host kernel (sysctl changes affect host)
+- ❌ Container escape vulnerabilities (rare but possible)
+- ❌ Some kernel features unavailable
+- ❌ cgroups v2 compatibility issues on older hosts
+
+#### MicroVMs
+
+**Advantages:**
+- ✅ Full kernel isolation (real VM)
+- ✅ Test sysctl tuning safely
+- ✅ Production-identical environment
+- ✅ Stronger security boundary
+- ✅ Can run different kernel versions
+
+**Limitations:**
+- ❌ Slower startup (~10 seconds with qemu)
+- ❌ Higher memory overhead (dedicated kernel + userspace)
+- ❌ Requires KVM support on host
+- ❌ More complex networking setup
+- ❌ Doesn't work in most CI environments (no nested virtualization)
+
+### Host Infrastructure Considerations
+
+| Aspect | Containers | MicroVMs |
+|--------|------------|----------|
+| **Host OS** | Linux, macOS*, Windows* | Linux only (KVM) |
+| **CPU requirements** | Any | VT-x/AMD-V required |
+| **Memory per instance** | ~50-100MB | ~512MB-1GB |
+| **Disk per instance** | Shared layers | Dedicated image or shared store |
+| **Network setup** | Simple (NAT/bridge) | User networking or TAP devices |
+| **Scaling to 100+ instances** | Easy | Complex (memory pressure) |
+
+\* macOS and Windows require a Linux VM for containers (e.g., Podman Machine, Docker Desktop)
+
+### Hybrid Approach
+
+For comprehensive testing, use both:
+
+```bash
+# Development: Quick iteration with runner script
+nix run .#test-origin
+
+# CI/CD: Container for reproducibility
+nix build .#test-origin-container
+podman run -d -p 8080:8080 go-ffmpeg-hls-swarm-test-origin:latest
+
+# Pre-production: MicroVM for sysctl tuning validation
+nix run .#test-origin-vm
+# Verify: sysctl net.ipv4.tcp_rmem  # Check tuning applied
+```
+
+---
+
 ### nix/test-origin/config.nix
 
 **Function-based configuration with profile support**. Instead of a static config, use a function

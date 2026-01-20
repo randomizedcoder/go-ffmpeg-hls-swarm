@@ -47,6 +47,20 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+
+    # MicroVM support for lightweight VM testing
+    microvm = {
+      url = "github:astro/microvm.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  # Enable microvm binary cache for faster builds
+  nixConfig = {
+    extra-substituters = [ "https://microvm.cachix.org" ];
+    extra-trusted-public-keys = [
+      "microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys="
+    ];
   };
 
   outputs =
@@ -54,6 +68,7 @@
       self,
       nixpkgs,
       flake-utils,
+      microvm,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -101,11 +116,11 @@
           inherit pkgs lib meta src package;
         };
 
-        # Test origin server components (with profile support)
-        testOrigin = import ./nix/test-origin { inherit pkgs lib; };
-        testOriginLowLatency = import ./nix/test-origin { inherit pkgs lib; profile = "low-latency"; };
-        testOrigin4kAbr = import ./nix/test-origin { inherit pkgs lib; profile = "4k-abr"; };
-        testOriginStress = import ./nix/test-origin { inherit pkgs lib; profile = "stress-test"; };
+        # Test origin server components (with profile support and MicroVM)
+        testOrigin = import ./nix/test-origin { inherit pkgs lib microvm; };
+        testOriginLowLatency = import ./nix/test-origin { inherit pkgs lib microvm; profile = "low-latency"; };
+        testOrigin4kAbr = import ./nix/test-origin { inherit pkgs lib microvm; profile = "4k-abr"; };
+        testOriginStress = import ./nix/test-origin { inherit pkgs lib microvm; profile = "stress-test"; };
 
         # Swarm client components (with profile support)
         swarmClient = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; };
@@ -130,6 +145,11 @@
           test-origin-low-latency = testOriginLowLatency.runner;
           test-origin-4k-abr = testOrigin4kAbr.runner;
           test-origin-stress = testOriginStress.runner;
+
+          # MicroVM packages (Linux only, requires KVM)
+          test-origin-vm = testOrigin.microvm.vm or (throw "MicroVM not available - requires microvm input");
+          test-origin-vm-low-latency = testOriginLowLatency.microvm.vm or null;
+          test-origin-vm-stress = testOriginStress.microvm.vm or null;
 
           # Swarm client packages (default profile)
           swarm-client = swarmClient.runner;
@@ -163,6 +183,12 @@
           test-origin-stress = {
             type = "app";
             program = "${testOriginStress.runner}/bin/test-hls-origin";
+          };
+
+          # MicroVM apps (Linux only, requires KVM)
+          test-origin-vm = {
+            type = "app";
+            program = "${testOrigin.microvm.runScript}";
           };
 
           # Swarm client apps (different profiles)

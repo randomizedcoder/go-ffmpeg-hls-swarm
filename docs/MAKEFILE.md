@@ -1,7 +1,7 @@
 # Makefile Design Document
 
-> **Status**: Active  
-> **Location**: `./Makefile`  
+> **Status**: Active
+> **Location**: `./Makefile`
 > **Related**: [NIX_FLAKE_DESIGN.md](NIX_FLAKE_DESIGN.md), [CLIENT_DEPLOYMENT.md](CLIENT_DEPLOYMENT.md), [TEST_ORIGIN.md](TEST_ORIGIN.md)
 
 ---
@@ -411,7 +411,7 @@ target-name: dependencies ## Help text shown in 'make help'
    # ============================================================================
    # New Category
    # ============================================================================
-   
+
    new-target: ## Description of new target
    	command-here
    ```

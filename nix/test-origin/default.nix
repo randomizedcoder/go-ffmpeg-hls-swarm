@@ -15,7 +15,13 @@
 #     configOverrides = { hls.listSize = 15; };
 #   };
 #
-{ pkgs, lib, profile ? "default", configOverrides ? {} }:
+#   # With MicroVM support (requires microvm flake input)
+#   testOrigin = import ./test-origin {
+#     inherit pkgs lib;
+#     microvm = inputs.microvm;  # Pass the microvm flake
+#   };
+#
+{ pkgs, lib, profile ? "default", configOverrides ? {}, microvm ? null }:
 
 let
   # Load configuration with profile and overrides
@@ -30,6 +36,16 @@ let
   runner = import ./runner.nix { inherit pkgs lib config ffmpeg nginx; };
   container = import ./container.nix { inherit pkgs lib config ffmpeg nginx; };
   nixosModule = import ./nixos-module.nix { inherit config ffmpeg nginx; };
+
+  # MicroVM (only available if microvm input is provided)
+  # Note: We need to pass nixpkgs for lib.nixosSystem
+  microvmModule = if microvm != null then
+    import ./microvm.nix {
+      inherit pkgs lib config nixosModule microvm;
+      nixpkgs = microvm.inputs.nixpkgs;  # Get nixpkgs from microvm's inputs
+    }
+  else
+    null;
 
   # Kernel tuning module (can be imported separately)
   sysctlModule = ./sysctl.nix;
@@ -49,6 +65,9 @@ in {
 
   # NixOS module for services
   inherit nixosModule;
+
+  # MicroVM support (null if microvm input not provided)
+  microvm = microvmModule;
 
   # Kernel tuning module (standalone, can be imported separately)
   inherit sysctlModule;
@@ -80,4 +99,7 @@ in {
 
   # Derived values for inspection
   derived = config.derived;
+
+  # Check if MicroVM support is available
+  hasMicrovm = microvm != null;
 }
