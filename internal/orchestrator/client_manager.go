@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/parser"
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/supervisor"
 )
 
@@ -22,6 +23,20 @@ type ClientManager struct {
 
 	// Maximum restarts per client (0 = unlimited)
 	maxRestarts int
+
+	// Stats collection
+	statsEnabled       bool
+	statsBufferSize    int
+	statsDropThreshold float64
+
+	// Per-client progress tracking (Phase 2)
+	// Maps clientID -> latest ProgressUpdate
+	latestProgress map[int]*parser.ProgressUpdate
+	progressMu     sync.RWMutex
+
+	// Aggregated stats (Phase 5 will expand this)
+	totalBytesDownloaded atomic.Int64
+	totalProgressUpdates atomic.Int64
 
 	// Supervisors indexed by client ID
 	supervisors map[int]*supervisor.Supervisor
@@ -61,18 +76,39 @@ type ManagerConfig struct {
 	BackoffConfig supervisor.BackoffConfig
 	MaxRestarts   int
 	Callbacks     ManagerCallbacks
+
+	// Stats collection
+	StatsEnabled       bool
+	StatsBufferSize    int
+	StatsDropThreshold float64
 }
 
 // NewClientManager creates a new ClientManager.
 func NewClientManager(cfg ManagerConfig) *ClientManager {
+	// Default buffer size
+	bufferSize := cfg.StatsBufferSize
+	if bufferSize <= 0 {
+		bufferSize = 1000
+	}
+
+	// Default threshold
+	threshold := cfg.StatsDropThreshold
+	if threshold <= 0 {
+		threshold = 0.01
+	}
+
 	return &ClientManager{
-		builder:       cfg.Builder,
-		logger:        cfg.Logger,
-		backoffConfig: cfg.BackoffConfig,
-		maxRestarts:   cfg.MaxRestarts,
-		callbacks:     cfg.Callbacks,
-		supervisors:   make(map[int]*supervisor.Supervisor),
-		configSeed:    time.Now().UnixNano(),
+		builder:            cfg.Builder,
+		logger:             cfg.Logger,
+		backoffConfig:      cfg.BackoffConfig,
+		maxRestarts:        cfg.MaxRestarts,
+		statsEnabled:       cfg.StatsEnabled,
+		statsBufferSize:    bufferSize,
+		statsDropThreshold: threshold,
+		callbacks:          cfg.Callbacks,
+		supervisors:        make(map[int]*supervisor.Supervisor),
+		latestProgress:     make(map[int]*parser.ProgressUpdate),
+		configSeed:         time.Now().UnixNano(),
 	}
 }
 
@@ -82,6 +118,12 @@ func (m *ClientManager) StartClient(ctx context.Context, clientID int) {
 	// Create backoff calculator for this client
 	backoff := supervisor.NewBackoff(clientID, m.configSeed, m.backoffConfig)
 
+	// Create progress parser for this client (Phase 2)
+	var progressParser parser.LineParser
+	if m.statsEnabled {
+		progressParser = parser.NewProgressParser(m.createProgressCallback(clientID))
+	}
+
 	// Create supervisor with callbacks
 	sup := supervisor.New(supervisor.Config{
 		ClientID:    clientID,
@@ -89,6 +131,13 @@ func (m *ClientManager) StartClient(ctx context.Context, clientID int) {
 		Backoff:     backoff,
 		Logger:      m.logger,
 		MaxRestarts: m.maxRestarts,
+		// Stats collection
+		StatsEnabled:       m.statsEnabled,
+		StatsBufferSize:    m.statsBufferSize,
+		StatsDropThreshold: m.statsDropThreshold,
+		// Parsers (Phase 2 - ProgressParser, Phase 3 will add HLSEventParser)
+		ProgressParser: progressParser,
+		// StderrParser will be added in Phase 3
 		Callbacks: supervisor.Callbacks{
 			OnStateChange: m.handleStateChange,
 			OnStart:       m.handleStart,
@@ -222,4 +271,93 @@ func (m *ClientManager) States() map[int]supervisor.State {
 		states[id] = sup.State()
 	}
 	return states
+}
+
+// createProgressCallback creates a callback for the ProgressParser.
+// This callback is called for each complete progress block from FFmpeg.
+func (m *ClientManager) createProgressCallback(clientID int) parser.ProgressCallback {
+	return func(update *parser.ProgressUpdate) {
+		m.totalProgressUpdates.Add(1)
+
+		// Store latest progress for this client
+		m.progressMu.Lock()
+		prev := m.latestProgress[clientID]
+		m.latestProgress[clientID] = update
+		m.progressMu.Unlock()
+
+		// Track bytes downloaded (delta from previous)
+		// Note: total_size resets on FFmpeg restart, so we track deltas
+		if prev != nil && update.TotalSize > prev.TotalSize {
+			delta := update.TotalSize - prev.TotalSize
+			m.totalBytesDownloaded.Add(delta)
+		} else if prev == nil && update.TotalSize > 0 {
+			// First update for this client
+			m.totalBytesDownloaded.Add(update.TotalSize)
+		}
+		// If update.TotalSize < prev.TotalSize, FFmpeg restarted - don't subtract
+
+		// Log stalling detection at debug level
+		if update.IsStalling() {
+			m.logger.Debug("client_stalling",
+				"client_id", clientID,
+				"speed", update.Speed,
+				"playback_position", update.OutTimeDuration().String(),
+			)
+		}
+	}
+}
+
+// ProgressStats returns aggregated progress statistics.
+// This is a Phase 2 placeholder - Phase 5 will expand this significantly.
+type ProgressStats struct {
+	TotalBytesDownloaded int64
+	TotalProgressUpdates int64
+	ClientsWithProgress  int
+	StallingClients      int
+	AverageSpeed         float64
+}
+
+// GetProgressStats returns current progress statistics across all clients.
+func (m *ClientManager) GetProgressStats() ProgressStats {
+	m.progressMu.RLock()
+	defer m.progressMu.RUnlock()
+
+	stats := ProgressStats{
+		TotalBytesDownloaded: m.totalBytesDownloaded.Load(),
+		TotalProgressUpdates: m.totalProgressUpdates.Load(),
+		ClientsWithProgress:  len(m.latestProgress),
+	}
+
+	// Calculate average speed and count stalling clients
+	var totalSpeed float64
+	var speedCount int
+	for _, progress := range m.latestProgress {
+		if progress.Speed > 0 {
+			totalSpeed += progress.Speed
+			speedCount++
+		}
+		if progress.IsStalling() {
+			stats.StallingClients++
+		}
+	}
+
+	if speedCount > 0 {
+		stats.AverageSpeed = totalSpeed / float64(speedCount)
+	}
+
+	return stats
+}
+
+// GetClientProgress returns the latest progress for a specific client.
+// Returns nil if no progress has been received for this client.
+func (m *ClientManager) GetClientProgress(clientID int) *parser.ProgressUpdate {
+	m.progressMu.RLock()
+	defer m.progressMu.RUnlock()
+
+	if progress, ok := m.latestProgress[clientID]; ok {
+		// Return a copy to avoid race conditions
+		copy := *progress
+		return &copy
+	}
+	return nil
 }

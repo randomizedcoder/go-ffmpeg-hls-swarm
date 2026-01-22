@@ -127,6 +127,9 @@ func printFFmpegCommand(cfg *config.Config) {
 		NoCache:           cfg.NoCache,
 		Headers:           cfg.Headers,
 		ProgramID:         -1,
+		// Stats collection
+		StatsEnabled:  cfg.StatsEnabled,
+		StatsLogLevel: cfg.StatsLogLevel,
 	}
 
 	runner := process.NewFFmpegRunner(ffmpegConfig)

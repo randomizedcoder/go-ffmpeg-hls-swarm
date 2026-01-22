@@ -50,6 +50,12 @@ type Config struct {
 
 	// Probe failure policy
 	ProbeFailurePolicy string `json:"probe_failure_policy"` // "fail" or "fallback"
+
+	// Stats collection (metrics enhancement)
+	StatsEnabled       bool    `json:"stats_enabled"`        // Enable FFmpeg output parsing
+	StatsLogLevel      string  `json:"stats_log_level"`      // FFmpeg loglevel: "verbose" or "debug"
+	StatsBufferSize    int     `json:"stats_buffer_size"`    // Lines to buffer per client pipeline
+	StatsDropThreshold float64 `json:"stats_drop_threshold"` // Degradation threshold (0.01 = 1%)
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -88,5 +94,11 @@ func DefaultConfig() *Config {
 
 		// Probe
 		ProbeFailurePolicy: "fallback",
+
+		// Stats collection
+		StatsEnabled:       true,
+		StatsLogLevel:      "verbose",
+		StatsBufferSize:    1000,
+		StatsDropThreshold: 0.01, // 1% drop rate = degraded
 	}
 }

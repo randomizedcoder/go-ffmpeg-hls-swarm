@@ -76,6 +76,10 @@ type FFmpegConfig struct {
 	// ProgramID is the HLS program ID for highest/lowest variant selection.
 	// Set by ProbeVariants().
 	ProgramID int
+
+	// Stats collection
+	StatsEnabled  bool   // Enable -progress pipe:1 output
+	StatsLogLevel string // Override LogLevel when stats enabled ("verbose" or "debug")
 }
 
 // DefaultFFmpegConfig returns an FFmpegConfig with sensible defaults.
@@ -120,10 +124,23 @@ func (r *FFmpegRunner) BuildCommand(ctx context.Context, clientID int) (*exec.Cm
 
 // buildArgs constructs the FFmpeg command-line arguments.
 func (r *FFmpegRunner) buildArgs() []string {
+	// Determine log level - use StatsLogLevel when stats enabled
+	logLevel := r.config.LogLevel
+	if r.config.StatsEnabled && r.config.StatsLogLevel != "" {
+		logLevel = r.config.StatsLogLevel
+	}
+
 	args := []string{
 		"-hide_banner",
 		"-nostdin",
-		"-loglevel", r.config.LogLevel,
+		"-loglevel", logLevel,
+	}
+
+	// Progress output to stdout (key=value format) for stats parsing
+	if r.config.StatsEnabled {
+		args = append(args, "-progress", "pipe:1")
+		// Also add -stats_period for more frequent updates (every 1 second)
+		args = append(args, "-stats_period", "1")
 	}
 
 	// TLS verification (must be early, before input options)

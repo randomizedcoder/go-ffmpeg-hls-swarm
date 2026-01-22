@@ -48,6 +48,9 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 		NoCache:           cfg.NoCache,
 		Headers:           cfg.Headers,
 		ProgramID:         -1,
+		// Stats collection
+		StatsEnabled:  cfg.StatsEnabled,
+		StatsLogLevel: cfg.StatsLogLevel,
 	}
 	runner := process.NewFFmpegRunner(ffmpegConfig)
 
@@ -78,6 +81,10 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 			JitterPct:  0.4,
 		},
 		MaxRestarts: cfg.MaxRestarts,
+		// Stats collection
+		StatsEnabled:       cfg.StatsEnabled,
+		StatsBufferSize:    cfg.StatsBufferSize,
+		StatsDropThreshold: cfg.StatsDropThreshold,
 		Callbacks: ManagerCallbacks{
 			OnClientStateChange: orch.onStateChange,
 			OnClientStart:       orch.onStart,

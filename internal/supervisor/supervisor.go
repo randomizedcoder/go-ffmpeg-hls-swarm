@@ -3,11 +3,15 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/parser"
 )
 
 // ProcessBuilder creates executable commands for clients.
@@ -56,6 +60,19 @@ type Supervisor struct {
 	// Configuration
 	maxRestarts int // 0 = unlimited
 	restarts    int
+
+	// Stats collection (metrics enhancement)
+	statsEnabled       bool
+	statsBufferSize    int
+	statsDropThreshold float64
+
+	// Parsing pipelines (created per runOnce)
+	progressPipeline *parser.Pipeline
+	stderrPipeline   *parser.Pipeline
+
+	// Parsers (set externally or use defaults)
+	progressParser parser.LineParser
+	stderrParser   parser.LineParser
 }
 
 // Config holds configuration for creating a new Supervisor.
@@ -66,18 +83,54 @@ type Config struct {
 	Logger      *slog.Logger
 	Callbacks   Callbacks
 	MaxRestarts int // 0 = unlimited
+
+	// Stats collection
+	StatsEnabled       bool
+	StatsBufferSize    int
+	StatsDropThreshold float64
+
+	// Parsers (optional - defaults to NoopParser)
+	ProgressParser parser.LineParser
+	StderrParser   parser.LineParser
 }
 
 // New creates a new Supervisor with the given configuration.
 func New(cfg Config) *Supervisor {
+	// Use NoopParser if no parsers provided
+	progressParser := cfg.ProgressParser
+	if progressParser == nil {
+		progressParser = parser.NoopParser{}
+	}
+	stderrParser := cfg.StderrParser
+	if stderrParser == nil {
+		stderrParser = parser.NoopParser{}
+	}
+
+	// Default buffer size
+	bufferSize := cfg.StatsBufferSize
+	if bufferSize <= 0 {
+		bufferSize = 1000
+	}
+
+	// Default threshold
+	threshold := cfg.StatsDropThreshold
+	if threshold <= 0 {
+		threshold = 0.01
+	}
+
 	return &Supervisor{
-		clientID:    cfg.ClientID,
-		builder:     cfg.Builder,
-		backoff:     cfg.Backoff,
-		logger:      cfg.Logger,
-		callbacks:   cfg.Callbacks,
-		state:       StateCreated,
-		maxRestarts: cfg.MaxRestarts,
+		clientID:           cfg.ClientID,
+		builder:            cfg.Builder,
+		backoff:            cfg.Backoff,
+		logger:             cfg.Logger,
+		callbacks:          cfg.Callbacks,
+		state:              StateCreated,
+		maxRestarts:        cfg.MaxRestarts,
+		statsEnabled:       cfg.StatsEnabled,
+		statsBufferSize:    bufferSize,
+		statsDropThreshold: threshold,
+		progressParser:     progressParser,
+		stderrParser:       stderrParser,
 	}
 }
 
@@ -164,6 +217,28 @@ func (s *Supervisor) runOnce(ctx context.Context) (exitCode int, uptime time.Dur
 		return 1, 0, err
 	}
 
+	// Set up stdout/stderr pipes if stats collection is enabled
+	var stdout, stderr io.ReadCloser
+	if s.statsEnabled {
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			s.logger.Error("failed_to_create_stdout_pipe",
+				"client_id", s.clientID,
+				"error", err,
+			)
+			return 1, 0, fmt.Errorf("stdout pipe: %w", err)
+		}
+
+		stderr, err = cmd.StderrPipe()
+		if err != nil {
+			s.logger.Error("failed_to_create_stderr_pipe",
+				"client_id", s.clientID,
+				"error", err,
+			)
+			return 1, 0, fmt.Errorf("stderr pipe: %w", err)
+		}
+	}
+
 	// Set process group for clean shutdown
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
@@ -190,7 +265,37 @@ func (s *Supervisor) runOnce(ctx context.Context) (exitCode int, uptime time.Dur
 	s.logger.Info("client_started",
 		"client_id", s.clientID,
 		"pid", pid,
+		"stats_enabled", s.statsEnabled,
 	)
+
+	// Start parsing pipelines if stats enabled
+	var parseWg sync.WaitGroup
+	if s.statsEnabled {
+		// Create fresh pipelines for this run
+		s.progressPipeline = parser.NewPipeline(
+			s.clientID, "progress",
+			s.statsBufferSize, s.statsDropThreshold,
+		)
+		s.stderrPipeline = parser.NewPipeline(
+			s.clientID, "stderr",
+			s.statsBufferSize, s.statsDropThreshold,
+		)
+
+		// Start Layer 1 (readers) - these never block
+		go s.progressPipeline.RunReader(stdout)
+		go s.stderrPipeline.RunReader(stderr)
+
+		// Start Layer 2 (parsers)
+		parseWg.Add(2)
+		go func() {
+			defer parseWg.Done()
+			s.progressPipeline.RunParser(s.progressParser)
+		}()
+		go func() {
+			defer parseWg.Done()
+			s.stderrPipeline.RunParser(s.stderrParser)
+		}()
+	}
 
 	// Notify callback
 	if s.callbacks.OnStart != nil {
@@ -201,6 +306,11 @@ func (s *Supervisor) runOnce(ctx context.Context) (exitCode int, uptime time.Dur
 	waitErr := cmd.Wait()
 	uptime = time.Since(s.startTime)
 	exitCode = extractExitCode(waitErr)
+
+	// Wait for parsers to drain remaining data (with timeout)
+	if s.statsEnabled {
+		s.drainParsers(&parseWg)
+	}
 
 	s.logger.Info("client_exited",
 		"client_id", s.clientID,
@@ -220,6 +330,61 @@ func (s *Supervisor) runOnce(ctx context.Context) (exitCode int, uptime time.Dur
 	}
 
 	return exitCode, uptime, waitErr
+}
+
+// drainParsers waits for parsing pipelines to finish with a timeout.
+func (s *Supervisor) drainParsers(parseWg *sync.WaitGroup) {
+	const drainTimeout = 5 * time.Second
+
+	done := make(chan struct{})
+	go func() {
+		parseWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Parsers finished normally
+		s.logPipelineStats()
+	case <-time.After(drainTimeout):
+		s.logger.Warn("parser_drain_timeout",
+			"client_id", s.clientID,
+			"timeout", drainTimeout.String(),
+			"reason", "parsers did not finish reading pipe data within timeout",
+		)
+		s.logPipelineStats()
+	}
+}
+
+// logPipelineStats logs pipeline health metrics.
+func (s *Supervisor) logPipelineStats() {
+	if s.progressPipeline != nil {
+		read, dropped, parsed := s.progressPipeline.Stats()
+		if dropped > 0 || s.logger.Enabled(nil, slog.LevelDebug) {
+			s.logger.Info("pipeline_stats",
+				"client_id", s.clientID,
+				"stream", "progress",
+				"lines_read", read,
+				"lines_dropped", dropped,
+				"lines_parsed", parsed,
+				"degraded", s.progressPipeline.IsDegraded(),
+			)
+		}
+	}
+
+	if s.stderrPipeline != nil {
+		read, dropped, parsed := s.stderrPipeline.Stats()
+		if dropped > 0 || s.logger.Enabled(nil, slog.LevelDebug) {
+			s.logger.Info("pipeline_stats",
+				"client_id", s.clientID,
+				"stream", "stderr",
+				"lines_read", read,
+				"lines_dropped", dropped,
+				"lines_parsed", parsed,
+				"degraded", s.stderrPipeline.IsDegraded(),
+			)
+		}
+	}
 }
 
 // Stop gracefully stops the supervised process.
@@ -301,6 +466,45 @@ func (s *Supervisor) Uptime() time.Duration {
 		return 0
 	}
 	return time.Since(s.startTime)
+}
+
+// SetParsers sets the line parsers for progress and stderr streams.
+// Must be called before Run() for the parsers to be used.
+func (s *Supervisor) SetParsers(progress, stderr parser.LineParser) {
+	if progress != nil {
+		s.progressParser = progress
+	}
+	if stderr != nil {
+		s.stderrParser = stderr
+	}
+}
+
+// PipelineStats returns the pipeline statistics for both streams.
+// Returns zeros if stats collection is disabled or pipelines haven't run.
+func (s *Supervisor) PipelineStats() (progressRead, progressDropped, stderrRead, stderrDropped int64) {
+	if s.progressPipeline != nil {
+		progressRead, progressDropped, _ = s.progressPipeline.Stats()
+	}
+	if s.stderrPipeline != nil {
+		stderrRead, stderrDropped, _ = s.stderrPipeline.Stats()
+	}
+	return
+}
+
+// IsMetricsDegraded returns true if either pipeline has dropped >threshold% of lines.
+func (s *Supervisor) IsMetricsDegraded() bool {
+	if s.progressPipeline != nil && s.progressPipeline.IsDegraded() {
+		return true
+	}
+	if s.stderrPipeline != nil && s.stderrPipeline.IsDegraded() {
+		return true
+	}
+	return false
+}
+
+// StatsEnabled returns whether stats collection is enabled.
+func (s *Supervisor) StatsEnabled() bool {
+	return s.statsEnabled
 }
 
 // extractExitCode extracts the exit code from a Wait() error.
