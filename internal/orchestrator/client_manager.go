@@ -15,9 +15,9 @@ import (
 // ClientManager coordinates multiple client supervisors.
 // It handles starting clients, tracking their state, and coordinating shutdown.
 type ClientManager struct {
-	builder     supervisor.ProcessBuilder
-	logger      *slog.Logger
-	configSeed  int64
+	builder    supervisor.ProcessBuilder
+	logger     *slog.Logger
+	configSeed int64
 
 	// Backoff configuration
 	backoffConfig supervisor.BackoffConfig
@@ -42,7 +42,7 @@ type ClientManager struct {
 
 	// Per-client stats (Phase 4/5)
 	// Maps clientID -> ClientStats
-	clientStats map[int]*stats.ClientStats
+	clientStats   map[int]*stats.ClientStats
 	clientStatsMu sync.RWMutex
 
 	// Stats aggregator (Phase 5)
@@ -71,9 +71,9 @@ type ClientManager struct {
 	callbacks ManagerCallbacks
 
 	// Counters
-	activeCount   atomic.Int64
-	startedCount  atomic.Int64
-	restartCount  atomic.Int64
+	activeCount  atomic.Int64
+	startedCount atomic.Int64
+	restartCount atomic.Int64
 }
 
 // ManagerCallbacks contains optional callbacks for manager events.
