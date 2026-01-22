@@ -26,6 +26,8 @@ USE_TAP=false              # Use TAP networking (high performance)
 # Ports
 HTTP_PORT="${MICROVM_HTTP_PORT:-17080}"
 METRICS_PORT="${MICROVM_METRICS_PORT:-17113}"
+NODE_EXPORTER_PORT="${MICROVM_NODE_EXPORTER_PORT:-17100}"
+SSH_PORT="${MICROVM_SSH_PORT:-17122}"
 CONSOLE_PORT="${MICROVM_CONSOLE_PORT:-17022}"
 
 # URLs - will be set based on networking mode
@@ -84,18 +86,24 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Set URLs based on networking mode
+# Set URLs and ports based on networking mode
 if [ "$USE_TAP" = true ]; then
-    # TAP mode: use VM's direct IP (faster) or localhost (via nftables forwarding)
-    HEALTH_URL="http://${VM_IP}:${HTTP_PORT}/health"
-    STREAM_URL="http://${VM_IP}:${HTTP_PORT}/stream.m3u8"
-    FILES_URL="http://${VM_IP}:${HTTP_PORT}/files/"
+    # TAP mode: direct access to VM IP, use standard ports
+    URL_BASE="${VM_IP}"
+    NGINX_EXPORTER_PORT="9113"   # Standard nginx exporter port
+    NODE_EXPORTER_PORT="9100"    # Standard node exporter port
+    SSH_PORT="22"                # Standard SSH port
 else
     # User mode: localhost with QEMU port forwarding
-    HEALTH_URL="http://localhost:${HTTP_PORT}/health"
-    STREAM_URL="http://localhost:${HTTP_PORT}/stream.m3u8"
-    FILES_URL="http://localhost:${HTTP_PORT}/files/"
+    URL_BASE="localhost"
+    NGINX_EXPORTER_PORT="${METRICS_PORT}"  # 17113 forwarded to 9113
+    NODE_EXPORTER_PORT="17100"             # 17100 forwarded to 9100
+    SSH_PORT="17122"                       # 17122 forwarded to 22
 fi
+
+HEALTH_URL="http://${URL_BASE}:${HTTP_PORT}/health"
+STREAM_URL="http://${URL_BASE}:${HTTP_PORT}/stream.m3u8"
+FILES_URL="http://${URL_BASE}:${HTTP_PORT}/files/"
 
 cd "${PROJECT_ROOT}"
 
@@ -106,9 +114,9 @@ check_tap_network() {
     if [ "$USE_TAP" != true ]; then
         return 0
     fi
-    
+
     log_info "Checking TAP network setup..."
-    
+
     # Check bridge exists
     if ! ip link show hlsbr0 &>/dev/null; then
         log_error "Bridge hlsbr0 not found!"
@@ -117,7 +125,7 @@ check_tap_network() {
         exit 1
     fi
     log_success "Bridge hlsbr0 exists"
-    
+
     # Check TAP exists with multiqueue
     if ! ip link show hlstap0 &>/dev/null; then
         log_error "TAP device hlstap0 not found!"
@@ -126,7 +134,7 @@ check_tap_network() {
         exit 1
     fi
     log_success "TAP hlstap0 exists (multiqueue)"
-    
+
     # Check TAP is attached to bridge
     if ! ip link show hlstap0 | grep -q "master hlsbr0"; then
         log_error "TAP hlstap0 not attached to bridge hlsbr0!"
@@ -135,7 +143,7 @@ check_tap_network() {
         exit 1
     fi
     log_success "TAP attached to bridge"
-    
+
     echo ""
 }
 
@@ -152,42 +160,68 @@ is_port_in_use() {
 # ═══════════════════════════════════════════════════════════════════════════════
 check_ports() {
     log_info "Checking port availability..."
-    
+
     local blocked=0
-    
+
+    # Always check HTTP port (used by both modes on host/VM)
     if is_port_in_use "${HTTP_PORT}"; then
         log_error "Port ${HTTP_PORT} (HTTP) is already in use!"
         blocked=1
     else
         log_success "Port ${HTTP_PORT} (HTTP) is available"
     fi
-    
-    if is_port_in_use "${METRICS_PORT}"; then
-        log_error "Port ${METRICS_PORT} (Metrics) is already in use!"
-        blocked=1
-    else
-        log_success "Port ${METRICS_PORT} (Metrics) is available"
-    fi
-    
+
+    # Always check console port (QEMU listens on host)
     if is_port_in_use "${CONSOLE_PORT}"; then
         log_error "Port ${CONSOLE_PORT} (Console) is already in use!"
         blocked=1
     else
         log_success "Port ${CONSOLE_PORT} (Console) is available"
     fi
-    
+
+    # For user-mode networking, check forwarded ports on localhost
+    # For TAP mode, these ports are VM-internal (9100, 9113, 22) - don't check on host
+    if [ "$USE_TAP" = false ]; then
+        if is_port_in_use "${METRICS_PORT}"; then
+            log_error "Port ${METRICS_PORT} (Nginx Metrics) is already in use!"
+            blocked=1
+        else
+            log_success "Port ${METRICS_PORT} (Nginx Metrics) is available"
+        fi
+
+        if is_port_in_use "${NODE_EXPORTER_PORT}"; then
+            log_error "Port ${NODE_EXPORTER_PORT} (Node Exporter) is already in use!"
+            blocked=1
+        else
+            log_success "Port ${NODE_EXPORTER_PORT} (Node Exporter) is available"
+        fi
+
+        if is_port_in_use "${SSH_PORT}"; then
+            log_error "Port ${SSH_PORT} (SSH) is already in use!"
+            blocked=1
+        else
+            log_success "Port ${SSH_PORT} (SSH) is available"
+        fi
+    else
+        log_info "TAP mode: VM services use internal ports (9100, 9113, 22) - not checked on host"
+    fi
+
     if [ $blocked -eq 1 ]; then
         echo ""
         log_error "Cannot start MicroVM - ports in use"
         echo ""
         echo -e "${YELLOW}To free ports:${NC}"
-        echo "  sudo fuser -k ${HTTP_PORT}/tcp ${METRICS_PORT}/tcp ${CONSOLE_PORT}/tcp"
+        if [ "$USE_TAP" = false ]; then
+            echo "  sudo fuser -k ${HTTP_PORT}/tcp ${METRICS_PORT}/tcp ${NODE_EXPORTER_PORT}/tcp ${SSH_PORT}/tcp ${CONSOLE_PORT}/tcp"
+        else
+            echo "  sudo fuser -k ${HTTP_PORT}/tcp ${CONSOLE_PORT}/tcp"
+        fi
         echo "  # Or kill previous MicroVM:"
         echo "  pkill -f 'qemu.*hls-origin'"
         echo ""
         exit 1
     fi
-    
+
     echo ""
 }
 
@@ -197,7 +231,7 @@ check_ports() {
 build_if_needed() {
     local vm_package
     local result_dir
-    
+
     if [ "$USE_TAP" = true ]; then
         vm_package=".#test-origin-vm-tap"
         result_dir="result-tap"
@@ -205,10 +239,10 @@ build_if_needed() {
         vm_package=".#test-origin-vm"
         result_dir="result"
     fi
-    
+
     log_info "VM package: ${vm_package}"
     log_info "Result directory: ${result_dir}"
-    
+
     if [ ! -x "./${result_dir}/bin/microvm-run" ]; then
         log_info "Building MicroVM (${vm_package})..."
         if nix build "${vm_package}" -o "${result_dir}" 2>&1; then
@@ -221,14 +255,14 @@ build_if_needed() {
         log_success "MicroVM already built (${result_dir})"
         ls -la "./${result_dir}/bin/" | head -5
     fi
-    
+
     # Verify the result
     if [ ! -x "./${result_dir}/bin/microvm-run" ]; then
         log_error "Build succeeded but microvm-run not found!"
         ls -la "./${result_dir}/" 2>/dev/null || echo "Result dir doesn't exist"
         exit 1
     fi
-    
+
     # Export for start_vm
     RESULT_DIR="${result_dir}"
 }
@@ -237,20 +271,57 @@ build_if_needed() {
 # Stop any existing MicroVM
 # ═══════════════════════════════════════════════════════════════════════════════
 stop_existing() {
-    if [ -f "${PID_FILE}" ]; then
-        local old_pid
-        old_pid=$(cat "${PID_FILE}")
-        if kill -0 "${old_pid}" 2>/dev/null; then
-            log_info "Stopping existing MicroVM (PID: ${old_pid})..."
-            kill "${old_pid}" 2>/dev/null || true
-            sleep 2
+    local found_running=false
+
+    # Check for running QEMU/MicroVM processes (matches both naming conventions)
+    local qemu_pids
+    qemu_pids=$(pgrep -f 'qemu.*hls-origin|microvm@hls-origin' 2>/dev/null || true)
+
+    if [ -n "$qemu_pids" ]; then
+        found_running=true
+        log_warn "Found existing MicroVM process(es):"
+        echo "$qemu_pids" | while read -r pid; do
+            echo "  PID $pid"
+        done
+
+        log_info "Stopping existing MicroVM(s)..."
+
+        # First try graceful shutdown
+        echo "$qemu_pids" | xargs -r kill 2>/dev/null || true
+        sleep 2
+
+        # Check if any are still running
+        qemu_pids=$(pgrep -f 'qemu.*hls-origin|microvm@hls-origin' 2>/dev/null || true)
+        if [ -n "$qemu_pids" ]; then
+            log_warn "Processes still running, sending SIGKILL..."
+            echo "$qemu_pids" | xargs -r kill -9 2>/dev/null || true
+            sleep 1
         fi
+
+        # Final check
+        qemu_pids=$(pgrep -f 'qemu.*hls-origin|microvm@hls-origin' 2>/dev/null || true)
+        if [ -n "$qemu_pids" ]; then
+            log_error "Failed to stop existing MicroVM(s)!"
+            echo "Still running PIDs: $qemu_pids"
+            echo ""
+            echo -e "${YELLOW}Try manually:${NC}"
+            echo "  sudo kill -9 $qemu_pids"
+            exit 1
+        fi
+
+        log_success "Existing MicroVM(s) stopped"
+    fi
+
+    # Clean up PID file
+    if [ -f "${PID_FILE}" ]; then
         rm -f "${PID_FILE}"
     fi
-    
-    # Also kill any orphaned qemu processes
-    pkill -f "qemu.*hls-origin" 2>/dev/null || true
-    sleep 1
+
+    # If we stopped something, wait a moment for ports to be released
+    if [ "$found_running" = true ]; then
+        log_info "Waiting for ports to be released..."
+        sleep 2
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -263,36 +334,36 @@ start_vm() {
     else
         mode_str="user-mode NAT (~500 Mbps)"
     fi
-    
+
     log_info "Starting MicroVM with ${mode_str}..."
-    
+
     local vm_cmd="./${RESULT_DIR}/bin/microvm-run"
-    
+
     # Verify the command exists and is executable
     if [ ! -x "${vm_cmd}" ]; then
         log_error "VM command not found or not executable: ${vm_cmd}"
         exit 1
     fi
-    
+
     log_info "VM command: ${vm_cmd}"
     log_info "Log file: ${LOG_FILE}"
-    
+
     # Show the actual QEMU command being run
     log_info "QEMU command (from runner script):"
     grep -E "^exec|qemu" "${vm_cmd}" | head -3 | while read -r line; do
         echo "    ${line:0:100}..."
     done
-    
+
     # Start with setsid to create new session (prevents SIGHUP when parent exits)
     # stdin from /dev/null, output to log file
     log_info "Executing: setsid ${vm_cmd} < /dev/null > ${LOG_FILE} 2>&1 &"
     setsid "${vm_cmd}" < /dev/null > "${LOG_FILE}" 2>&1 &
     local pid=$!
     echo "${pid}" > "${PID_FILE}"
-    
+
     # Small delay to let QEMU start
     sleep 1
-    
+
     # Check if process is still running
     if kill -0 "${pid}" 2>/dev/null; then
         log_success "MicroVM process started (PID: ${pid})"
@@ -303,7 +374,7 @@ start_vm() {
         cat "${LOG_FILE}" 2>/dev/null | head -30 || echo "(no log)"
         exit 1
     fi
-    
+
     # Show first few lines of log
     log_info "Initial log output:"
     sleep 1
@@ -317,11 +388,11 @@ start_vm() {
 # ═══════════════════════════════════════════════════════════════════════════════
 wait_for_ready() {
     log_info "Waiting for MicroVM to be ready (timeout: ${TIMEOUT}s)..."
-    
+
     local elapsed=0
     local spinner=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     local spin_idx=0
-    
+
     while [ $elapsed -lt "$TIMEOUT" ]; do
         # Check if process is still running
         if [ -f "${PID_FILE}" ]; then
@@ -336,22 +407,22 @@ wait_for_ready() {
                 exit 1
             fi
         fi
-        
+
         # Try health endpoint
         if curl -sf "${HEALTH_URL}" > /dev/null 2>&1; then
             echo ""
             log_success "MicroVM is ready! (took ${elapsed}s)"
             return 0
         fi
-        
+
         # Show spinner
         printf "\r  ${spinner[$spin_idx]} Waiting... (%ds/%ds)" "$elapsed" "$TIMEOUT"
         spin_idx=$(( (spin_idx + 1) % ${#spinner[@]} ))
-        
+
         sleep "${POLL_INTERVAL}"
         elapsed=$((elapsed + POLL_INTERVAL))
     done
-    
+
     echo ""
     log_error "Timeout waiting for MicroVM (${TIMEOUT}s)"
     echo ""
@@ -365,7 +436,7 @@ wait_for_ready() {
 # ═══════════════════════════════════════════════════════════════════════════════
 verify_stream() {
     log_info "Verifying HLS stream..."
-    
+
     if curl -sf "${STREAM_URL}" > /dev/null 2>&1; then
         log_success "HLS stream is available"
     else
@@ -385,28 +456,28 @@ verify_stream() {
 # ═══════════════════════════════════════════════════════════════════════════════
 verify_ffmpeg_writing() {
     log_info "Verifying FFmpeg is writing files..."
-    
+
     local max_attempts=15
     local attempt=0
-    
+
     while [ $attempt -lt $max_attempts ]; do
         # Get directory listing (JSON format)
         local files_json
         files_json=$(curl -sf "${FILES_URL}" 2>/dev/null || echo "")
-        
+
         if [ -n "$files_json" ]; then
             # Count .ts and .m3u8 files (robust counting)
             local ts_count m3u8_count
             ts_count=$(echo "$files_json" | grep -o '\.ts"' | wc -l | tr -d ' ')
             m3u8_count=$(echo "$files_json" | grep -o '\.m3u8"' | wc -l | tr -d ' ')
-            
+
             # Ensure we have valid integers
             ts_count=${ts_count:-0}
             m3u8_count=${m3u8_count:-0}
-            
+
             if [ "$ts_count" -gt 0 ] && [ "$m3u8_count" -gt 0 ]; then
                 log_success "FFmpeg is writing files: ${ts_count} segments, ${m3u8_count} playlists"
-                
+
                 # Show file listing
                 echo ""
                 echo -e "${CYAN}HLS Directory Contents:${NC}"
@@ -418,16 +489,51 @@ verify_ffmpeg_writing() {
                 return 0
             fi
         fi
-        
+
         attempt=$((attempt + 1))
         printf "\r  Waiting for FFmpeg to generate segments... (%d/%d)" "$attempt" "$max_attempts"
         sleep 2
     done
-    
+
     echo ""
     log_warn "FFmpeg may still be starting - directory listing:"
     curl -sf "${FILES_URL}" 2>/dev/null | head -5 || echo "  (empty or unavailable)"
     echo ""
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Verify SSH is working
+# ═══════════════════════════════════════════════════════════════════════════════
+verify_ssh() {
+    log_info "Verifying SSH access..."
+
+    # Check if SSH port is responding (URL_BASE and SSH_PORT set based on networking mode)
+    if timeout 5 bash -c "(echo >/dev/tcp/${URL_BASE}/${SSH_PORT}) 2>/dev/null"; then
+        log_success "SSH responding at ${URL_BASE}:${SSH_PORT}"
+    else
+        log_warn "SSH at ${URL_BASE}:${SSH_PORT} not yet responding (may still be starting)"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Verify Prometheus exporters are working
+# ═══════════════════════════════════════════════════════════════════════════════
+verify_exporters() {
+    log_info "Verifying Prometheus exporters..."
+
+    # Check nginx exporter (ports set based on networking mode)
+    if curl -sf "http://${URL_BASE}:${NGINX_EXPORTER_PORT}/metrics" > /dev/null 2>&1; then
+        log_success "Nginx exporter responding at ${URL_BASE}:${NGINX_EXPORTER_PORT}"
+    else
+        log_warn "Nginx exporter at ${URL_BASE}:${NGINX_EXPORTER_PORT} not yet responding"
+    fi
+
+    # Check node exporter
+    if curl -sf "http://${URL_BASE}:${NODE_EXPORTER_PORT}/metrics" > /dev/null 2>&1; then
+        log_success "Node exporter responding at ${URL_BASE}:${NODE_EXPORTER_PORT}"
+    else
+        log_warn "Node exporter at ${URL_BASE}:${NODE_EXPORTER_PORT} not yet responding"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -442,14 +548,14 @@ main() {
         mode_str="user-mode NAT"
         net_mode="user"
     fi
-    
+
     echo ""
     echo "╔════════════════════════════════════════════════════════════════════════╗"
     echo "║                    Starting HLS Origin MicroVM                         ║"
     echo "║                    Network: ${mode_str}"
     echo "╚════════════════════════════════════════════════════════════════════════╝"
     echo ""
-    
+
     check_tap_network  # Only runs checks if --tap
     check_ports
     stop_existing
@@ -458,28 +564,25 @@ main() {
     wait_for_ready
     verify_stream
     verify_ffmpeg_writing
-    
-    # Determine URL base for output
-    local url_base
-    if [ "$USE_TAP" = true ]; then
-        url_base="${VM_IP}"
-    else
-        url_base="localhost"
-    fi
-    
+    verify_ssh
+    verify_exporters
+
     echo ""
     echo "╔════════════════════════════════════════════════════════════════════════╗"
     echo "║                    MicroVM Ready!                                      ║"
     echo "║                    Network: ${mode_str}"
     echo "╠════════════════════════════════════════════════════════════════════════╣"
-    echo "║ Stream:   http://${url_base}:${HTTP_PORT}/stream.m3u8"
-    echo "║ Files:    http://${url_base}:${HTTP_PORT}/files/"
-    echo "║ Health:   http://${url_base}:${HTTP_PORT}/health"
-    echo "║ Status:   http://${url_base}:${HTTP_PORT}/nginx_status"
-    echo "║ Metrics:  http://${url_base}:${METRICS_PORT}/metrics"
-    if [ "$USE_TAP" = true ]; then
+    echo "║ Stream:   http://${URL_BASE}:${HTTP_PORT}/stream.m3u8"
+    echo "║ Files:    http://${URL_BASE}:${HTTP_PORT}/files/"
+    echo "║ Health:   http://${URL_BASE}:${HTTP_PORT}/health"
+    echo "║ Status:   http://${URL_BASE}:${HTTP_PORT}/nginx_status"
     echo "╠════════════════════════════════════════════════════════════════════════╣"
-    echo "║ (localhost also works via nftables port forwarding)"
+    echo "║ Nginx:    http://${URL_BASE}:${NGINX_EXPORTER_PORT}/metrics"
+    echo "║ Node:     http://${URL_BASE}:${NODE_EXPORTER_PORT}/metrics"
+    if [ "$USE_TAP" = true ]; then
+    echo "║ SSH:      ssh root@${URL_BASE}"
+    else
+    echo "║ SSH:      ssh -p ${SSH_PORT} root@${URL_BASE}"
     fi
     echo "║ Console:  nc localhost ${CONSOLE_PORT}"
     echo "╠════════════════════════════════════════════════════════════════════════╣"
@@ -490,9 +593,21 @@ main() {
     if [ "$USE_TAP" = true ]; then
         echo "🚀 High-performance TAP networking enabled"
         echo "   Throughput: ~10 Gbps with ${net_mode} multiqueue"
+        echo "   Direct access to VM at ${VM_IP} (no port forwarding)"
         echo ""
     fi
-    echo "Debug commands (connect via console first):"
+    echo "📊 Prometheus metrics:"
+    echo "  curl -s http://${URL_BASE}:${NGINX_EXPORTER_PORT}/metrics | grep nginx_"
+    echo "  curl -s http://${URL_BASE}:${NODE_EXPORTER_PORT}/metrics | grep node_"
+    echo ""
+    echo "🔑 SSH access (root, empty password):"
+    if [ "$USE_TAP" = true ]; then
+    echo "  ssh root@${URL_BASE}"
+    else
+    echo "  ssh -o StrictHostKeyChecking=no -p ${SSH_PORT} root@${URL_BASE}"
+    fi
+    echo ""
+    echo "Debug commands (via SSH or console):"
     echo "  journalctl -u hls-generator -f   # FFmpeg logs"
     echo "  journalctl -u nginx -f           # Nginx logs"
     echo "  ls -la /var/hls/                 # Check HLS files"

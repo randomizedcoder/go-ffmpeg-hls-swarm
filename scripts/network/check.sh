@@ -23,7 +23,12 @@ BRIDGE="hlsbr0"
 TAP="hlstap0"
 GATEWAY="10.177.0.1"
 VM_IP="10.177.0.10"
-HTTP_PORT="17080"
+
+# VM services - direct access via VM_IP (no port forwarding)
+HTTP_PORT="17080"           # HLS origin
+NGINX_EXPORTER_PORT="9113"  # Nginx exporter (standard port)
+NODE_EXPORTER_PORT="9100"   # Node exporter (standard port)
+SSH_PORT="22"               # SSH (standard port)
 
 # Colors for output
 RED='\033[0;31m'
@@ -132,20 +137,14 @@ check_nftables() {
     if sudo nft list table ip hls_nat &>/dev/null; then
         check_pass "Table hls_nat exists"
 
-        # Check for key rules
+        # Check for masquerade rule (needed for VM internet access)
         local nat_rules
         nat_rules=$(sudo nft list table ip hls_nat 2>/dev/null)
 
         if echo "$nat_rules" | grep -q "masquerade"; then
-            check_pass "NAT masquerade rule present"
+            check_pass "NAT masquerade rule present (VM can reach internet)"
         else
             check_fail "NAT masquerade rule missing"
-        fi
-
-        if echo "$nat_rules" | grep -q "dnat to $VM_IP"; then
-            check_pass "Port forwarding rules present"
-        else
-            check_fail "Port forwarding rules missing"
         fi
     else
         check_fail "Table hls_nat does not exist"
@@ -196,11 +195,11 @@ check_vhost() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Check VM connectivity
+# Check VM connectivity (direct access - no port forwarding)
 # ═══════════════════════════════════════════════════════════════════════════════
 check_vm() {
     echo ""
-    echo "VM Connectivity:"
+    echo "VM Connectivity (direct access via ${VM_IP}):"
 
     # Try to ping VM
     if ping -c 1 -W 1 "$VM_IP" &>/dev/null; then
@@ -213,11 +212,25 @@ check_vm() {
             check_info "HLS origin not responding (VM may not be running)"
         fi
 
-        # Try localhost port forward
-        if curl -sf "http://localhost:${HTTP_PORT}/health" &>/dev/null; then
-            check_pass "Port forwarding working (localhost:${HTTP_PORT})"
+        # Try nginx metrics
+        if curl -sf "http://${VM_IP}:${NGINX_EXPORTER_PORT}/metrics" &>/dev/null; then
+            check_pass "Nginx exporter responding at ${VM_IP}:${NGINX_EXPORTER_PORT}"
         else
-            check_warn "Port forwarding not working (check nftables)"
+            check_info "Nginx exporter not responding"
+        fi
+
+        # Try node exporter
+        if curl -sf "http://${VM_IP}:${NODE_EXPORTER_PORT}/metrics" &>/dev/null; then
+            check_pass "Node exporter responding at ${VM_IP}:${NODE_EXPORTER_PORT}"
+        else
+            check_info "Node exporter not responding"
+        fi
+
+        # Try SSH
+        if timeout 2 bash -c "(echo >/dev/tcp/${VM_IP}/${SSH_PORT}) 2>/dev/null"; then
+            check_pass "SSH responding at ${VM_IP}:${SSH_PORT}"
+        else
+            check_info "SSH not responding"
         fi
     else
         check_info "VM not reachable at $VM_IP (VM may not be running)"

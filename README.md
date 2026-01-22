@@ -149,8 +149,40 @@ make test-origin-stress       # Maximum throughput
 **MicroVM mode** (full VM isolation, requires KVM):
 ```bash
 make microvm-check-kvm        # Verify KVM support
-make microvm-origin           # Run as lightweight VM
+make microvm-origin           # Run as lightweight VM (user-mode networking)
 ```
+
+**High-performance TAP networking** (recommended for load testing):
+```bash
+make network-setup            # One-time: create bridge/TAP (requires sudo)
+make microvm-start-tap        # Run VM with direct network access
+
+# Access VM services directly (no port forwarding):
+curl http://10.177.0.10:17080/health     # HLS origin
+curl http://10.177.0.10:9100/metrics     # Node exporter (system metrics)
+curl http://10.177.0.10:9113/metrics     # Nginx exporter
+ssh root@10.177.0.10                      # SSH (empty password)
+```
+
+**Reset and rebuild** (clean slate for testing):
+```bash
+make microvm-reset            # Stop VM + teardown networking
+make microvm-reset-full       # Also remove build artifacts
+
+# Full rebuild workflow:
+make microvm-reset-full       # 1. Clean everything
+make network-setup            # 2. Setup bridge/TAP
+make microvm-start-tap        # 3. Build & start VM (verifies all services)
+```
+
+**Run load tests against MicroVM:**
+```bash
+make load-test-100-microvm    # 100 concurrent clients
+make load-test-300-microvm    # 300 concurrent clients
+make load-test-1000-microvm   # 1000 concurrent clients (stress test)
+```
+
+See [MicroVM Networking](docs/MICROVM_NETWORKING.md) for details.
 
 **Container mode** (requires Podman/Docker):
 ```bash
@@ -407,7 +439,9 @@ Available at `/metrics` (default port 9090):
 | **Run a load test** | [Load Testing Guide](docs/LOAD_TESTING.md) ← **Start here!** |
 | **Start a test HLS origin** | [Quick Start](#quick-start) (above) or `make test-origin` |
 | **Run origin as MicroVM/Container** | [Test Origin Guide](docs/TEST_ORIGIN.md) |
-| **High-performance MicroVM networking** | [MicroVM Networking](docs/MICROVM_NETWORKING.md) |
+| **High-performance MicroVM networking** | [MicroVM Networking](docs/MICROVM_NETWORKING.md) — TAP/bridge, ~10 Gbps |
+| **Nginx security hardening** | [Nginx Security](docs/NGINX_SECURITY.md) — DynamicUser, syscall filtering |
+| **Reset MicroVM environment** | `make microvm-reset-full` then `make network-setup && make microvm-start-tap` |
 | **Understand the swarm client CLI** | [Configuration Reference](docs/CONFIGURATION.md) |
 | **Run at scale (OS tuning)** | [Operations Guide](docs/OPERATIONS.md) |
 | **Contribute to development** | [Contributing](CONTRIBUTING.md) → [Design](docs/DESIGN.md) |
@@ -427,7 +461,9 @@ Available at `/metrics` (default port 9090):
 - [FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md) — FFmpeg source analysis
 - [Supervision](docs/SUPERVISION.md) — Process lifecycle details
 - [Test Origin Server](docs/TEST_ORIGIN.md) — Local HLS origin for testing
-- [MicroVM Networking](docs/MICROVM_NETWORKING.md) — **TAP/bridge high-performance networking**
+- [MicroVM Networking](docs/MICROVM_NETWORKING.md) — **TAP/bridge networking** (direct VM access, ~10 Gbps)
+- [Nginx Security](docs/NGINX_SECURITY.md) — **Systemd hardening** (DynamicUser, syscall filtering, score 1.1)
+- [HLS Generator Security](docs/HLS_GENERATOR_SECURITY.md) — **FFmpeg hardening** (PrivateNetwork, syscall filtering)
 - [Client Deployment](docs/CLIENT_DEPLOYMENT.md) — Containers/VMs
 - [Nix Flake Design](docs/NIX_FLAKE_DESIGN.md) — For Nix users
 
@@ -443,7 +479,7 @@ Available at `/metrics` (default port 9090):
 | ✅ **Design & Documentation** | Complete | All docs written |
 | ✅ **FFmpeg HLS Research** | Complete | See [FFMPEG_HLS_REFERENCE.md](docs/FFMPEG_HLS_REFERENCE.md) |
 | ✅ **Nix Infrastructure** | Complete | Flake, shell, checks, apps |
-| ✅ **Test Origin Server** | **Working** | Runner, container, MicroVM |
+| ✅ **Test Origin Server** | **Working** | Runner, container, MicroVM (SSH, metrics) |
 | ✅ **Go Swarm Client** | **Working** | CLI, preflight, supervision, metrics |
 | ✅ **Makefile** | Complete | All targets functional |
 | ⏳ **NixOS Integration Tests** | Defined | Automated VM tests pending |
@@ -483,8 +519,17 @@ go build -o go-ffmpeg-hls-swarm ./cmd/go-ffmpeg-hls-swarm
 # Test origin server (FFmpeg + Nginx)
 make test-origin                    # Run locally (default port 8080)
 make test-origin ORIGIN_PORT=8888   # Run on alternate port
-make microvm-origin                 # Run in MicroVM (KVM)
-nix build .#test-origin-container   # Build OCI container
+make microvm-origin                 # Run in MicroVM (user-mode networking)
+
+# MicroVM with TAP networking (high-performance)
+make network-setup                  # Setup bridge/TAP (one-time, requires sudo)
+make microvm-start-tap              # Start VM with TAP (~10 Gbps)
+make microvm-reset                  # Stop VM + teardown networking
+make microvm-reset-full             # Full reset (includes build artifacts)
+
+# Load testing
+make load-test-100-microvm          # 100 clients against MicroVM
+make load-test-300-microvm          # 300 clients against MicroVM
 
 # Development
 make dev                            # Enter Nix shell

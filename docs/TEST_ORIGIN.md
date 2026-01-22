@@ -1792,16 +1792,36 @@ microvm = {
 };
 ```
 
-### MicroVM Debugging via TCP Console
+### MicroVM Access Methods
 
-For debugging issues inside the MicroVM, a serial console is exposed via TCP. This allows you to:
+The MicroVM provides two methods for interactive access:
 
-- View boot logs and systemd journal in real-time
-- Debug FFmpeg or Nginx service failures
-- Inspect the filesystem and running processes
-- Run arbitrary commands inside the VM
+1. **SSH** (recommended) - Full terminal support with proper pty handling
+2. **Serial Console** - Low-level access for debugging boot issues
 
-#### Connecting to the Console
+#### SSH Access (Recommended)
+
+SSH is enabled by default with root login (empty password) for easy debugging:
+
+```bash
+# Connect via SSH (recommended for interactive sessions)
+ssh -o StrictHostKeyChecking=no -p 17122 root@localhost
+
+# Run a command directly
+ssh -p 17122 root@localhost 'systemctl status hls-generator'
+
+# Copy files from VM
+scp -P 17122 root@localhost:/var/log/nginx/access.log ./
+
+# Watch logs in real-time
+ssh -p 17122 root@localhost 'journalctl -u hls-generator -f'
+```
+
+> **Security Note**: SSH with empty password is intended for local testing only. Do not expose port 17122 to untrusted networks.
+
+#### Serial Console (Alternative)
+
+For debugging boot issues or when SSH is not available, a serial console is exposed via TCP:
 
 ```bash
 # Using netcat
@@ -1861,17 +1881,20 @@ microvm = {
 |------|---------|
 | `17022` | MicroVM serial console (TCP) |
 | `17080` | Nginx HLS origin |
-| `17113` | Nginx Prometheus exporter |
+| `17100` | Prometheus node exporter (system metrics) |
+| `17113` | Prometheus nginx exporter |
+| `17122` | SSH access |
 
 #### Available Endpoints
 
-| Endpoint | Purpose |
-|----------|---------|
-| `/stream.m3u8` | HLS master playlist |
-| `/health` | Health check (returns "OK") |
-| `/nginx_status` | Nginx stub_status metrics |
-| `/files/` | JSON directory listing of HLS files |
-| `/metrics` (port 17113) | Prometheus metrics |
+| Endpoint | Port | Purpose |
+|----------|------|---------|
+| `/stream.m3u8` | 17080 | HLS master playlist |
+| `/health` | 17080 | Health check (returns "OK") |
+| `/nginx_status` | 17080 | Nginx stub_status metrics |
+| `/files/` | 17080 | JSON directory listing of HLS files |
+| `/metrics` | 17113 | Prometheus nginx metrics |
+| `/metrics` | 17100 | Prometheus node metrics (CPU, memory, disk, network) |
 
 The `/files/` endpoint is particularly useful for debugging - it returns a JSON listing of all files FFmpeg has written, allowing you to verify the stream is being generated correctly without connecting to the console.
 
@@ -1881,6 +1904,14 @@ curl http://localhost:17080/files/
 
 # Pretty-print with jq
 curl -s http://localhost:17080/files/ | jq '.[] | .name'
+
+# Check nginx metrics
+curl -s http://localhost:17113/metrics | grep nginx_
+
+# Check system metrics (CPU, memory, network)
+curl -s http://localhost:17100/metrics | grep node_cpu
+curl -s http://localhost:17100/metrics | grep node_memory_MemAvailable
+curl -s http://localhost:17100/metrics | grep node_network_receive_bytes
 ```
 
 See [docs/PORTS.md](./PORTS.md) for complete port documentation.
@@ -3026,6 +3057,18 @@ in
   };
 
   # ═══════════════════════════════════════════════════════════════════════
+  # SSH Server for remote access and debugging
+  # Host port 17122 → VM port 22
+  # ═══════════════════════════════════════════════════════════════════════
+  services.openssh = {
+    enable = true;
+    settings = {
+      PermitRootLogin = "yes";
+      PermitEmptyPasswords = "yes";  # For testing only!
+    };
+  };
+
+  # ═══════════════════════════════════════════════════════════════════════
   # Prometheus Nginx Exporter (v1.5.1)
   # See: NIX_NGINX_REFERENCE.md for detailed exporter documentation
   # Source: pkgs/servers/monitoring/prometheus/nginx-exporter.nix
@@ -3049,11 +3092,23 @@ in
   };
 
   # ═══════════════════════════════════════════════════════════════════════
+  # Prometheus Node Exporter
+  # Host port 17100 → VM port 9100
+  # ═══════════════════════════════════════════════════════════════════════
+  services.prometheus.exporters.node = {
+    enable = true;
+    port = 9100;
+    enabledCollectors = [ "cpu" "diskstats" "filesystem" "loadavg" "meminfo" "netdev" "netstat" "stat" "time" "vmstat" ];
+  };
+
+  # ═══════════════════════════════════════════════════════════════════════
   # Firewall
   # ═══════════════════════════════════════════════════════════════════════
   networking.firewall.allowedTCPPorts = [
     cfg.server.port
+    22    # SSH
     9113  # Prometheus nginx exporter
+    9100  # Prometheus node exporter
   ];
 
   # ═══════════════════════════════════════════════════════════════════════
@@ -3213,6 +3268,76 @@ nginx_http_requests_total{instance="hls-origin",profile="default"} 348291
 # TYPE nginx_up gauge
 nginx_up{instance="hls-origin",profile="default"} 1
 ```
+
+### Prometheus Node Exporter
+
+The NixOS module also includes `prometheus-node-exporter` for system-level metrics (CPU, memory, disk, network).
+
+#### Quick Verification
+
+```bash
+# Check node exporter is running (via port forward)
+curl -s http://localhost:17100/metrics | head -20
+
+# Get CPU metrics
+curl -s http://localhost:17100/metrics | grep node_cpu_seconds_total
+
+# Get memory metrics
+curl -s http://localhost:17100/metrics | grep node_memory_MemAvailable
+
+# Get network metrics
+curl -s http://localhost:17100/metrics | grep node_network_receive_bytes
+```
+
+#### Available Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `node_cpu_seconds_total` | Counter | CPU time spent in each mode (user, system, idle, etc.) |
+| `node_memory_MemTotal_bytes` | Gauge | Total memory in bytes |
+| `node_memory_MemAvailable_bytes` | Gauge | Available memory in bytes |
+| `node_network_receive_bytes_total` | Counter | Network bytes received |
+| `node_network_transmit_bytes_total` | Counter | Network bytes transmitted |
+| `node_disk_read_bytes_total` | Counter | Disk read bytes |
+| `node_disk_written_bytes_total` | Counter | Disk write bytes |
+| `node_load1` | Gauge | 1-minute load average |
+| `node_load5` | Gauge | 5-minute load average |
+| `node_filesystem_avail_bytes` | Gauge | Available filesystem space |
+
+#### Prometheus Scrape Configuration
+
+```yaml
+# prometheus.yml - add to scrape_configs
+scrape_configs:
+  - job_name: 'hls-origin-node'
+    static_configs:
+      - targets: ['localhost:17100']
+    scrape_interval: 15s
+    metrics_path: /metrics
+```
+
+#### Key Metrics for Load Testing
+
+```promql
+# CPU usage percentage
+100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+
+# Memory usage percentage
+(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100
+
+# Network throughput (bytes/sec)
+rate(node_network_receive_bytes_total[1m])
+rate(node_network_transmit_bytes_total[1m])
+
+# Load average
+node_load1
+```
+
+#### Grafana Dashboard
+
+Recommended dashboard: **Node Exporter Full** (ID: 1860)
+
+Import via Grafana: Dashboards → Import → Enter ID `1860`
 
 ---
 

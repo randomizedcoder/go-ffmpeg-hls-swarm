@@ -33,7 +33,7 @@ if [ -f "${PID_FILE}" ]; then
     rm -f "${PID_FILE}"
 fi
 
-# Also kill any orphaned qemu processes
-pkill -f "qemu.*hls-origin" 2>/dev/null || true
+# Also kill any orphaned qemu/microvm processes
+pkill -f "qemu.*hls-origin|microvm@hls-origin" 2>/dev/null || true
 
 log_success "MicroVM stopped"

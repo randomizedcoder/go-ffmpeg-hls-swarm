@@ -34,8 +34,9 @@ in
   imports = [ ./sysctl.nix ];
   # ═══════════════════════════════════════════════════════════════════════════
   # Security: Dedicated user/group for HLS file access
-  # - FFmpeg runs as 'hls' user, writes to /var/hls
-  # - Nginx runs as 'nginx' user, reads from /var/hls via 'hls' group
+  # - FFmpeg runs as fixed 'hls' user, writes to /var/hls
+  # - Nginx runs as DynamicUser, reads from /var/hls via BindReadOnlyPaths
+  # See: docs/NGINX_SECURITY.md for security design
   # ═══════════════════════════════════════════════════════════════════════════
   users.groups.hls = {};
   users.users.hls = {
@@ -44,12 +45,37 @@ in
     description = "HLS stream generator";
   };
 
-  # Add nginx to hls group so it can read the files
-  users.users.nginx.extraGroups = [ "hls" ];
+  # NOTE: No longer adding nginx to hls group - using DynamicUser + BindReadOnlyPaths instead
 
-  # tmpfs for HLS segments with restricted permissions
-  # - Owner: hls:hls
-  # - Mode: 0750 (owner rwx, group rx, others none)
+  # ═══════════════════════════════════════════════════════════════════════════
+  # User accounts for SSH access
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # User 'das' with SSH key authentication
+  users.users.das = {
+    isNormalUser = true;
+    description = "das";
+    extraGroups = [ "wheel" ];
+    openssh.authorizedKeys.keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGMCFUMSCFJX95eLfm7P9r72NBp9I1FiXwNwJ+x/HGPV das@t"
+    ];
+  };
+
+  # User 'user' with password authentication (for testing)
+  # Password: user123
+  users.users.user = {
+    isNormalUser = true;
+    description = "Test user";
+    extraGroups = [ "wheel" ];
+    password = "user123";
+  };
+
+  # tmpfs for HLS segments
+  # - Owner: hls:hls (FFmpeg writes as hls user)
+  # - Mode: 0755 (world-readable for DynamicUser nginx to read)
+  # Note: We use 0755 instead of 0750 because DynamicUser nginx
+  # cannot be added to the hls group. This is acceptable since
+  # HLS content is intended to be publicly served anyway.
   fileSystems."/var/hls" = {
     device = "tmpfs";
     fsType = "tmpfs";
@@ -57,8 +83,41 @@ in
       "size=${toString d.recommendedTmpfsMB}M"
       "uid=hls"
       "gid=hls"
-      "mode=0750"
+      "mode=0755"
     ];
+  };
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # Systemd Slices for Resource Isolation and Monitoring
+  # Provides hierarchical resource control and visibility via systemd-cgtop
+  # See: docs/HLS_GENERATOR_SECURITY.md for details
+  # ═══════════════════════════════════════════════════════════════════════════════
+  systemd.slices = {
+    # Parent slice for all HLS origin services
+    hls-origin = {
+      description = "HLS Origin Services (FFmpeg + Nginx)";
+      sliceConfig = {
+        # Combined limit for all HLS services (leave 1GB for system)
+        MemoryMax = "3G";
+        MemoryHigh = "2560M";
+      };
+    };
+
+    # Child slice for FFmpeg encoding
+    hls-generator = {
+      description = "HLS Generator (FFmpeg encoding)";
+      sliceConfig = {
+        Slice = "hls-origin.slice";
+      };
+    };
+
+    # Child slice for Nginx serving
+    hls-nginx = {
+      description = "HLS Nginx (HTTP serving)";
+      sliceConfig = {
+        Slice = "hls-origin.slice";
+      };
+    };
   };
 
   # FFmpeg HLS generator systemd service
@@ -74,13 +133,111 @@ in
       # Run as dedicated hls user (not root!)
       User = "hls";
       Group = "hls";
-      # Security hardening
-      NoNewPrivileges = true;
-      ProtectSystem = "strict";
-      ProtectHome = true;
-      PrivateTmp = true;
-      # Allow write to /var/hls
-      ReadWritePaths = [ "/var/hls" ];
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Slice Assignment (for resource isolation and monitoring)
+      # Monitor with: systemd-cgtop or systemctl status hls-generator.slice
+      # ─────────────────────────────────────────────────────────────────────────
+      Slice = "hls-generator.slice";
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Filesystem Isolation
+      # ─────────────────────────────────────────────────────────────────────────
+      ProtectSystem = "strict";     # Read-only filesystem
+      ProtectHome = true;           # No access to /home, /root
+      PrivateTmp = true;            # Private /tmp
+      ReadWritePaths = [ "/var/hls" ];  # Only write to HLS output
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Network Isolation (FFmpeg doesn't need network for test patterns!)
+      # This is our biggest security win - eliminates entire attack surface
+      # ─────────────────────────────────────────────────────────────────────────
+      PrivateNetwork = true;        # Complete network isolation
+      RestrictAddressFamilies = "none";  # No sockets at all
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Device Access
+      # ─────────────────────────────────────────────────────────────────────────
+      PrivateDevices = true;        # No access to physical devices
+      DeviceAllow = [
+        "/dev/null rw"
+        "/dev/zero rw"
+        "/dev/urandom r"            # For random number generation
+      ];
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Capability Restrictions
+      # ─────────────────────────────────────────────────────────────────────────
+      CapabilityBoundingSet = "";   # No capabilities needed
+      AmbientCapabilities = "";     # No ambient capabilities
+      NoNewPrivileges = true;       # Cannot gain privileges
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Kernel Protections
+      # ─────────────────────────────────────────────────────────────────────────
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectKernelLogs = true;
+      ProtectControlGroups = true;
+      ProtectClock = true;
+      ProtectHostname = true;
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Process Isolation
+      # ─────────────────────────────────────────────────────────────────────────
+      ProtectProc = "invisible";    # Hide other processes
+      ProcSubset = "pid";           # Minimal /proc access
+      PrivateUsers = true;          # User namespace isolation
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Namespace Restrictions
+      # ─────────────────────────────────────────────────────────────────────────
+      RestrictNamespaces = true;    # Cannot create any namespaces
+      RestrictSUIDSGID = true;      # Cannot create SUID/SGID files
+      RemoveIPC = true;             # Clean up IPC on service stop
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Execution Restrictions
+      # ─────────────────────────────────────────────────────────────────────────
+      LockPersonality = true;
+      RestrictRealtime = true;
+      MemoryDenyWriteExecute = true;  # No JIT (FFmpeg doesn't need it)
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # System Call Filtering
+      # ─────────────────────────────────────────────────────────────────────────
+      SystemCallArchitectures = "native";
+      SystemCallFilter = [
+        "@system-service"
+        "~@privileged"
+        "~@resources"
+        "~@mount"
+        "~@debug"
+        "~@module"
+        "~@reboot"
+        "~@swap"
+        "~@obsolete"
+        "~@cpu-emulation"
+        "~@clock"                   # FFmpeg uses gettimeofday, not settime
+        "~@raw-io"
+      ];
+      SystemCallErrorNumber = "EPERM";
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # File Permissions
+      # ─────────────────────────────────────────────────────────────────────────
+      UMask = "0022";               # Files readable by nginx (world-readable)
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Resource Limits (based on actual measurements: ~68MB RAM, ~9.4% CPU)
+      # See: docs/HLS_GENERATOR_SECURITY.md for analysis
+      # ─────────────────────────────────────────────────────────────────────────
+      MemoryMax = "256M";           # 3.7x actual usage - generous headroom
+      MemoryHigh = "200M";          # Warn before hard limit
+      CPUQuota = "50%";             # 5x actual usage - allows encoding peaks
+      LimitNOFILE = 256;            # Only needs HLS segment files
+      LimitNPROC = 64;              # FFmpeg spawns threads, not processes
+
       ExecStart = "${pkgs.ffmpeg-full}/bin/ffmpeg ${lib.concatStringsSep " " (map lib.escapeShellArg ffmpegArgs)}";
       Restart = "always";
       RestartSec = 2;
@@ -95,8 +252,15 @@ in
   # Nginx HLS server with optimized caching and performance
   services.nginx = {
     enable = true;
+    enableReload = true;  # Graceful reload without restart
     recommendedOptimisation = true;
     recommendedProxySettings = true;
+
+    # Global HTTP config
+    # Note: server_tokens is already set by recommendedOptimisation
+    commonHttpConfig = ''
+      # Additional security headers (server_tokens already off via recommendedOptimisation)
+    '';
 
     # Append to global http config
     appendHttpConfig = ''
@@ -185,6 +349,137 @@ in
   };
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # Nginx Security Hardening (Phase 2 - Production Grade)
+  # See: docs/NGINX_SECURITY.md for detailed documentation
+  # Target security score: ~0.5 (from systemd-analyze security nginx)
+  # ═══════════════════════════════════════════════════════════════════════════
+  systemd.services.nginx.serviceConfig = {
+    # ─────────────────────────────────────────────────────────────────────────
+    # Slice Assignment (for resource isolation and monitoring)
+    # Monitor with: systemd-cgtop or systemctl status hls-nginx.slice
+    # ─────────────────────────────────────────────────────────────────────────
+    Slice = "hls-nginx.slice";
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DynamicUser - Most powerful isolation feature
+    # Allocates temporary UID/GID, user doesn't exist when service is off
+    # ─────────────────────────────────────────────────────────────────────────
+    DynamicUser = true;
+
+    # Systemd-managed directories (owned by dynamic user)
+    StateDirectory = "nginx";       # → /var/lib/nginx
+    CacheDirectory = "nginx";       # → /var/cache/nginx
+    LogsDirectory = "nginx";        # → /var/log/nginx
+    RuntimeDirectory = "nginx";     # → /run/nginx
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # HLS Content Access - READ-ONLY (enforced by systemd)
+    # FFmpeg writes as 'hls' user, nginx reads via bind mount
+    # ─────────────────────────────────────────────────────────────────────────
+    BindReadOnlyPaths = [ "/var/hls" ];
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Resource Limits
+    # Nginx is the main load testing target - give it most VM resources
+    # VM has 4 CPUs and 4GB RAM; FFmpeg uses ~68MB/10%, system uses ~300MB
+    # ─────────────────────────────────────────────────────────────────────────
+    MemoryMax = "2G";               # Plenty for 10k+ connections and file cache
+    MemoryHigh = "1536M";           # Warn at 1.5GB
+    CPUQuota = "300%";              # Allow 3 cores for request handling
+    LimitNOFILE = 65536;            # High FD limit for many connections
+    LimitNPROC = 1024;
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # File Permissions
+    # ─────────────────────────────────────────────────────────────────────────
+    UMask = "0027";                 # Stricter file creation mask
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Filesystem Isolation
+    # ─────────────────────────────────────────────────────────────────────────
+    ProtectSystem = "strict";       # Read-only filesystem except explicit paths
+    ProtectHome = true;             # No access to /home, /root, /run/user
+    PrivateTmp = true;              # Private /tmp
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Capabilities (none needed for port 17080)
+    # ─────────────────────────────────────────────────────────────────────────
+    CapabilityBoundingSet = "";     # No capabilities needed
+    AmbientCapabilities = "";       # No ambient capabilities
+    NoNewPrivileges = true;         # Prevent privilege escalation
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Device Access
+    # ─────────────────────────────────────────────────────────────────────────
+    PrivateDevices = true;          # No access to physical devices
+    DeviceAllow = [
+      "/dev/null rw"
+      "/dev/zero rw"
+      "/dev/urandom r"
+    ];
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Kernel Protections
+    # ─────────────────────────────────────────────────────────────────────────
+    ProtectKernelTunables = true;
+    ProtectKernelModules = true;
+    ProtectKernelLogs = true;
+    ProtectControlGroups = true;
+    ProtectClock = true;
+    ProtectHostname = true;
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Namespace/Personality Restrictions
+    # ─────────────────────────────────────────────────────────────────────────
+    RestrictNamespaces = true;
+    RestrictRealtime = true;
+    RestrictSUIDSGID = true;
+    LockPersonality = true;
+    MemoryDenyWriteExecute = true;
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # User/Process Isolation
+    # ─────────────────────────────────────────────────────────────────────────
+    PrivateUsers = true;            # Isolated user namespace
+    ProtectProc = "invisible";      # Hide other processes
+    ProcSubset = "pid";             # Minimal /proc access
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Network Restrictions
+    # ─────────────────────────────────────────────────────────────────────────
+    RestrictAddressFamilies = [
+      "AF_INET"                     # IPv4 (required)
+      "AF_INET6"                    # IPv6 (required)
+      "AF_UNIX"                     # Unix sockets (worker communication)
+    ];
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # System Call Filtering
+    # ─────────────────────────────────────────────────────────────────────────
+    SystemCallFilter = [
+      "@system-service"
+      "~@privileged"                # Block privilege escalation
+      "~@resources"                 # Block resource priority changes
+    ];
+    SystemCallErrorNumber = "EPERM";  # Fail predictably
+    SystemCallArchitectures = "native";
+  };
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # SSH Server for remote access and debugging
+  # Host port 17122 → VM port 22
+  # See: docs/PORTS.md for port documentation
+  # ═══════════════════════════════════════════════════════════════════════════
+  services.openssh = {
+    enable = true;
+    settings = {
+      # Allow root login with empty password (for testing only!)
+      PermitRootLogin = "yes";
+      PermitEmptyPasswords = "yes";
+    };
+  };
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # Prometheus Nginx Exporter (v1.5.1)
   # Exposes nginx metrics for Grafana dashboards and load test analysis
   # See: docs/NIX_NGINX_REFERENCE.md for detailed documentation
@@ -204,6 +499,36 @@ in
     telemetryPath = "/metrics";
   };
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Prometheus Node Exporter
+  # Exposes system metrics (CPU, memory, disk, network)
+  # Host port 17100 → VM port 9100
+  # See: docs/PORTS.md for port documentation
+  # ═══════════════════════════════════════════════════════════════════════════
+  services.prometheus.exporters.node = {
+    enable = true;
+    port = 9100;
+
+    # Enable useful collectors for load testing
+    enabledCollectors = [
+      "cpu"
+      "diskstats"
+      "filesystem"
+      "loadavg"
+      "meminfo"
+      "netdev"
+      "netstat"
+      "stat"
+      "time"
+      "vmstat"
+    ];
+
+    # Disable collectors that add noise
+    disabledCollectors = [
+      "textfile"  # No textfile metrics
+    ];
+  };
+
   # Use nftables firewall (modern, cleaner than iptables)
   networking.nftables = {
     enable = true;
@@ -212,31 +537,37 @@ in
       content = ''
         chain input {
           type filter hook input priority 0; policy accept;
-          
+
           # Accept loopback
           iifname "lo" accept
-          
+
           # Accept established/related
           ct state {established, related} accept
-          
+
           # Accept ICMP (ping)
           ip protocol icmp accept
           ip6 nexthdr icmpv6 accept
-          
+
           # Accept HLS origin port
           tcp dport ${toString config.server.port} accept
-          
-          # Accept Prometheus exporter
+
+          # Accept SSH
+          tcp dport 22 accept
+
+          # Accept Prometheus nginx exporter
           tcp dport 9113 accept
-          
+
+          # Accept Prometheus node exporter
+          tcp dport 9100 accept
+
           # Accept all (permissive for testing)
           accept
         }
-        
+
         chain output {
           type filter hook output priority 0; policy accept;
         }
-        
+
         chain forward {
           type filter hook forward priority 0; policy accept;
         }

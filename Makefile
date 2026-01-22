@@ -309,9 +309,15 @@ microvm-start: microvm-check-kvm ## Start MicroVM with health polling (recommend
 microvm-stop: ## Stop the MicroVM
 	@./scripts/microvm/stop.sh
 
-microvm-check-ports: ## Check if MicroVM ports (17080, 17113, 17022) are available
+microvm-reset: ## Stop VM and teardown networking (reset to clean state)
+	@./scripts/microvm/reset.sh
+
+microvm-reset-full: ## Full reset: stop VM, teardown networking, remove build artifacts
+	@./scripts/microvm/reset.sh --full
+
+microvm-check-ports: ## Check if MicroVM ports (17080, 17100, 17113, 17122, 17022) are available
 	@echo "$(CYAN)Checking MicroVM port availability (see docs/PORTS.md)...$(RESET)"
-	@for port in 17080 17113 17022; do \
+	@for port in 17080 17100 17113 17122 17022; do \
 		if bash -c "(echo >/dev/tcp/localhost/$$port) 2>/dev/null"; then \
 			echo "$(RED)ERROR: Port $$port is already in use!$(RESET)"; \
 			echo "  To free: sudo fuser -k $$port/tcp"; \

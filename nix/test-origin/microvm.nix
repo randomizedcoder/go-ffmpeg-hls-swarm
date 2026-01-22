@@ -121,11 +121,23 @@ let
               host.port = config.server.port;
               guest.port = config.server.port;
             }
+            # SSH (see docs/PORTS.md)
+            {
+              from = "host";
+              host.port = 17122;  # Host-side port (17xxx + 122 suggests SSH)
+              guest.port = 22;    # Standard SSH port
+            }
             # Prometheus nginx exporter (see docs/PORTS.md)
             {
               from = "host";
               host.port = 17113;  # Host-side port
               guest.port = 9113;  # Internal exporter port
+            }
+            # Prometheus node exporter (see docs/PORTS.md)
+            {
+              from = "host";
+              host.port = 17100;  # Host-side port (17xxx + 100 suggests node-exporter)
+              guest.port = 9100;  # Internal exporter port
             }
           ];
 
@@ -137,7 +149,7 @@ let
           # ═══════════════════════════════════════════════════════════════════
           # Disable default stdio serial so we can use TCP for ttyS0
           qemu.serialConsole = false;
-          
+
           # Add TCP serial as ttyS0 (matches kernel console=ttyS0)
           qemu.extraArgs = [
             "-serial" "tcp:0.0.0.0:17022,server=on,wait=off"
@@ -199,15 +211,19 @@ in {
     echo "║ Stream:   http://${net.staticIp}:${toString config.server.port}/${config.hls.playlistName}                      ║"
     echo "║ Health:   http://${net.staticIp}:${toString config.server.port}/health                             ║"
     echo "║ Files:    http://${net.staticIp}:${toString config.server.port}/files/                             ║"
-    echo "║ Metrics:  http://${net.staticIp}:9113/metrics                           ║"
     echo "╠════════════════════════════════════════════════════════════════════════╣"
-    echo "║ (Port forwarding active - localhost also works)                        ║"
+    echo "║ Nginx:    http://${net.staticIp}:9113/metrics                           ║"
+    echo "║ Node:     http://${net.staticIp}:9100/metrics                           ║"
+    echo "║ SSH:      ssh root@${net.staticIp}                                      ║"
     '' else ''
     echo "║ Stream:   http://localhost:${toString config.server.port}/${config.hls.playlistName}                               ║"
     echo "║ Health:   http://localhost:${toString config.server.port}/health                                      ║"
     echo "║ Files:    http://localhost:${toString config.server.port}/files/                                      ║"
     echo "║ Status:   http://localhost:${toString config.server.port}/nginx_status                                ║"
-    echo "║ Metrics:  http://localhost:17113/metrics                               ║"
+    echo "╠════════════════════════════════════════════════════════════════════════╣"
+    echo "║ Nginx:    http://localhost:17113/metrics  (nginx exporter)             ║"
+    echo "║ Node:     http://localhost:17100/metrics  (node exporter)              ║"
+    echo "║ SSH:      ssh -p 17122 root@localhost                                  ║"
     ''}
     echo "║ Console:  nc localhost 17022 (or socat - TCP:localhost:17022)        ║"
     ${lib.optionalString log.enabled ''
@@ -222,8 +238,12 @@ in {
     echo "   Ensure 'make network-setup' was run first!"
     echo ""
     '' else ''
-    echo "📊 Prometheus metrics available at http://localhost:17113/metrics"
+    echo "📊 Prometheus metrics:"
     echo "   curl -s http://localhost:17113/metrics | grep nginx_"
+    echo "   curl -s http://localhost:17100/metrics | grep node_"
+    echo ""
+    echo "🔑 SSH access (root, empty password):"
+    echo "   ssh -o StrictHostKeyChecking=no -p 17122 root@localhost"
     echo ""
     ''}
     ${lib.optionalString log.enabled ''

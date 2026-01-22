@@ -79,7 +79,9 @@ With bridge networking, the VM has its own IP. Access services directly:
 | Service | User-mode NAT | TAP/Bridge |
 |---------|---------------|------------|
 | HLS Origin | `localhost:17080` | `10.177.0.10:17080` |
-| Prometheus | `localhost:17113` | `10.177.0.10:17113` |
+| Node Exporter | `localhost:17100` | `10.177.0.10:9100` |
+| Nginx Exporter | `localhost:17113` | `10.177.0.10:9113` |
+| SSH | `localhost:17122` | `10.177.0.10:22` |
 | Console | `localhost:17022` | `localhost:17022` (always host) |
 
 > **Note:** The serial console (17022) is always on `localhost` because it's QEMU listening on the host, not a service inside the VM.
@@ -202,8 +204,10 @@ table ip $TABLE {
     # Port forwarding: localhost -> VM (for backwards compatibility)
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
-        tcp dport 17080 dnat to $VM_IP:17080
-        tcp dport 17113 dnat to $VM_IP:17113
+        tcp dport 17080 dnat to $VM_IP:17080          # HLS origin
+        tcp dport 17100 dnat to $VM_IP:9100           # Node exporter
+        tcp dport 17113 dnat to $VM_IP:9113           # Nginx exporter
+        tcp dport 17122 dnat to $VM_IP:22             # SSH
         # Note: 17022 NOT forwarded - QEMU serial console on host
     }
 
@@ -211,7 +215,9 @@ table ip $TABLE {
     chain output {
         type nat hook output priority dstnat; policy accept;
         ip daddr 127.0.0.1 tcp dport 17080 dnat to $VM_IP:17080
-        ip daddr 127.0.0.1 tcp dport 17113 dnat to $VM_IP:17113
+        ip daddr 127.0.0.1 tcp dport 17100 dnat to $VM_IP:9100
+        ip daddr 127.0.0.1 tcp dport 17113 dnat to $VM_IP:9113
+        ip daddr 127.0.0.1 tcp dport 17122 dnat to $VM_IP:22
         # 17022 NOT forwarded - QEMU serial console on host
     }
 }
@@ -333,7 +339,9 @@ echo "║  Subnet:    $SUBNET                                     ║"
 echo "╠════════════════════════════════════════════════════════════════╣"
 echo "║  Port forwarding active:                                       ║"
 echo "║    localhost:17080 -> $VM_IP:17080 (HLS)               ║"
-echo "║    localhost:17113 -> $VM_IP:17113 (Prometheus)        ║"
+echo "║    localhost:17100 -> $VM_IP:9100  (Node Exporter)     ║"
+echo "║    localhost:17113 -> $VM_IP:9113  (Nginx Exporter)    ║"
+echo "║    localhost:17122 -> $VM_IP:22    (SSH)               ║"
 echo "║    localhost:17022 (QEMU serial - not forwarded)       ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""

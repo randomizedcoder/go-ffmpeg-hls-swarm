@@ -35,6 +35,8 @@ This is the **main design document** for contributors. For users, start with [RE
 |----------|---------|
 | [PORTS.md](PORTS.md) | **Network port configuration** — all ports, defaults, how to change |
 | [MICROVM_NETWORKING.md](MICROVM_NETWORKING.md) | **High-performance TAP/bridge networking** for MicroVMs |
+| [NGINX_SECURITY.md](NGINX_SECURITY.md) | **Nginx security hardening** — systemd isolation, DynamicUser, syscall filtering |
+| [HLS_GENERATOR_SECURITY.md](HLS_GENERATOR_SECURITY.md) | **FFmpeg security hardening** — PrivateNetwork, syscall filtering |
 | [METRICS_ENHANCEMENT_DESIGN.md](METRICS_ENHANCEMENT_DESIGN.md) | **FFmpeg output parsing** — detailed metrics from client output |
 | [METRICS_IMPLEMENTATION_PLAN.md](METRICS_IMPLEMENTATION_PLAN.md) | **Implementation plan** — phases, files, functions, tests |
 | [LOAD_TESTING.md](LOAD_TESTING.md) | Running load tests with pre-configured scripts |

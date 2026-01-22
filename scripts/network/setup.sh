@@ -22,10 +22,8 @@ GATEWAY="10.177.0.1"
 VM_IP="10.177.0.10"
 CURRENT_USER="${USER:-$(whoami)}"
 
-# Ports to forward to VM (matching docs/PORTS.md)
-# Note: 17022 is NOT forwarded - it's QEMU's serial console on the HOST
-HTTP_PORT="17080"
-METRICS_PORT="17113"
+# VM services (direct access via VM_IP, no port forwarding needed)
+# See docs/PORTS.md for port documentation
 
 # Colors for output
 RED='\033[0;31m'
@@ -151,26 +149,15 @@ configure_nftables() {
     sudo nft delete table ip hls_nat 2>/dev/null || true
     sudo nft delete table ip hls_filter 2>/dev/null || true
 
-    # Create NAT table with port forwarding
+    # Create NAT table - only masquerade needed for VM internet access
+    # No port forwarding - use VM IP directly (simpler, more reliable)
     sudo nft -f - <<EOF
 # HLS MicroVM NAT table
-# Provides: masquerading for VM internet access, port forwarding for localhost access
+# Provides: masquerading so VM can reach the internet
 table ip hls_nat {
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
         ip saddr ${SUBNET} oifname != "${BRIDGE}" masquerade
-    }
-
-    chain prerouting {
-        type nat hook prerouting priority dstnat; policy accept;
-        tcp dport ${HTTP_PORT} dnat to ${VM_IP}:${HTTP_PORT}
-        tcp dport ${METRICS_PORT} dnat to ${VM_IP}:${METRICS_PORT}
-    }
-
-    chain output {
-        type nat hook output priority dstnat; policy accept;
-        ip daddr 127.0.0.1 tcp dport ${HTTP_PORT} dnat to ${VM_IP}:${HTTP_PORT}
-        ip daddr 127.0.0.1 tcp dport ${METRICS_PORT} dnat to ${VM_IP}:${METRICS_PORT}
     }
 }
 
@@ -214,14 +201,16 @@ print_summary() {
     echo "║                    HLS Network Setup Complete                          ║"
     echo "╠════════════════════════════════════════════════════════════════════════╣"
     echo "║  Bridge:     ${BRIDGE} (${GATEWAY})"
-    echo "║  TAP:        ${TAP}"
+    echo "║  TAP:        ${TAP} (multiqueue)"
     echo "║  VM IP:      ${VM_IP}"
     echo "║  Subnet:     ${SUBNET}"
     echo "╠════════════════════════════════════════════════════════════════════════╣"
-    echo "║  Port Forwarding (localhost -> VM):                                    ║"
-    echo "║    :${HTTP_PORT}  -> ${VM_IP}:${HTTP_PORT}  (HLS Origin)"
-    echo "║    :${METRICS_PORT}  -> ${VM_IP}:${METRICS_PORT}  (Prometheus)"
-    echo "║  QEMU Console: localhost:17022 (HOST, not forwarded)                 ║"
+    echo "║  Direct Access (no port forwarding needed):                            ║"
+    echo "║    http://${VM_IP}:17080/   (HLS Origin)"
+    echo "║    http://${VM_IP}:9100/    (Node Exporter)"
+    echo "║    http://${VM_IP}:9113/    (Nginx Exporter)"
+    echo "║    ssh root@${VM_IP}        (SSH)"
+    echo "║  QEMU Console: nc localhost 17022                                    ║"
     echo "╚════════════════════════════════════════════════════════════════════════╝"
     echo ""
     echo "Next steps:"

@@ -1,9 +1,18 @@
 # Security Considerations
 
 > **Type**: Contributor Documentation
-> **Related**: [DESIGN.md](DESIGN.md), [CONFIGURATION.md](CONFIGURATION.md)
+> **Related**: [DESIGN.md](DESIGN.md), [CONFIGURATION.md](CONFIGURATION.md), [NGINX_SECURITY.md](NGINX_SECURITY.md), [HLS_GENERATOR_SECURITY.md](HLS_GENERATOR_SECURITY.md)
 
 This document covers security considerations for `go-ffmpeg-hls-swarm`, with particular focus on the TLS verification bypass feature (`--dangerous` flag).
+
+### MicroVM Service Hardening
+
+| Service | Document | Starting Score | Target Score |
+|---------|----------|----------------|--------------|
+| **nginx** | [NGINX_SECURITY.md](NGINX_SECURITY.md) | 1.6 | **1.1** ✅ |
+| **hls-generator** | [HLS_GENERATOR_SECURITY.md](HLS_GENERATOR_SECURITY.md) | 8.3 | ~1.5-2.0 |
+
+Both documents cover systemd isolation, syscall filtering, capability restrictions, and other hardening techniques.
 
 ---
 
