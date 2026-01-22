@@ -38,10 +38,10 @@ type Callbacks struct {
 // Supervisor manages the lifecycle of a single client process.
 // It handles starting, monitoring, and restarting the process with backoff.
 type Supervisor struct {
-	clientID int
-	builder  ProcessBuilder
-	backoff  *Backoff
-	logger   *slog.Logger
+	clientID  int
+	builder   ProcessBuilder
+	backoff   *Backoff
+	logger    *slog.Logger
 	callbacks Callbacks
 
 	// State management
@@ -50,8 +50,8 @@ type Supervisor struct {
 	startTime time.Time
 
 	// Current process
-	cmd    *exec.Cmd
-	cmdMu  sync.Mutex
+	cmd   *exec.Cmd
+	cmdMu sync.Mutex
 
 	// Configuration
 	maxRestarts int // 0 = unlimited

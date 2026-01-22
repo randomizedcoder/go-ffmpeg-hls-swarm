@@ -38,8 +38,13 @@
 #   nix build .#swarm-client-container    # Build OCI container
 #
 # Available profiles:
-#   test-origin: default, low-latency, 4k-abr, stress-test
+#   test-origin: default, low-latency, 4k-abr, stress-test, logged, debug
 #   swarm-client: default, stress, gentle, burst, extreme
+#
+# Logging profiles (for performance analysis):
+#   nix run .#test-origin-logged           # With segment logging (512k buffer)
+#   nix run .#test-origin-debug            # Full logging with compression
+#   nix run .#test-origin-vm-logged        # MicroVM with logging enabled
 #
 {
   description = "HLS load testing tool using FFmpeg process swarm";
@@ -122,6 +127,14 @@
         testOrigin4kAbr = import ./nix/test-origin { inherit pkgs lib microvm; profile = "4k-abr"; };
         testOriginStress = import ./nix/test-origin { inherit pkgs lib microvm; profile = "stress-test"; };
 
+        # Logging-enabled profiles for performance analysis
+        testOriginLogged = import ./nix/test-origin { inherit pkgs lib microvm; profile = "logged"; };
+        testOriginDebug = import ./nix/test-origin { inherit pkgs lib microvm; profile = "debug"; };
+
+        # TAP networking profiles (high performance, requires make network-setup)
+        testOriginTap = import ./nix/test-origin { inherit pkgs lib microvm; profile = "tap"; };
+        testOriginTapLogged = import ./nix/test-origin { inherit pkgs lib microvm; profile = "tap-logged"; };
+
         # Swarm client components (with profile support)
         swarmClient = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; };
         swarmClientStress = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; profile = "stress"; };
@@ -146,10 +159,20 @@
           test-origin-4k-abr = testOrigin4kAbr.runner;
           test-origin-stress = testOriginStress.runner;
 
+          # Logging-enabled profiles for performance analysis
+          test-origin-logged = testOriginLogged.runner;
+          test-origin-debug = testOriginDebug.runner;
+
           # MicroVM packages (Linux only, requires KVM)
           test-origin-vm = testOrigin.microvm.vm or (throw "MicroVM not available - requires microvm input");
           test-origin-vm-low-latency = testOriginLowLatency.microvm.vm or null;
           test-origin-vm-stress = testOriginStress.microvm.vm or null;
+          test-origin-vm-logged = testOriginLogged.microvm.vm or null;
+          test-origin-vm-debug = testOriginDebug.microvm.vm or null;
+
+          # TAP networking MicroVMs (high performance, requires make network-setup)
+          test-origin-vm-tap = testOriginTap.microvm.vm or null;
+          test-origin-vm-tap-logged = testOriginTapLogged.microvm.vm or null;
 
           # Swarm client packages (default profile)
           swarm-client = swarmClient.runner;
@@ -185,10 +208,38 @@
             program = "${testOriginStress.runner}/bin/test-hls-origin";
           };
 
+          # Logging-enabled profiles for performance analysis
+          test-origin-logged = {
+            type = "app";
+            program = "${testOriginLogged.runner}/bin/test-hls-origin";
+          };
+          test-origin-debug = {
+            type = "app";
+            program = "${testOriginDebug.runner}/bin/test-hls-origin";
+          };
+
           # MicroVM apps (Linux only, requires KVM)
           test-origin-vm = {
             type = "app";
             program = "${testOrigin.microvm.runScript}";
+          };
+          test-origin-vm-logged = {
+            type = "app";
+            program = "${testOriginLogged.microvm.runScript}";
+          };
+          test-origin-vm-debug = {
+            type = "app";
+            program = "${testOriginDebug.microvm.runScript}";
+          };
+
+          # TAP networking MicroVM apps (high performance)
+          test-origin-vm-tap = {
+            type = "app";
+            program = "${testOriginTap.microvm.runScript}";
+          };
+          test-origin-vm-tap-logged = {
+            type = "app";
+            program = "${testOriginTapLogged.microvm.runScript}";
           };
 
           # Swarm client apps (different profiles)

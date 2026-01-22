@@ -7,6 +7,7 @@
 # - tcp_nodelay for manifests: Immediate delivery for freshness
 # - reset_timedout_connection: Free memory from dirty client exits
 # - Dynamic cache headers based on segment duration
+# - Optional buffered logging for performance analysis
 #
 { pkgs, lib, config }:
 
@@ -14,6 +15,7 @@ let
   cfg = config.server;
   c = config.cache;
   h = config.hls;
+  log = config.logging;
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Build Cache-Control header values (dynamically from config)
@@ -35,9 +37,56 @@ let
   # Segment lifetime for comments
   segmentLifetime = toString ((h.listSize + h.deleteThreshold) * h.segmentDuration);
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Logging configuration
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Build access_log directive with buffering
+  # Format: access_log /path format buffer=512k flush=10s [gzip=4];
+  mkAccessLog = path: format:
+    let
+      gzipPart = if log.gzip > 0 then " gzip=${toString log.gzip}" else "";
+    in "access_log ${path} ${format} buffer=${log.buffer} flush=${log.flushInterval}${gzipPart}";
+
+  # Log format definitions for http block
+  logFormats = ''
+    # ═══════════════════════════════════════════════════════════════════════
+    # Custom log formats for HLS performance analysis
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # Timing format - includes request_time for latency analysis
+    log_format timing '$remote_addr - [$time_local] '
+                      '"$request" $status $body_bytes_sent '
+                      'rt=$request_time';
+
+    # HLS performance format - ISO timestamps, compact
+    log_format hls_perf '$time_iso8601 $status $request_time $body_bytes_sent '
+                        '$request_uri';
+  '';
+
+  # Access log directive for segments
+  segmentAccessLog = if log.enabled
+    then mkAccessLog "${log.directory}/${log.files.segments}" "hls_perf"
+    else "access_log off";
+
+  # Access log directive for manifests
+  manifestAccessLog = if log.enabled && !log.segmentsOnly
+    then mkAccessLog "${log.directory}/${log.files.manifests}" "timing"
+    else "access_log off";
+
+  # Default access log (for locations not specifically configured)
+  defaultAccessLog = if log.enabled && !log.segmentsOnly
+    then mkAccessLog "${log.directory}/${log.files.all}" "timing"
+    else "access_log off";
+
 in rec {
   # Export cache headers
   inherit segmentCacheControl manifestCacheControl masterCacheControl;
+
+  # Export logging configuration for other modules
+  inherit logFormats segmentAccessLog manifestAccessLog defaultAccessLog;
+  loggingEnabled = log.enabled;
+  loggingDirectory = log.directory;
 
   # ═══════════════════════════════════════════════════════════════════════════
   # High-performance nginx.conf - Optimized for 100k+ concurrent connections
@@ -61,6 +110,8 @@ in rec {
         include       ${pkgs.nginx}/conf/mime.types;
         default_type  application/octet-stream;
 
+        ${lib.optionalString log.enabled logFormats}
+
         # ═══════════════════════════════════════════════════════════════
         # Performance tuning (global)
         # ═══════════════════════════════════════════════════════════════
@@ -79,7 +130,7 @@ in rec {
         open_file_cache_errors   on;
 
         sendfile_max_chunk 512k;
-        access_log off;
+        ${defaultAccessLog};
         gzip off;  # .ts files are already compressed
 
         # ═══════════════════════════════════════════════════════════════
@@ -114,6 +165,7 @@ in rec {
             # - tcp_nodelay for freshness over throughput
             # ═══════════════════════════════════════════════════════════
             location ~ \.m3u8$ {
+                ${manifestAccessLog};
                 tcp_nodelay    on;  # Immediate delivery for freshness
                 add_header Cache-Control "${manifestCacheControl}";
                 add_header Access-Control-Allow-Origin "*";
@@ -129,6 +181,7 @@ in rec {
             # - tcp_nopush for throughput (fill packets)
             # ═══════════════════════════════════════════════════════════
             location ~ \.ts$ {
+                ${segmentAccessLog};
                 sendfile       on;
                 tcp_nopush     on;   # Fill packets for throughput
                 aio            threads;

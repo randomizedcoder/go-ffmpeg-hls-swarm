@@ -12,9 +12,9 @@ import (
 // It ensures clients don't all start at once (thundering herd)
 // and adds per-client jitter to prevent synchronization.
 type RampScheduler struct {
-	rate       int                      // clients per second
-	maxJitter  time.Duration            // maximum jitter per client
-	jitter     *supervisor.JitterSource // deterministic jitter source
+	rate      int                      // clients per second
+	maxJitter time.Duration            // maximum jitter per client
+	jitter    *supervisor.JitterSource // deterministic jitter source
 }
 
 // NewRampScheduler creates a new scheduler with the given rate and jitter.

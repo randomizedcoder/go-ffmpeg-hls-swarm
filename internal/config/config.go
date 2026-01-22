@@ -76,7 +76,7 @@ func DefaultConfig() *Config {
 		RestartOnStall: false,
 
 		// Observability
-		MetricsAddr: "0.0.0.0:9090",
+		MetricsAddr: "0.0.0.0:17091",  // See docs/PORTS.md
 		Verbose:     false,
 		LogFormat:   "json",
 

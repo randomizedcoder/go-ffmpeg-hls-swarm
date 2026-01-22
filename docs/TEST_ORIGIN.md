@@ -29,7 +29,7 @@ A reproducible, containerized HLS origin server for testing `go-ffmpeg-hls-swarm
 │  │                        FFmpeg Process                              │   │
 │  │   ┌─────────────┐    ┌──────────────┐    ┌─────────────────────┐ │   │
 │  │   │ Test Source │ -> │  H.264 Enc   │ -> │   HLS Muxer         │ │   │
-│  │   │ (testsrc2)  │    │  (libx264)   │    │   (segment files)   │ │   │
+│  │   │ (smptebars) │    │  (libx264)   │    │   (segment files)   │ │   │
 │  │   └─────────────┘    └──────────────┘    └─────────┬───────────┘ │   │
 │  └────────────────────────────────────────────────────┼─────────────┘   │
 │                                                        │                 │
@@ -113,8 +113,8 @@ When deployed as a MicroVM, the same components run inside a lightweight VM:
 
 ```bash
 ffmpeg -re \
-  -f lavfi -i "testsrc2=size=1280x720:rate=30:duration=0" \
-  -f lavfi -i "sine=frequency=1000:sample_rate=48000:duration=0" \
+  -f lavfi -i "smptebars=size=1280x720:rate=30" \
+  -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
   -c:v libx264 -preset ultrafast -tune zerolatency \
   -profile:v baseline -level 3.1 \
   -g 60 -keyint_min 60 -sc_threshold 0 \
@@ -135,7 +135,7 @@ ffmpeg -re \
 | `-re` | - | Read input at native frame rate (real-time) |
 | `-f lavfi -i "testsrc2=..."` | 1280x720@30fps | Synthetic test pattern (no external source) |
 | `-f lavfi -i "sine=..."` | 1kHz @ 48kHz | Synthetic audio tone |
-| `duration=0` | infinite | Run indefinitely for live simulation |
+| (no duration) | infinite | Lavfi sources are infinite by default (don't use `duration=0`!) |
 | `-c:v libx264` | H.264 | Universal codec support |
 | `-preset ultrafast` | - | Minimize CPU for test source |
 | `-tune zerolatency` | - | Reduce encoder buffering |
@@ -151,14 +151,44 @@ ffmpeg -re \
 
 FFmpeg provides several test pattern sources via `lavfi`:
 
-| Source | Description | Example |
-|--------|-------------|---------|
-| `testsrc` | Classic test pattern with scrolling numbers | `-f lavfi -i testsrc=size=1280x720:rate=30` |
-| `testsrc2` | Modern pattern with timestamp overlay | `-f lavfi -i testsrc2=size=1280x720:rate=30` |
-| `smptebars` | SMPTE color bars (broadcast standard) | `-f lavfi -i smptebars=size=1280x720:rate=30` |
-| `pal75bars` | PAL 75% color bars | `-f lavfi -i pal75bars=size=1280x720:rate=30` |
-| `color` | Solid color | `-f lavfi -i color=c=blue:size=1280x720:rate=30` |
-| `rgbtestsrc` | RGB gradient test | `-f lavfi -i rgbtestsrc=size=1280x720:rate=30` |
+| Source | Description | Recommended | Example |
+|--------|-------------|-------------|---------|
+| `smptebars` | SMPTE color bars (broadcast standard) | ✅ **Yes** | `-f lavfi -i smptebars=size=1280x720:rate=30` |
+| `testsrc` | Classic test pattern with scrolling numbers | ⚠️ Use with caution | `-f lavfi -i testsrc=size=1280x720:rate=30` |
+| `testsrc2` | Modern pattern with timestamp overlay | ⚠️ Use with caution | `-f lavfi -i testsrc2=size=1280x720:rate=30` |
+| `pal75bars` | PAL 75% color bars | ✅ Yes | `-f lavfi -i pal75bars=size=1280x720:rate=30` |
+| `color` | Solid color | ✅ Yes | `-f lavfi -i color=c=blue:size=1280x720:rate=30` |
+| `rgbtestsrc` | RGB gradient test | ✅ Yes | `-f lavfi -i rgbtestsrc=size=1280x720:rate=30` |
+
+> ⚠️ **Important: `smptebars` is recommended** for HLS streaming. See the warning below about `testsrc2`.
+
+### ⚠️ Critical Warning: lavfi `duration=0` Bug
+
+**DO NOT use `duration=0`** with lavfi sources when using `-re` (real-time mode) for HLS output!
+
+```bash
+# ❌ BROKEN - produces 0 video frames, segments never close
+ffmpeg -re -f lavfi -i 'testsrc2=size=1280x720:rate=30:duration=0' ...
+
+# ✅ WORKS - lavfi sources are infinite by default
+ffmpeg -re -f lavfi -i 'smptebars=size=1280x720:rate=30' ...
+```
+
+**Symptoms of this bug:**
+- FFmpeg runs and uses CPU but `frame=0` in output
+- Segment file grows indefinitely (e.g., 50MB+ for a "2-second" segment)
+- Manifest shows `#EXT-X-TARGETDURATION:0` and `#EXTINF:0.000000`
+- systemd reports `IO: 0B written` even though FFmpeg is "running"
+
+**The fix:**
+1. Remove `duration=0` from lavfi filter strings
+2. Use `smptebars` instead of `testsrc2` (more reliable with `-re`)
+3. If you need finite duration, use output `-t` flag instead: `ffmpeg ... -t 60 ...`
+
+This bug affects FFmpeg 6.x, 7.x, and 8.x when combining:
+- `-re` (real-time input)
+- `-f lavfi` with `duration=0`
+- HLS output (`-f hls`)
 
 ### Source Code Reference
 
@@ -409,6 +439,263 @@ This approach:
 - Automatically handles MIME types (via `mailcap`)
 - Validates config at build time
 
+### Nginx Logging for Performance Analysis
+
+By default, logging is disabled (`access_log off;`) for maximum throughput. However, for load testing analysis, **buffered logging** provides detailed metrics with minimal performance impact.
+
+#### Buffered Logging
+
+Nginx can buffer log writes to dramatically reduce I/O overhead:
+
+```nginx
+# Buffered logging - minimal performance impact
+access_log /var/log/nginx/hls.log timing buffer=512k flush=10s;
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `buffer=512k` | Buffer up to 512KB of log data before writing to disk |
+| `flush=10s` | Force flush every 10 seconds (even if buffer not full) |
+| `gzip=4` | Optional: compress logs on the fly (level 1-9) |
+
+**Buffer Size Recommendations:**
+
+| Buffer Size | Use Case | Writes/sec (1000 clients) |
+|-------------|----------|---------------------------|
+| `64k` | Low-volume testing, debugging | ~80-100 |
+| `256k` | Medium load tests | ~20-25 |
+| `512k` | **High-volume load tests (recommended)** | ~10-12 |
+| `1m` | Extreme load tests | ~5-6 |
+
+**Performance Impact:**
+
+| Logging Mode | Writes/sec (1000 clients) | I/O Impact |
+|--------------|---------------------------|------------|
+| **Disabled** (`access_log off`) | 0 | None |
+| **Unbuffered** | ~5000+ | High |
+| **Buffered 512k** | ~10-12 | **~99.8% reduction** |
+| **Buffered + gzip** | ~10-12 | Minimal + smaller logs |
+
+#### Custom Log Format for HLS Performance
+
+Define a custom log format that captures key metrics for HLS load testing:
+
+```nginx
+# In http {} block
+log_format timing '$remote_addr - [$time_local] '
+                  '"$request" $status $body_bytes_sent '
+                  'rt=$request_time uct="$upstream_connect_time" '
+                  'uht="$upstream_header_time" urt="$upstream_response_time" '
+                  'cs=$upstream_cache_status';
+
+# HLS-specific format with segment info
+log_format hls_perf '$time_iso8601 $status $request_time $body_bytes_sent '
+                    '$request_uri $http_user_agent';
+```
+
+**Key timing variables:**
+
+| Variable | Description | Useful For |
+|----------|-------------|------------|
+| `$request_time` | Total request processing time (seconds) | End-to-end latency |
+| `$upstream_connect_time` | Time to establish upstream connection | Backend health |
+| `$upstream_header_time` | Time to receive first byte from upstream | TTFB analysis |
+| `$upstream_response_time` | Time to receive full response | Total backend time |
+| `$body_bytes_sent` | Response body size | Bandwidth calculation |
+| `$upstream_cache_status` | HIT/MISS/BYPASS | Cache effectiveness |
+
+#### Per-Location Logging
+
+Enable logging only for specific file types to reduce volume:
+
+```nginx
+server {
+    # Default: no logging for maximum performance
+    access_log off;
+
+    # Log only segment requests (for throughput analysis)
+    location ~ \.ts$ {
+        access_log /var/log/nginx/segments.log timing buffer=512k flush=10s;
+        # ... other config
+    }
+
+    # Log manifest requests (for latency analysis)
+    location ~ \.m3u8$ {
+        access_log /var/log/nginx/manifests.log timing buffer=256k flush=5s;
+        # ... other config
+    }
+}
+```
+
+#### Nginx Status Endpoint (stub_status)
+
+Nginx provides a built-in status endpoint for real-time performance monitoring:
+
+```nginx
+location /nginx_status {
+    stub_status on;
+    access_log off;
+    allow 127.0.0.1;      # Local access only
+    allow 10.0.0.0/8;     # Or allow test clients
+    deny all;
+}
+```
+
+**Example output:**
+
+```
+Active connections: 1247
+server accepts handled requests
+ 16823 16823 348291
+Reading: 0 Writing: 847 Waiting: 400
+```
+
+| Metric | Description |
+|--------|-------------|
+| **Active connections** | Current client connections (includes waiting) |
+| **accepts** | Total accepted connections |
+| **handled** | Total handled connections (should equal accepts) |
+| **requests** | Total HTTP requests served |
+| **Reading** | Connections reading request headers |
+| **Writing** | Connections sending response |
+| **Waiting** | Idle keepalive connections |
+
+**Query during load test:**
+
+```bash
+# Watch live connection stats
+watch -n 1 'curl -s http://localhost:8080/nginx_status'
+
+# Calculate requests per second
+curl -s http://localhost:8080/nginx_status | awk '/requests/ {print "RPS:", $3}'
+```
+
+#### MicroVM Log Location
+
+In the MicroVM, logs are stored in `/var/log/nginx/`:
+
+```bash
+# After running a load test, examine logs in the VM
+# (via console or SSH if enabled)
+
+# View recent requests
+tail -100 /var/log/nginx/segments.log
+
+# Analyze request times
+awk '{sum+=$3; count++} END {print "Avg request_time:", sum/count "s"}' /var/log/nginx/segments.log
+
+# Find slowest requests
+sort -t'=' -k2 -rn /var/log/nginx/segments.log | head -10
+
+# Count requests by status code
+awk '{print $2}' /var/log/nginx/segments.log | sort | uniq -c | sort -rn
+```
+
+#### Configuration Profiles
+
+We'll provide logging profiles in `config.nix`:
+
+```nix
+logging = {
+  # Profile: "off" | "minimal" | "full"
+  profile = "minimal";
+
+  profiles = {
+    off = {
+      enabled = false;
+    };
+
+    minimal = {
+      enabled = true;
+      format = "timing";
+      buffer = "512k";      # Large buffer for minimal I/O
+      flush = "10s";
+      segmentsOnly = true;  # Only log .ts requests
+    };
+
+    full = {
+      enabled = true;
+      format = "hls_perf";
+      buffer = "256k";
+      flush = "5s";
+      gzip = 4;
+      segmentsOnly = false;  # Log all requests
+    };
+  };
+};
+```
+
+**Usage:**
+
+```bash
+# Default (logging off for max performance)
+nix run .#test-origin
+
+# With minimal logging (segments only)
+nix run .#test-origin-logged
+
+# Full logging (all requests)
+nix run .#test-origin-debug
+```
+
+#### Post-Test Log Analysis
+
+After a load test, extract key metrics:
+
+```bash
+# Copy logs from MicroVM (if using shared volume)
+# Or analyze directly in VM console
+
+# === Latency Analysis ===
+# P50, P95, P99 request times
+awk '{print $3}' /var/log/nginx/segments.log | sort -n | awk '
+  BEGIN { count=0 }
+  { latencies[count++] = $1 }
+  END {
+    print "P50:", latencies[int(count*0.50)]
+    print "P95:", latencies[int(count*0.95)]
+    print "P99:", latencies[int(count*0.99)]
+  }'
+
+# === Throughput Analysis ===
+# Requests per second over time
+awk '{print substr($1,1,19)}' /var/log/nginx/segments.log | uniq -c
+
+# === Bandwidth Analysis ===
+# Total bytes served
+awk '{sum+=$4} END {print "Total MB:", sum/1024/1024}' /var/log/nginx/segments.log
+
+# === Error Analysis ===
+# Non-2xx responses
+awk '$2 !~ /^2/ {print}' /var/log/nginx/segments.log
+```
+
+#### Integration with Prometheus
+
+For continuous monitoring, enable the Nginx Prometheus exporter:
+
+```nix
+# Already included in nixos-module.nix
+services.prometheus.exporters.nginx = {
+  enable = true;
+  port = 9113;
+  scrapeUri = "http://localhost/nginx_status";
+};
+```
+
+**Metrics available:**
+
+```bash
+curl http://localhost:9113/metrics
+
+# Example output:
+# nginx_connections_active 1247
+# nginx_connections_reading 0
+# nginx_connections_writing 847
+# nginx_connections_waiting 400
+# nginx_http_requests_total 348291
+```
+
 ---
 
 ## HLS Rolling Window — Deep Dive
@@ -636,9 +923,10 @@ Real HLS streams offer multiple quality levels for Adaptive Bitrate (ABR) switch
 ### Multi-Bitrate FFmpeg Command
 
 ```bash
+# Note: Don't use duration=0 - lavfi sources are infinite by default
 ffmpeg -re \
-  -f lavfi -i "testsrc2=size=1920x1080:rate=30:duration=0" \
-  -f lavfi -i "sine=frequency=1000:sample_rate=48000:duration=0" \
+  -f lavfi -i "smptebars=size=1920x1080:rate=30" \
+  -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
   \
   # Split video into 2 scaled outputs
   -filter_complex "[0:v]split=2[v1][v2]; \
@@ -1420,6 +1708,10 @@ Add the microvm input to your `flake.nix`:
 
 ### Running a MicroVM
 
+#### Default Mode (User-mode NAT)
+
+Zero configuration, ~500 Mbps throughput:
+
 ```bash
 # Build and run the MicroVM
 nix run .#test-origin-vm
@@ -1427,13 +1719,57 @@ nix run .#test-origin-vm
 # The VM will:
 # 1. Boot a minimal NixOS (~10 seconds)
 # 2. Start FFmpeg HLS generator
-# 3. Start Nginx on port 8080 (forwarded to host)
+# 3. Start Nginx on port 17080 (forwarded to host)
 # 4. Apply all sysctl tuning from sysctl.nix
 
 # Test from host
-curl http://localhost:8080/health
-curl http://localhost:8080/stream.m3u8
+curl http://localhost:17080/health
+curl http://localhost:17080/stream.m3u8
+
+# List HLS files (JSON directory listing) - verify FFmpeg is writing
+curl http://localhost:17080/files/
 ```
+
+#### High-Performance Mode (TAP + vhost-net)
+
+~10 Gbps throughput with kernel-level packet processing. Requires one-time network setup:
+
+```bash
+# 1. Setup TAP networking (one-time, requires sudo)
+make network-setup
+
+# 2. Verify network is ready
+make network-check
+
+# 3. Run MicroVM with TAP networking
+nix run .#test-origin-vm-tap
+
+# Or with logging enabled
+nix run .#test-origin-vm-tap-logged
+```
+
+**What `make network-setup` creates:**
+
+| Resource | Name | Purpose |
+|----------|------|---------|
+| Bridge | `hlsbr0` | Virtual switch at `10.177.0.1/24` |
+| TAP device | `hlstap0` | VM network interface |
+| nftables | `hls_nat` | NAT + port forwarding rules |
+
+**Access the VM** (same as default mode thanks to port forwarding):
+
+```bash
+curl http://localhost:17080/health        # Via port forward
+curl http://10.177.0.10:17080/health      # Direct to VM IP
+```
+
+**When done:**
+
+```bash
+make network-teardown  # Remove bridge, TAP, nftables rules
+```
+
+See [MICROVM_NETWORKING.md](MICROVM_NETWORKING.md) for detailed documentation.
 
 ### Available Hypervisors
 
@@ -1455,6 +1791,99 @@ microvm = {
   # ...
 };
 ```
+
+### MicroVM Debugging via TCP Console
+
+For debugging issues inside the MicroVM, a serial console is exposed via TCP. This allows you to:
+
+- View boot logs and systemd journal in real-time
+- Debug FFmpeg or Nginx service failures
+- Inspect the filesystem and running processes
+- Run arbitrary commands inside the VM
+
+#### Connecting to the Console
+
+```bash
+# Using netcat
+nc localhost 17022
+
+# Using socat (with better terminal handling)
+socat - TCP:localhost:17022
+
+# Using telnet
+telnet localhost 17022
+```
+
+#### Common Debug Commands (once connected)
+
+```bash
+# View FFmpeg service logs
+journalctl -u hls-generator -f
+
+# View Nginx service logs
+journalctl -u nginx -f
+
+# Check if HLS files are being generated
+ls -la /var/hls/
+
+# Check service status
+systemctl status hls-generator nginx
+
+# View system resource usage
+htop  # or: top, free -h, df -h
+
+# Check network listeners
+ss -tlnp
+
+# Exit the console
+# Press Ctrl+] then type 'quit' (for telnet)
+# Press Ctrl+C (for nc/socat)
+```
+
+#### QEMU Configuration for TCP Console
+
+The TCP console is configured in `microvm.nix` using QEMU's `-serial` option. Since the guest NixOS uses `ttyS0` for the serial console, we redirect it to TCP:
+
+```nix
+microvm = {
+  # ... other config ...
+
+  qemu.extraArgs = [
+    # Redirect serial console (ttyS0) to TCP
+    "-serial" "tcp:0.0.0.0:17022,server=on,wait=off"
+  ];
+};
+```
+
+**Note:** This is simpler than using `virtconsole` (which requires `hvc0` on the guest). The guest's `ttyS0` getty is automatically connected to this TCP socket.
+
+| Port | Purpose |
+|------|---------|
+| `17022` | MicroVM serial console (TCP) |
+| `17080` | Nginx HLS origin |
+| `17113` | Nginx Prometheus exporter |
+
+#### Available Endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/stream.m3u8` | HLS master playlist |
+| `/health` | Health check (returns "OK") |
+| `/nginx_status` | Nginx stub_status metrics |
+| `/files/` | JSON directory listing of HLS files |
+| `/metrics` (port 17113) | Prometheus metrics |
+
+The `/files/` endpoint is particularly useful for debugging - it returns a JSON listing of all files FFmpeg has written, allowing you to verify the stream is being generated correctly without connecting to the console.
+
+```bash
+# List HLS directory contents (JSON)
+curl http://localhost:17080/files/
+
+# Pretty-print with jq
+curl -s http://localhost:17080/files/ | jq '.[] | .name'
+```
+
+See [docs/PORTS.md](./PORTS.md) for complete port documentation.
 
 ---
 
@@ -1595,9 +2024,10 @@ let
       flags = [ "delete_segments" "omit_endlist" "temp_file" ];
     };
 
-    server = { port = 8080; hlsDir = "/var/hls"; };
+    server = { port = 17080; hlsDir = "/var/hls"; };
     audio = { frequency = 1000; sampleRate = 48000; };
-    testPattern = "testsrc2";
+    # Use smptebars - testsrc2 has issues with -re (see warning above)
+    testPattern = "smptebars";
     video = { width = 1280; height = 720; bitrate = "2000k"; /* ... */ };
     encoder = { framerate = 30; preset = "ultrafast"; /* ... */ };
   };
@@ -1750,9 +2180,11 @@ let
   in [
     "-re"
     "-f" "lavfi"
-    "-i" "${testPattern}=size=${width}x${height}:rate=${framerate}:duration=0"
+    # Note: Don't use duration=0 - it breaks HLS segment generation with -re
+    # Without duration, lavfi sources are infinite by default
+    "-i" "${testPattern}=size=${width}x${height}:rate=${framerate}"
     "-f" "lavfi"
-    "-i" "sine=frequency=${audioFrequency}:sample_rate=${audioSampleRate}:duration=0"
+    "-i" "sine=frequency=${audioFrequency}:sample_rate=${audioSampleRate}"
     "-c:v" "libx264"
     "-preset" enc.preset
     "-tune" enc.tune
@@ -1825,9 +2257,10 @@ let
   in [
     "-re"
     "-f" "lavfi"
-    "-i" "${cfg.testPattern}=size=${toString maxRes.width}x${toString maxRes.height}:rate=${toString enc.framerate}:duration=0"
+    # Note: Don't use duration=0 - it breaks HLS segment generation
+    "-i" "${cfg.testPattern}=size=${toString maxRes.width}x${toString maxRes.height}:rate=${toString enc.framerate}"
     "-f" "lavfi"
-    "-i" "sine=frequency=${toString a.frequency}:sample_rate=${toString a.sampleRate}:duration=0"
+    "-i" "sine=frequency=${toString a.frequency}:sample_rate=${toString a.sampleRate}"
     "-filter_complex" filterComplex
   ] ++ variantEncoderArgs ++ [
     "-f" "hls"
@@ -2237,10 +2670,11 @@ pkgs.writeShellApplication {
     trap 'echo "Shutting down..."; kill $(jobs -p) 2>/dev/null; rm -rf "$HLS_DIR"' EXIT INT TERM
 
     # Start FFmpeg HLS generator
+    # Note: Don't use duration=0 - lavfi sources are infinite by default
     echo "▶ Starting FFmpeg HLS generator..."
     ffmpeg -re \
-      -f lavfi -i "${config.testPattern}=size=${toString config.video.width}x${toString config.video.height}:rate=${toString config.encoder.framerate}:duration=0" \
-      -f lavfi -i "sine=frequency=${toString config.audio.frequency}:sample_rate=${toString config.audio.sampleRate}:duration=0" \
+      -f lavfi -i "${config.testPattern}=size=${toString config.video.width}x${toString config.video.height}:rate=${toString config.encoder.framerate}" \
+      -f lavfi -i "sine=frequency=${toString config.audio.frequency}:sample_rate=${toString config.audio.sampleRate}" \
       -c:v libx264 -preset ${config.encoder.preset} -tune ${config.encoder.tune} \
       -profile:v ${config.encoder.profile} -level ${config.encoder.level} \
       -g ${toString config.encoder.gopSize} \
@@ -2476,11 +2910,12 @@ in
     serviceConfig = {
       Type = "simple";
       ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p /var/hls";
+      # Note: Don't use duration=0 - it breaks HLS segment generation
       ExecStart = lib.concatStringsSep " " ([
         "${pkgs.ffmpeg-full}/bin/ffmpeg"
         "-re"
-        "-f" "lavfi" "-i" "\"${cfg.testPattern}=size=${toString cfg.video.width}x${toString cfg.video.height}:rate=${toString enc.framerate}:duration=0\""
-        "-f" "lavfi" "-i" "\"sine=frequency=${toString cfg.audio.frequency}:sample_rate=${toString cfg.audio.sampleRate}:duration=0\""
+        "-f" "lavfi" "-i" "\"${cfg.testPattern}=size=${toString cfg.video.width}x${toString cfg.video.height}:rate=${toString enc.framerate}\""
+        "-f" "lavfi" "-i" "\"sine=frequency=${toString cfg.audio.frequency}:sample_rate=${toString cfg.audio.sampleRate}\""
         "-c:v" "libx264" "-preset" enc.preset "-tune" enc.tune
         "-profile:v" enc.profile "-level" enc.level
         "-g" (toString cfg.derived.gopSize)
@@ -2591,12 +3026,26 @@ in
   };
 
   # ═══════════════════════════════════════════════════════════════════════
-  # Prometheus metrics exporter (for Grafana dashboards)
+  # Prometheus Nginx Exporter (v1.5.1)
+  # See: NIX_NGINX_REFERENCE.md for detailed exporter documentation
+  # Source: pkgs/servers/monitoring/prometheus/nginx-exporter.nix
   # ═══════════════════════════════════════════════════════════════════════
   services.prometheus.exporters.nginx = {
     enable = true;
     port = 9113;
-    scrapeUri = "http://localhost/nginx_status";
+    scrapeUri = "http://localhost:${toString cfg.server.port}/nginx_status";
+
+    # Add constant labels for multi-instance identification
+    constLabels = [
+      "instance=hls-origin"
+      "profile=${config._profile.name}"
+    ];
+
+    # Metrics endpoint path
+    telemetryPath = "/metrics";
+
+    # SSL verification (disable for self-signed certs)
+    sslVerify = true;
   };
 
   # ═══════════════════════════════════════════════════════════════════════
@@ -2604,7 +3053,7 @@ in
   # ═══════════════════════════════════════════════════════════════════════
   networking.firewall.allowedTCPPorts = [
     cfg.server.port
-    9113  # Prometheus exporter
+    9113  # Prometheus nginx exporter
   ];
 
   # ═══════════════════════════════════════════════════════════════════════
@@ -2661,25 +3110,109 @@ in
 
 ### Prometheus Nginx Exporter
 
-The NixOS module includes `prometheus-nginx-exporter` for Grafana integration:
+The NixOS module includes `prometheus-nginx-exporter` (v1.5.1) for metrics collection and Grafana integration.
+
+> **Reference**: See [NIX_NGINX_REFERENCE.md](NIX_NGINX_REFERENCE.md#prometheus-monitoring) for complete exporter documentation.
+
+#### Quick Verification
 
 ```bash
-# Verify metrics are being exported
-curl http://localhost:9113/metrics | grep nginx
+# Check exporter is running
+curl -s http://localhost:9113/metrics | head -20
 
-# Example Prometheus scrape config
-scrape_configs:
-  - job_name: 'hls-origin-nginx'
-    static_configs:
-      - targets: ['hls-origin:9113']
+# Get specific metrics
+curl -s http://localhost:9113/metrics | grep nginx_connections_active
+# nginx_connections_active{instance="hls-origin",profile="default"} 1247
+
+# Check nginx is being scraped successfully
+curl -s http://localhost:9113/metrics | grep nginx_up
+# nginx_up{instance="hls-origin",profile="default"} 1
 ```
 
-**Available metrics:**
-- `nginx_connections_active` — Current active connections
-- `nginx_connections_reading` — Connections reading request
-- `nginx_connections_writing` — Connections writing response
-- `nginx_connections_waiting` — Idle keepalive connections
-- `nginx_http_requests_total` — Total request count
+#### Available Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `nginx_up` | Gauge | Server health (1 = up, 0 = down) |
+| `nginx_connections_active` | Gauge | Current active client connections |
+| `nginx_connections_accepted` | Counter | Total accepted connections |
+| `nginx_connections_handled` | Counter | Total handled connections |
+| `nginx_connections_reading` | Gauge | Connections reading request header |
+| `nginx_connections_writing` | Gauge | Connections writing response |
+| `nginx_connections_waiting` | Gauge | Idle keepalive connections |
+| `nginx_http_requests_total` | Counter | Total HTTP requests processed |
+
+#### Prometheus Scrape Configuration
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'hls-origin'
+    static_configs:
+      - targets: ['localhost:9113']
+    scrape_interval: 5s
+    metrics_path: /metrics
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '(.+):\d+'
+        replacement: '${1}'
+```
+
+#### Key Metrics for Load Testing
+
+During HLS load tests, monitor these metrics:
+
+```promql
+# Requests per second
+rate(nginx_http_requests_total[1m])
+
+# Active connections over time
+nginx_connections_active
+
+# Connection saturation (reading + writing / active)
+(nginx_connections_reading + nginx_connections_writing) / nginx_connections_active
+
+# Connection acceptance rate
+rate(nginx_connections_accepted[1m])
+
+# Keepalive efficiency (waiting connections = good)
+nginx_connections_waiting / nginx_connections_active
+```
+
+#### Grafana Dashboard
+
+Recommended dashboard: **Nginx Prometheus Exporter** (ID: 12708)
+
+Import via Grafana: Dashboards → Import → Enter ID `12708`
+
+#### Example Prometheus Output
+
+```prometheus
+# HELP nginx_connections_active Active client connections
+# TYPE nginx_connections_active gauge
+nginx_connections_active{instance="hls-origin",profile="default"} 1247
+
+# HELP nginx_connections_reading Connections reading request header
+# TYPE nginx_connections_reading gauge
+nginx_connections_reading{instance="hls-origin",profile="default"} 0
+
+# HELP nginx_connections_writing Connections writing response
+# TYPE nginx_connections_writing gauge
+nginx_connections_writing{instance="hls-origin",profile="default"} 847
+
+# HELP nginx_connections_waiting Idle keepalive connections
+# TYPE nginx_connections_waiting gauge
+nginx_connections_waiting{instance="hls-origin",profile="default"} 400
+
+# HELP nginx_http_requests_total Total http requests
+# TYPE nginx_http_requests_total counter
+nginx_http_requests_total{instance="hls-origin",profile="default"} 348291
+
+# HELP nginx_up Shows if nginx is up
+# TYPE nginx_up gauge
+nginx_up{instance="hls-origin",profile="default"} 1
+```
 
 ---
 
@@ -3089,10 +3622,11 @@ pkgs.testers.nixosTest {
         after = [ "network.target" ];
         wantedBy = [ "multi-user.target" ];
         serviceConfig = {
+          # Note: Use smptebars, not testsrc2. Don't use duration=0.
           ExecStart = ''
             ${pkgs.ffmpeg-full}/bin/ffmpeg -re \
-              -f lavfi -i "testsrc2=size=1280x720:rate=30:duration=0" \
-              -f lavfi -i "sine=frequency=1000:sample_rate=48000:duration=0" \
+              -f lavfi -i "smptebars=size=1280x720:rate=30" \
+              -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
               -c:v libx264 -preset ultrafast -tune zerolatency \
               -g 60 -keyint_min 60 -sc_threshold 0 \
               -b:v 2000k -maxrate 2000k -bufsize 4000k \
@@ -3387,9 +3921,10 @@ For more realistic testing, generate multiple bitrate variants:
 
 ```bash
 # master.m3u8 with multiple renditions
+# Note: Use smptebars, not testsrc2. Don't use duration=0.
 ffmpeg -re \
-  -f lavfi -i "testsrc2=size=1920x1080:rate=30:duration=0" \
-  -f lavfi -i "sine=frequency=1000:sample_rate=48000:duration=0" \
+  -f lavfi -i "smptebars=size=1920x1080:rate=30" \
+  -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
   -filter_complex "[0:v]split=3[v1][v2][v3]; \
     [v1]scale=1920:1080[v1out]; \
     [v2]scale=1280:720[v2out]; \

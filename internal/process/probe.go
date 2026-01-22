@@ -16,10 +16,10 @@ type ProbeResult struct {
 
 // Program represents an HLS program/variant.
 type Program struct {
-	ProgramID   int    `json:"program_id"`
-	ProgramNum  int    `json:"program_num"`
-	NumStreams  int    `json:"nb_streams"`
-	Tags        Tags   `json:"tags"`
+	ProgramID  int  `json:"program_id"`
+	ProgramNum int  `json:"program_num"`
+	NumStreams int  `json:"nb_streams"`
+	Tags       Tags `json:"tags"`
 }
 
 // Tags contains metadata tags for a program.

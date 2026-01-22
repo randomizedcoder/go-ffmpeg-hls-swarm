@@ -132,6 +132,48 @@ let
       };
       multibitrate = false;
     };
+
+    # Logged profile - minimal logging for performance analysis
+    # Logs segment requests only with 512k buffer
+    logged = {
+      logging = {
+        enabled = true;
+        buffer = "512k";
+        flushInterval = "10s";
+        gzip = 0;
+        segmentsOnly = true;  # Only log .ts requests
+      };
+    };
+
+    # Debug profile - full logging for debugging
+    # Logs all requests with compression
+    debug = {
+      logging = {
+        enabled = true;
+        buffer = "256k";
+        flushInterval = "5s";
+        gzip = 4;
+        segmentsOnly = false;  # Log all requests
+      };
+    };
+
+    # TAP networking profile - high performance
+    # Requires: make network-setup (creates hlsbr0 bridge + hlstap0 TAP)
+    tap = {
+      networking.mode = "tap";
+    };
+
+    # TAP + logging combo profile
+    tap-logged = {
+      networking.mode = "tap";
+      logging = {
+        enabled = true;
+        buffer = "512k";
+        flushInterval = "10s";
+        gzip = 0;
+        segmentsOnly = true;
+      };
+    };
   };
 
   # ═══════════════════════════════════════════════════════════════════════════
@@ -146,7 +188,8 @@ let
       segmentDuration = 2;
       listSize = 10;
       deleteThreshold = 5;  # INCREASED: Safe buffer for SWR/CDN lag
-      segmentPattern = "seg%05d.ts";
+      # Note: %% is required for systemd unit files (% is a specifier)
+      segmentPattern = "seg%%05d.ts";
       playlistName = "stream.m3u8";
       masterPlaylist = "master.m3u8";
 
@@ -159,8 +202,9 @@ let
     };
 
     # Server settings
+    # See docs/PORTS.md for port documentation
     server = {
-      port = 8080;
+      port = 17080;
       hlsDir = "/var/hls";
     };
 
@@ -170,7 +214,8 @@ let
       sampleRate = 48000;
     };
 
-    testPattern = "testsrc2";
+    # Use smptebars - testsrc2 has issues with -re and duration=0 (produces 0 frames)
+    testPattern = "smptebars";
 
     # Video settings (single bitrate)
     video = {
@@ -211,6 +256,58 @@ let
       tune = "zerolatency";
       profile = "baseline";
       level = "3.1";
+    };
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MicroVM networking configuration
+    # See: docs/MICROVM_NETWORKING.md
+    # ═══════════════════════════════════════════════════════════════════════════
+    networking = {
+      # Networking mode: "user" (default, zero config) or "tap" (high performance)
+      # "user" - QEMU user-mode NAT (~500 Mbps, no host setup)
+      # "tap"  - TAP + vhost-net (~10 Gbps, requires make network-setup)
+      mode = "user";
+
+      # TAP device configuration (only used when mode = "tap")
+      tap = {
+        device = "hlstap0";         # TAP device name (created by make network-setup with multi_queue)
+        mac = "02:00:00:01:77:01";  # VM MAC address (unique per VM)
+      };
+
+      # Static IP for TAP mode (VM needs fixed IP for port forwarding)
+      staticIp = "10.177.0.10";
+      gateway = "10.177.0.1";
+      subnet = "10.177.0.0/24";
+    };
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Logging configuration for performance analysis
+    # ═══════════════════════════════════════════════════════════════════════════
+    logging = {
+      # Enable/disable logging (disabled by default for max performance)
+      enabled = false;
+
+      # Log directory
+      directory = "/var/log/nginx";
+
+      # Buffer size for reduced I/O (512k recommended for high-load tests)
+      buffer = "512k";
+
+      # Flush interval (10s recommended for buffered logging)
+      flushInterval = "10s";
+
+      # Gzip compression level (0 = disabled, 1-9 = compression level)
+      gzip = 0;
+
+      # Log only segment requests (reduces volume significantly)
+      segmentsOnly = false;
+
+      # Log file names
+      files = {
+        segments = "segments.log";
+        manifests = "manifests.log";
+        all = "access.log";
+      };
     };
   };
 

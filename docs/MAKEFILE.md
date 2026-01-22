@@ -38,9 +38,23 @@ make info              # Show project info and available profiles
 make build             # Build Go binary
 make test              # Run tests
 make dev               # Enter Nix development shell
-make test-origin       # Run test HLS origin server
-make swarm-client      # Run load test client
+
+# Load testing (local origin - starts automatically)
+make load-test-100     # 100-client test with local origin
+make load-test-300     # 300-client stress test
+
+# MicroVM origin (production-like Nginx)
+make microvm-start     # Start MicroVM with health polling
+make load-test-300-microvm  # Test against MicroVM
+make microvm-stop      # Stop MicroVM
+
+# High-performance networking (TAP + vhost-net)
+make network-setup     # Create bridge, TAP, nftables rules
+make network-check     # Verify network configuration
+make network-teardown  # Remove networking setup
 ```
+
+> **Port Reference**: See [PORTS.md](PORTS.md) for all port numbers and configuration.
 
 ---
 
@@ -52,20 +66,28 @@ make swarm-client      # Run load test client
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
-│  │   Build &    │  │ Development  │  │   Testing    │  │  Deployment  │    │
-│  │     Run      │  │              │  │              │  │              │    │
+│  │   Build &    │  │ Load Testing │  │   MicroVM    │  │   Network    │    │
+│  │     Run      │  │              │  │              │  │    Setup     │    │
 │  ├──────────────┤  ├──────────────┤  ├──────────────┤  ├──────────────┤    │
-│  │ build        │  │ dev          │  │ test         │  │ test-origin  │    │
-│  │ build-nix    │  │ shell        │  │ test-unit    │  │ swarm-client │    │
-│  │ run          │  │ lint         │  │ test-race    │  │ container    │    │
-│  │ run-nix      │  │ fmt          │  │ test-coverage│  │ swarm-container│  │
-│  │ clean        │  │ check        │  │ test-integration│              │    │
+│  │ build        │  │ load-test-50 │  │ microvm-start│  │ network-setup│    │
+│  │ build-nix    │  │ load-test-100│  │ microvm-stop │  │ network-check│    │
+│  │ run          │  │ load-test-300│  │ microvm-check│  │ network-     │    │
+│  │ clean        │  │ load-test-*  │  │   -ports     │  │   teardown   │    │
+│  │              │  │   -microvm   │  │              │  │              │    │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘    │
 │                                                                              │
+│  Scripts:                                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ scripts/50-clients/    scripts/microvm/     scripts/network/        │   │
+│  │ scripts/100-clients/   ├── start.sh         ├── setup.sh            │   │
+│  │ scripts/300-clients/   └── stop.sh          ├── teardown.sh         │   │
+│  │ scripts/lib/common.sh                       └── check.sh            │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
 │  Underlying Tools:                                                           │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐                        │
-│  │   Go    │  │   Nix   │  │ Docker  │  │  Shell  │                        │
-│  └─────────┘  └─────────┘  └─────────┘  └─────────┘                        │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐          │
+│  │   Go    │  │   Nix   │  │  QEMU   │  │ nftables│  │  Shell  │          │
+│  └─────────┘  └─────────┘  └─────────┘  └─────────┘  └─────────┘          │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -201,6 +223,10 @@ make test-integration
 
 **Purpose**: Run the self-contained HLS origin server for testing.
 
+#### Local Origin (Python HTTP Server)
+
+For quick testing, uses FFmpeg + Python HTTP server:
+
 | Target | Description | Profile |
 |--------|-------------|---------|
 | `test-origin` | Default profile | 720p, 2s segments |
@@ -208,31 +234,157 @@ make test-integration
 | `test-origin-4k-abr` | Multi-bitrate 4K | Multiple renditions |
 | `test-origin-stress` | Stress testing | Maximum throughput |
 
-**Usage Examples**:
-
 ```bash
-# Start test origin server
+# Start local test origin
 make test-origin
-
-# Stream available at: http://localhost:8080/stream.m3u8
-
-# Use low-latency profile for testing aggressive caching
-make test-origin-low-latency
+# Stream at: http://localhost:17088/stream.m3u8
 ```
 
-**What It Does**:
-1. Starts FFmpeg generating test pattern HLS stream
-2. Starts Nginx serving the stream
-3. Exposes stream at `http://localhost:8080/stream.m3u8`
-4. Runs until Ctrl+C
+#### MicroVM Origin (Production-like Nginx)
 
-See [TEST_ORIGIN.md](TEST_ORIGIN.md) for detailed documentation.
+For realistic testing with 4GB RAM, 4 vCPUs:
+
+| Target | Description |
+|--------|-------------|
+| `microvm-start` | Start MicroVM with health polling (recommended) |
+| `microvm-stop` | Stop the MicroVM |
+| `microvm-check-ports` | Check if ports 17080/17113 are available |
+| `microvm-check-kvm` | Verify KVM is available |
+
+```bash
+# Start MicroVM (polls until ready)
+make microvm-start
+
+# Stream at: http://localhost:17080/stream.m3u8
+# Metrics at: http://localhost:17113/metrics
+
+# Stop when done
+make microvm-stop
+```
+
+**MicroVM Resources** (configurable in `nix/test-origin/microvm.nix`):
+- RAM: 4096 MB (4GB)
+- vCPUs: 4
+- Nginx + FFmpeg running inside
+
+See [TEST_ORIGIN.md](TEST_ORIGIN.md) and [PORTS.md](PORTS.md) for details.
 
 ---
 
-### 5. Swarm Client (Load Tester)
+### 5. Network Setup (High-Performance)
 
-**Purpose**: Run the HLS load testing client with various intensity profiles.
+**Purpose**: Configure TAP + bridge networking with vhost-net for maximum MicroVM performance.
+
+By default, MicroVMs use QEMU user-mode NAT (~500 Mbps). TAP + vhost-net provides ~10 Gbps with much lower CPU overhead.
+
+| Target | Description | Requires sudo |
+|--------|-------------|---------------|
+| `network-setup` | Create bridge, TAP, nftables rules | Yes |
+| `network-check` | Verify network configuration | Yes |
+| `network-teardown` | Remove all networking setup | Yes |
+
+**What gets created**:
+
+| Resource | Name | Purpose |
+|----------|------|---------|
+| Bridge | `hlsbr0` | Virtual switch (10.177.0.1/24) |
+| TAP device | `hlstap0` | VM network interface |
+| nftables table | `hls_nat` | NAT + port forwarding |
+| nftables table | `hls_filter` | Allow bridge traffic |
+
+**Usage**:
+
+```bash
+# One-time setup (requires sudo)
+make network-setup
+
+# Verify configuration
+make network-check
+
+# Start MicroVM (now uses TAP networking)
+make microvm-start
+
+# When done with testing
+make network-teardown
+```
+
+**Architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           Host Machine                               │
+│                                                                      │
+│   ┌─────────────┐      ┌─────────────┐      ┌───────────────────┐  │
+│   │   MicroVM   │══════│   hlstap0   │══════│      hlsbr0       │  │
+│   │ 10.177.0.10 │      │    (TAP)    │      │     (Bridge)      │  │
+│   └─────────────┘      └─────────────┘      │    10.177.0.1     │  │
+│                                              └─────────┬─────────┘  │
+│                                                        │            │
+│                                          nftables NAT (masquerade)  │
+│                                                        │            │
+│                                                        ▼            │
+│   Port forwarding:                           Physical NIC           │
+│     localhost:17080 -> 10.177.0.10:17080                           │
+│     localhost:17113 -> 10.177.0.10:17113                           │
+│     localhost:17022 -> 10.177.0.10:17022                           │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+See [MICROVM_NETWORKING.md](MICROVM_NETWORKING.md) for full documentation.
+
+---
+
+### 6. Load Tests (Recommended)
+
+**Purpose**: Pre-configured load tests that automatically start the origin.
+
+#### With Local Origin (All-in-One)
+
+These targets start a local origin, run the test, and clean up:
+
+| Target | Clients | Ramp Rate | Duration |
+|--------|---------|-----------|----------|
+| `load-test-50` | 50 | 10/sec | 30s |
+| `load-test-100` | 100 | 20/sec | 30s |
+| `load-test-300` | 300 | 50/sec | 30s |
+| `load-test-500` | 500 | 100/sec | 30s |
+| `load-test-1000` | 1000 | 100/sec | 30s |
+
+```bash
+# Quick 100-client test (single command!)
+make load-test-100
+
+# Longer test
+make load-test-300 DURATION=60s
+
+# 5-minute stress test
+make load-test-500 DURATION=5m
+```
+
+#### Against MicroVM Origin
+
+For production-like testing with Nginx:
+
+| Target | Clients | Description |
+|--------|---------|-------------|
+| `load-test-100-microvm` | 100 | Standard test |
+| `load-test-300-microvm` | 300 | Stress test |
+| `load-test-500-microvm` | 500 | Heavy load |
+
+```bash
+# First, start the MicroVM
+make microvm-start
+
+# Then run tests
+make load-test-300-microvm
+
+# When done
+make microvm-stop
+```
+
+### 7. Swarm Client (Direct Control)
+
+**Purpose**: Run the load testing client directly (for custom configurations).
 
 | Target | Description | Clients | Ramp Rate |
 |--------|-------------|---------|-----------|
@@ -242,36 +394,16 @@ See [TEST_ORIGIN.md](TEST_ORIGIN.md) for detailed documentation.
 | `swarm-client-burst` | Thundering herd | 100 | 50/sec |
 | `swarm-client-extreme` | Maximum load | 500 | 50/sec |
 
-**Usage Examples**:
-
 ```bash
-# Default load test against local origin
-make test-origin &
-sleep 5
-make swarm-client
-
-# Stress test with custom URL
+# Custom URL (requires origin to be running separately)
 make swarm-client-stress STREAM_URL=http://cdn.example.com/live/master.m3u8
-
-# Gentle testing for baseline
-make swarm-client-gentle STREAM_URL=http://localhost:8080/stream.m3u8
 ```
 
-**Configuration via Environment**:
-
-```bash
-# Override stream URL (default: http://localhost:8080/stream.m3u8)
-STREAM_URL=http://origin:8080/master.m3u8 make swarm-client
-
-# Override via command line
-make swarm-client STREAM_URL=http://origin:8080/master.m3u8
-```
-
-See [CLIENT_DEPLOYMENT.md](CLIENT_DEPLOYMENT.md) for detailed documentation.
+See [LOAD_TESTING.md](LOAD_TESTING.md) and [CLIENT_DEPLOYMENT.md](CLIENT_DEPLOYMENT.md) for details.
 
 ---
 
-### 6. Containers
+### 8. Containers
 
 **Purpose**: Build and run OCI container images.
 
@@ -310,7 +442,7 @@ docker-compose up
 
 ---
 
-### 7. Utility Targets
+### 9. Utility Targets
 
 **Purpose**: Helper commands for common operations.
 
@@ -349,8 +481,8 @@ OUTPUT_DIR  := bin
 GOFLAGS     ?=
 LDFLAGS     ?= -s -w
 
-# Streaming configuration
-STREAM_URL  ?= http://localhost:8080/stream.m3u8
+# Test duration (for load tests)
+DURATION    ?= 30s
 
 # Nix configuration
 NIX         := nix
@@ -358,17 +490,28 @@ NIX_BUILD   := $(NIX) build
 NIX_RUN     := $(NIX) run
 ```
 
+### Port Configuration
+
+All ports use the `17xxx` range to avoid conflicts. See [PORTS.md](PORTS.md) for full documentation.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORIGIN_PORT` | 17088 | Local Python HTTP origin |
+| `METRICS_PORT` | 17091 | Swarm client Prometheus metrics |
+| `MICROVM_HTTP_PORT` | 17080 | MicroVM Nginx port |
+| `MICROVM_METRICS_PORT` | 17113 | MicroVM Prometheus exporter |
+
 **Override Examples**:
 
 ```bash
+# Custom test duration
+make load-test-300 DURATION=60s
+
+# Use alternative ports (if 17xxx conflicts)
+ORIGIN_PORT=27088 make load-test-100
+
 # Custom output directory
 make build OUTPUT_DIR=/tmp/build
-
-# Custom LDFLAGS for debugging
-make build LDFLAGS=""
-
-# Custom stream URL
-make swarm-client STREAM_URL=https://example.com/live.m3u8
 
 # Use different Nix command (e.g., for remote builders)
 make build-nix NIX="nix --builders 'ssh://builder'"
@@ -548,6 +691,9 @@ grep -E 'vmx|svm' /proc/cpuinfo
 
 ## Related Documentation
 
+- [PORTS.md](PORTS.md) — **Port configuration** (all ports, defaults, how to change)
+- [MICROVM_NETWORKING.md](MICROVM_NETWORKING.md) — **High-performance TAP networking** for MicroVMs
+- [LOAD_TESTING.md](LOAD_TESTING.md) — **Load testing guide** (scripts, expected output)
 - [NIX_FLAKE_DESIGN.md](NIX_FLAKE_DESIGN.md) — Nix flake structure
 - [CLIENT_DEPLOYMENT.md](CLIENT_DEPLOYMENT.md) — Client container/VM details
 - [TEST_ORIGIN.md](TEST_ORIGIN.md) — Test origin server details

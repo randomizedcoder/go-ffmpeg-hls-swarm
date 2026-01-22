@@ -60,9 +60,11 @@ let
   in [
     "-re"
     "-f" "lavfi"
-    "-i" "${testPattern}=size=${toString width}x${toString height}:rate=${toString framerate}:duration=0"
+    # Note: Don't use duration=0 - it breaks HLS segment generation with -re
+    # Without duration, lavfi sources are infinite by default
+    "-i" "${testPattern}=size=${toString width}x${toString height}:rate=${toString framerate}"
     "-f" "lavfi"
-    "-i" "sine=frequency=${toString audioFrequency}:sample_rate=${toString audioSampleRate}:duration=0"
+    "-i" "sine=frequency=${toString audioFrequency}:sample_rate=${toString audioSampleRate}"
     "-c:v" "libx264"
     "-preset" preset
     "-tune" tune
@@ -154,9 +156,10 @@ let
   in [
     "-re"
     "-f" "lavfi"
-    "-i" "${testPattern}=size=${toString maxRes.width}x${toString maxRes.height}:rate=${toString framerate}:duration=0"
+    # Note: Don't use duration=0 - it breaks HLS segment generation with -re
+    "-i" "${testPattern}=size=${toString maxRes.width}x${toString maxRes.height}:rate=${toString framerate}"
     "-f" "lavfi"
-    "-i" "sine=frequency=${toString audioFrequency}:sample_rate=${toString audioSampleRate}:duration=0"
+    "-i" "sine=frequency=${toString audioFrequency}:sample_rate=${toString audioSampleRate}"
     "-filter_complex" filterComplex
   ] ++ variantEncoderArgs ++ [
     "-f" "hls"

@@ -404,8 +404,10 @@ Available at `/metrics` (default port 9090):
 
 | Your Goal | Read This |
 |-----------|-----------|
+| **Run a load test** | [Load Testing Guide](docs/LOAD_TESTING.md) ← **Start here!** |
 | **Start a test HLS origin** | [Quick Start](#quick-start) (above) or `make test-origin` |
 | **Run origin as MicroVM/Container** | [Test Origin Guide](docs/TEST_ORIGIN.md) |
+| **High-performance MicroVM networking** | [MicroVM Networking](docs/MICROVM_NETWORKING.md) |
 | **Understand the swarm client CLI** | [Configuration Reference](docs/CONFIGURATION.md) |
 | **Run at scale (OS tuning)** | [Operations Guide](docs/OPERATIONS.md) |
 | **Contribute to development** | [Contributing](CONTRIBUTING.md) → [Design](docs/DESIGN.md) |
@@ -414,6 +416,7 @@ Available at `/metrics` (default port 9090):
 <summary><b>📚 All Documentation</b></summary>
 
 **User Documentation:**
+- [Load Testing Guide](docs/LOAD_TESTING.md) — **Pre-configured test scripts**
 - [Quick Start Guide](docs/QUICKSTART.md) — 5-minute tutorial
 - [Configuration Reference](docs/CONFIGURATION.md) — All CLI flags
 - [Operations Guide](docs/OPERATIONS.md) — OS tuning, troubleshooting
@@ -424,6 +427,7 @@ Available at `/metrics` (default port 9090):
 - [FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md) — FFmpeg source analysis
 - [Supervision](docs/SUPERVISION.md) — Process lifecycle details
 - [Test Origin Server](docs/TEST_ORIGIN.md) — Local HLS origin for testing
+- [MicroVM Networking](docs/MICROVM_NETWORKING.md) — **TAP/bridge high-performance networking**
 - [Client Deployment](docs/CLIENT_DEPLOYMENT.md) — Containers/VMs
 - [Nix Flake Design](docs/NIX_FLAKE_DESIGN.md) — For Nix users
 

@@ -56,11 +56,14 @@ RESET := \033[0m
 .PHONY: run run-with-args
 .PHONY: test test-unit test-integration test-integration-interactive
 .PHONY: lint fmt fmt-nix check check-nix
-.PHONY: test-origin test-origin-low-latency test-origin-4k-abr test-origin-stress
+.PHONY: test-origin test-origin-low-latency test-origin-4k-abr test-origin-stress test-origin-logged test-origin-debug
 .PHONY: container container-load container-run
 .PHONY: swarm-client swarm-client-stress swarm-client-gentle swarm-client-burst swarm-client-extreme
 .PHONY: swarm-container swarm-container-load swarm-container-run
-.PHONY: microvm-check-kvm microvm-origin microvm-origin-build microvm-origin-stop
+.PHONY: microvm-check-kvm microvm-check-ports microvm-start microvm-start-tap microvm-stop microvm-origin microvm-origin-build microvm-origin-stop microvm-origin-logged microvm-origin-debug microvm-origin-tap microvm-origin-tap-logged
+.PHONY: load-test-100-microvm load-test-300-microvm load-test-500-microvm
+.PHONY: load-test-50 load-test-100 load-test-300 load-test-500 load-test-1000
+.PHONY: network-setup network-teardown network-check
 .PHONY: git-add
 
 # ============================================================================
@@ -89,7 +92,17 @@ help: ## Show this help message
 	@grep -E '^container[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(GREEN)MicroVMs (requires KVM):$(RESET)"
-	@grep -E '^microvm-[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@grep -E '^microvm-(start|stop|check):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@grep -E '^microvm-origin[^:]*:.*##' $(MAKEFILE_LIST) | head -3 | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@echo ""
+	@echo "$(GREEN)Load Tests (local origin):$(RESET)"
+	@grep -E '^load-test-[0-9]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@echo ""
+	@echo "$(GREEN)Load Tests (MicroVM origin):$(RESET)"
+	@grep -E '^load-test-.*-microvm:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@echo ""
+	@echo "$(GREEN)Network Setup (high-performance):$(RESET)"
+	@grep -E '^network-[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(YELLOW)Note:$(RESET) Most commands require Nix with flakes enabled."
 	@echo "      Run 'make dev' to enter the development shell first."
@@ -208,6 +221,12 @@ test-origin-4k-abr: ## Run test origin with 4K ABR profile
 test-origin-stress: ## Run test origin with stress-test profile
 	PORT=$(ORIGIN_PORT) $(NIX_RUN) .#test-origin-stress
 
+test-origin-logged: ## Run test origin with logging (512k buffer, segments only)
+	PORT=$(ORIGIN_PORT) $(NIX_RUN) .#test-origin-logged
+
+test-origin-debug: ## Run test origin with full logging (all requests, gzip)
+	PORT=$(ORIGIN_PORT) $(NIX_RUN) .#test-origin-debug
+
 # ============================================================================
 # Swarm Client targets
 # ============================================================================
@@ -284,11 +303,32 @@ microvm-origin-build: ## Build the test origin MicroVM
 	$(NIX_BUILD) .#test-origin-vm
 	@echo "$(GREEN)MicroVM built successfully$(RESET)"
 
-microvm-origin: microvm-check-kvm ## Run test origin as MicroVM (requires KVM)
+microvm-start: microvm-check-kvm ## Start MicroVM with health polling (recommended)
+	@./scripts/microvm/start.sh
+
+microvm-stop: ## Stop the MicroVM
+	@./scripts/microvm/stop.sh
+
+microvm-check-ports: ## Check if MicroVM ports (17080, 17113, 17022) are available
+	@echo "$(CYAN)Checking MicroVM port availability (see docs/PORTS.md)...$(RESET)"
+	@for port in 17080 17113 17022; do \
+		if bash -c "(echo >/dev/tcp/localhost/$$port) 2>/dev/null"; then \
+			echo "$(RED)ERROR: Port $$port is already in use!$(RESET)"; \
+			echo "  To free: sudo fuser -k $$port/tcp"; \
+			echo "  Or kill previous MicroVM: pkill -f 'qemu.*hls-origin'"; \
+			exit 1; \
+		else \
+			echo "$(GREEN)✓ Port $$port is available$(RESET)"; \
+		fi; \
+	done
+	@echo ""
+
+microvm-origin: microvm-check-kvm microvm-check-ports ## Run test origin as MicroVM (requires KVM)
 	@echo "$(CYAN)Starting test origin MicroVM...$(RESET)"
 	@echo ""
-	@echo "$(GREEN)Stream URL:$(RESET) http://localhost:8080/stream.m3u8"
-	@echo "$(GREEN)Health:$(RESET)     http://localhost:8080/health"
+	@echo "$(GREEN)Stream URL:$(RESET) http://localhost:17080/stream.m3u8"
+	@echo "$(GREEN)Health:$(RESET)     http://localhost:17080/health"
+	@echo "$(GREEN)Metrics:$(RESET)    http://localhost:17113/metrics"
 	@echo ""
 	@echo "Press Ctrl+C to stop the VM"
 	@echo ""
@@ -301,6 +341,77 @@ microvm-origin-low-latency: microvm-check-kvm ## Run low-latency test origin as 
 microvm-origin-stress: microvm-check-kvm ## Run stress-test origin as MicroVM
 	@echo "$(CYAN)Starting stress-test origin MicroVM...$(RESET)"
 	$(NIX_RUN) .#test-origin-vm-stress
+
+microvm-origin-logged: microvm-check-kvm ## Run MicroVM with logging enabled (persistent logs)
+	@echo "$(CYAN)Starting MicroVM with logging enabled...$(RESET)"
+	@echo "$(GREEN)Logs will be saved to persistent volume$(RESET)"
+	$(NIX_RUN) .#test-origin-vm-logged
+
+microvm-origin-debug: microvm-check-kvm ## Run MicroVM with full debug logging
+	@echo "$(CYAN)Starting MicroVM with full debug logging...$(RESET)"
+	$(NIX_RUN) .#test-origin-vm-debug
+
+microvm-start-tap: microvm-check-kvm ## Start MicroVM with TAP networking (recommended for load tests)
+	@./scripts/microvm/start.sh --tap
+
+microvm-origin-tap: microvm-check-kvm ## Run MicroVM with TAP networking (interactive, high perf)
+	@echo "$(CYAN)Starting MicroVM with TAP networking (~10 Gbps)...$(RESET)"
+	@echo "$(YELLOW)Ensure 'make network-setup' was run first!$(RESET)"
+	$(NIX_RUN) .#test-origin-vm-tap
+
+microvm-origin-tap-logged: microvm-check-kvm ## Run TAP MicroVM with logging enabled
+	@echo "$(CYAN)Starting TAP MicroVM with logging...$(RESET)"
+	$(NIX_RUN) .#test-origin-vm-tap-logged
+
+# ============================================================================
+# Load Tests (with local origin)
+# Default: 30 second quick tests. Use DURATION=60s for longer tests.
+# Example: make load-test-300 DURATION=5m
+# ============================================================================
+
+DURATION ?= 30s
+
+load-test-50: build ## Run 50-client load test (gentle, 30s default)
+	@./scripts/50-clients/run.sh $(DURATION)
+
+load-test-100: build ## Run 100-client load test (standard, 30s default)
+	@./scripts/100-clients/run.sh $(DURATION)
+
+load-test-300: build ## Run 300-client load test (stress, 30s default)
+	@./scripts/300-clients/run.sh $(DURATION)
+
+load-test-500: build ## Run 500-client load test (heavy, 30s default)
+	@./scripts/500-clients/run.sh $(DURATION)
+
+load-test-1000: build ## Run 1000-client load test (extreme, 30s default)
+	@./scripts/1000-clients/run.sh $(DURATION)
+
+# Load tests against MicroVM (requires microvm-start first)
+load-test-100-microvm: build ## Run 100-client test against MicroVM origin
+	@echo "$(CYAN)Testing against MicroVM at http://localhost:17080$(RESET)"
+	@./bin/go-ffmpeg-hls-swarm -clients 100 -duration $(DURATION) -ramp-rate 20 http://localhost:17080/stream.m3u8
+
+load-test-300-microvm: build ## Run 300-client test against MicroVM origin
+	@echo "$(CYAN)Testing against MicroVM at http://localhost:17080$(RESET)"
+	@./bin/go-ffmpeg-hls-swarm -clients 300 -duration $(DURATION) -ramp-rate 50 http://localhost:17080/stream.m3u8
+
+load-test-500-microvm: build ## Run 500-client test against MicroVM origin
+	@echo "$(CYAN)Testing against MicroVM at http://localhost:17080$(RESET)"
+	@./bin/go-ffmpeg-hls-swarm -clients 500 -duration $(DURATION) -ramp-rate 100 http://localhost:17080/stream.m3u8
+
+# ============================================================================
+# Network Setup (TAP + vhost-net for high-performance MicroVM networking)
+# See: docs/MICROVM_NETWORKING.md
+# ============================================================================
+
+network-setup: ## Setup TAP + bridge networking for MicroVMs (requires sudo)
+	@./scripts/network/setup.sh
+
+network-teardown: ## Remove TAP + bridge networking
+	@./scripts/network/teardown.sh
+
+network-check: ## Verify network configuration is correct
+	@./scripts/network/check.sh
 
 # ============================================================================
 # Git helpers
@@ -349,6 +460,8 @@ info: ## Show project info and available profiles
 	@echo "  low-latency    1s segments, optimized for speed"
 	@echo "  4k-abr         Multi-bitrate 4K streaming"
 	@echo "  stress-test    Maximum throughput configuration"
+	@echo "  logged         With buffered segment logging (512k buffer)"
+	@echo "  debug          Full logging with gzip compression"
 	@echo ""
 	@echo "$(GREEN)Swarm Client Profiles:$(RESET)"
 	@echo "  default        50 clients, 5/sec ramp"
@@ -361,6 +474,13 @@ info: ## Show project info and available profiles
 	@echo "  Runner script  Local dev (make test-origin)"
 	@echo "  OCI Container  Docker/Podman (make container)"
 	@echo "  MicroVM        KVM isolation (make microvm-origin)"
+	@echo ""
+	@echo "$(GREEN)Load Test Levels:$(RESET)"
+	@echo "  50 clients     Gentle test (make load-test-50)"
+	@echo "  100 clients    Standard test (make load-test-100)"
+	@echo "  300 clients    Stress test (make load-test-300)"
+	@echo "  500 clients    Heavy test (make load-test-500)"
+	@echo "  1000 clients   Extreme test (make load-test-1000)"
 	@echo ""
 	@echo "$(GREEN)Documentation:$(RESET)"
 	@echo "  docs/TEST_ORIGIN.md       Test HLS origin server"

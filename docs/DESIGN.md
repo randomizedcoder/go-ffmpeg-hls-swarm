@@ -29,6 +29,18 @@ This is the **main design document** for contributors. For users, start with [RE
 - [9. Future Enhancements](#9-future-enhancements)
 - [Appendix: Quick Start](#appendix-quick-start)
 
+## Related Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [PORTS.md](PORTS.md) | **Network port configuration** — all ports, defaults, how to change |
+| [MICROVM_NETWORKING.md](MICROVM_NETWORKING.md) | **High-performance TAP/bridge networking** for MicroVMs |
+| [METRICS_ENHANCEMENT_DESIGN.md](METRICS_ENHANCEMENT_DESIGN.md) | **FFmpeg output parsing** — detailed metrics from client output |
+| [METRICS_IMPLEMENTATION_PLAN.md](METRICS_IMPLEMENTATION_PLAN.md) | **Implementation plan** — phases, files, functions, tests |
+| [LOAD_TESTING.md](LOAD_TESTING.md) | Running load tests with pre-configured scripts |
+| [TEST_ORIGIN.md](TEST_ORIGIN.md) | HLS test origin server (MicroVM, Container, local) |
+| [OBSERVABILITY.md](OBSERVABILITY.md) | Prometheus metrics and monitoring |
+
 ---
 
 ## Overview

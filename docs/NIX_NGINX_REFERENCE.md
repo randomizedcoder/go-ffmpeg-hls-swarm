@@ -307,41 +307,233 @@ services.nginx.prependConfig = ''
 
 ## Prometheus Monitoring
 
-**Source**: `pkgs/servers/monitoring/prometheus/nginx-exporter.nix`
+### Overview
 
-### Enable Stub Status
+Nginx exposes basic metrics via the `stub_status` module. For Prometheus scraping, use the official `nginx-prometheus-exporter`.
+
+**Sources**:
+- Package: `pkgs/servers/monitoring/prometheus/nginx-exporter.nix`
+- NixOS module: `nixos/modules/services/monitoring/prometheus/exporters/nginx.nix`
+- Test: `nixos/tests/prometheus-exporters.nix` (line 1063)
+
+### Nginx Prometheus Exporter Package
+
+**Version**: 1.5.1 (as of nixpkgs unstable)
+
+**Source**: [github.com/nginxinc/nginx-prometheus-exporter](https://github.com/nginxinc/nginx-prometheus-exporter)
+
+```nix
+# Package definition (for reference)
+{
+  pname = "nginx_exporter";
+  version = "1.5.1";
+  # Built with Go, Apache 2.0 license
+  # Maintained by: benley, fpletz, globin
+}
+```
+
+### Enable Stub Status (Required)
+
+The nginx exporter requires the `stub_status` module. NixOS provides a simple toggle:
 
 ```nix
 services.nginx = {
-  statusPage = true;  # Enables /nginx_status on localhost
+  enable = true;
+  statusPage = true;  # Enables /nginx_status on localhost:80
+};
+```
 
-  # Or manually configure:
-  virtualHosts."localhost" = {
-    locations."/nginx_status" = {
-      extraConfig = ''
-        stub_status on;
-        access_log off;
-        allow 127.0.0.1;
-        deny all;
-      '';
-    };
+Or configure manually with access control:
+
+```nix
+services.nginx.virtualHosts."localhost" = {
+  locations."/nginx_status" = {
+    extraConfig = ''
+      stub_status on;
+      access_log off;
+      allow 127.0.0.1;      # Local only
+      allow 10.0.0.0/8;     # Allow monitoring network
+      deny all;
+    '';
   };
 };
 ```
 
-### Prometheus Nginx Exporter
+### NixOS Exporter Module Options
+
+**Source**: `nixos/modules/services/monitoring/prometheus/exporters/nginx.nix`
 
 ```nix
 services.prometheus.exporters.nginx = {
   enable = true;
-  port = 9113;
-  scrapeUri = "http://localhost/nginx_status";
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Network Configuration
+  # ═══════════════════════════════════════════════════════════════════════════
+  port = 9113;                              # Default: 9113
+  listenAddress = "0.0.0.0";                # Default: "0.0.0.0"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Nginx Connection
+  # ═══════════════════════════════════════════════════════════════════════════
+  scrapeUri = "http://localhost/nginx_status";  # Default
+  # For custom port:
+  # scrapeUri = "http://localhost:8080/nginx_status";
+
+  sslVerify = true;                         # Verify TLS certs (default: true)
+  # For self-signed certs:
+  # sslVerify = false;
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Metrics Configuration
+  # ═══════════════════════════════════════════════════════════════════════════
+  telemetryPath = "/metrics";               # Default: "/metrics"
+
+  # Add constant labels to all metrics (useful for multi-instance setups)
+  constLabels = [
+    "instance=hls-origin"
+    "environment=production"
+  ];
+
+  # Extra command-line flags
+  extraFlags = [];
 };
 ```
 
+### Available Metrics
+
+The nginx exporter exposes these metrics from `stub_status`:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `nginx_up` | Gauge | Whether the nginx server is up (1 = up, 0 = down) |
+| `nginx_connections_active` | Gauge | Current active client connections |
+| `nginx_connections_accepted` | Counter | Total accepted client connections |
+| `nginx_connections_handled` | Counter | Total handled connections (should equal accepted) |
+| `nginx_connections_reading` | Gauge | Connections reading request header |
+| `nginx_connections_writing` | Gauge | Connections writing response to client |
+| `nginx_connections_waiting` | Gauge | Idle connections waiting for request (keep-alive) |
+| `nginx_http_requests_total` | Counter | Total HTTP requests processed |
+
+### Example Prometheus Output
+
+```bash
+curl -s http://localhost:9113/metrics | grep nginx_
+```
+
+```prometheus
+# HELP nginx_connections_accepted Accepted client connections
+# TYPE nginx_connections_accepted counter
+nginx_connections_accepted 16823
+
+# HELP nginx_connections_active Active client connections
+# TYPE nginx_connections_active gauge
+nginx_connections_active 1247
+
+# HELP nginx_connections_handled Handled client connections
+# TYPE nginx_connections_handled counter
+nginx_connections_handled 16823
+
+# HELP nginx_connections_reading Connections where nginx is reading request header
+# TYPE nginx_connections_reading gauge
+nginx_connections_reading 0
+
+# HELP nginx_connections_waiting Connections where nginx is waiting for request
+# TYPE nginx_connections_waiting gauge
+nginx_connections_waiting 400
+
+# HELP nginx_connections_writing Connections where nginx is writing response back to client
+# TYPE nginx_connections_writing gauge
+nginx_connections_writing 847
+
+# HELP nginx_http_requests_total Total http requests
+# TYPE nginx_http_requests_total counter
+nginx_http_requests_total 348291
+
+# HELP nginx_up Shows if nginx is up (1) or down (0)
+# TYPE nginx_up gauge
+nginx_up{instance="hls-origin"} 1
+```
+
+### Complete NixOS Configuration Example
+
+```nix
+{ config, pkgs, ... }:
+
+{
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Nginx with stub_status
+  # ═══════════════════════════════════════════════════════════════════════════
+  services.nginx = {
+    enable = true;
+    statusPage = true;  # Enables /nginx_status on localhost
+
+    virtualHosts."hls-origin" = {
+      listen = [{ addr = "0.0.0.0"; port = 8080; }];
+      root = "/var/hls";
+
+      # Custom status endpoint (optional, statusPage already provides one)
+      locations."/nginx_status" = {
+        extraConfig = ''
+          stub_status on;
+          access_log off;
+          allow 127.0.0.1;
+          allow 10.0.0.0/8;
+          deny all;
+        '';
+      };
+    };
+  };
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Prometheus Nginx Exporter
+  # ═══════════════════════════════════════════════════════════════════════════
+  services.prometheus.exporters.nginx = {
+    enable = true;
+    port = 9113;
+    scrapeUri = "http://localhost:8080/nginx_status";
+    constLabels = [ "instance=hls-origin" ];
+  };
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Firewall
+  # ═══════════════════════════════════════════════════════════════════════════
+  networking.firewall.allowedTCPPorts = [
+    8080   # HLS origin
+    9113   # Prometheus metrics
+  ];
+}
+```
+
+### Prometheus Scrape Configuration
+
+Add to your Prometheus server config:
+
+```yaml
+scrape_configs:
+  - job_name: 'nginx-hls-origin'
+    static_configs:
+      - targets: ['hls-origin:9113']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '(.+):\d+'
+        replacement: '${1}'
+```
+
+### Grafana Dashboard
+
+Recommended dashboard: **Nginx Prometheus Exporter** (ID: 12708)
+
+Key panels:
+- Active connections over time
+- Requests per second
+- Connection states (reading/writing/waiting)
+- Error rate (connections_handled vs connections_accepted)
+
 ### Virtual Host Traffic Status (VTS) Module
 
-For more detailed metrics:
+For more detailed per-vhost metrics (request counts, bytes, latency histograms):
 
 ```nix
 services.nginx = {
@@ -351,13 +543,37 @@ services.nginx = {
     vhost_traffic_status_zone;
   '';
 
-  virtualHosts."localhost".locations."/status" = {
+  virtualHosts."hls-origin".locations."/vts_status" = {
     extraConfig = ''
       vhost_traffic_status_display;
-      vhost_traffic_status_display_format html;
+      vhost_traffic_status_display_format json;
+      allow 127.0.0.1;
+      deny all;
     '';
   };
 };
+```
+
+**VTS provides additional metrics:**
+- Per-vhost request/byte counts
+- Response time histograms
+- Upstream health metrics
+- Cache hit/miss ratios
+
+### Exporter Systemd Integration
+
+The NixOS module automatically:
+- Creates `prometheus-nginx-exporter.service`
+- Sets `After=nginx.service` and `Requires=nginx.service`
+- Runs as `prometheus-nginx-exporter` user
+- Restarts on failure
+
+```bash
+# Check status
+systemctl status prometheus-nginx-exporter
+
+# View logs
+journalctl -u prometheus-nginx-exporter -f
 ```
 
 ---

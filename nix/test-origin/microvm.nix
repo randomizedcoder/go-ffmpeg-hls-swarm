@@ -4,14 +4,28 @@
 # Lightweight VM with full isolation, ~10s startup
 # Uses the microvm.nix flake: https://github.com/astro/microvm.nix
 #
+# Networking modes:
+#   - "user" (default): QEMU user-mode NAT, ~500 Mbps, zero config
+#   - "tap": TAP + vhost-net, ~10 Gbps, requires `make network-setup`
+#
 # Usage (from flake):
-#   nix run .#test-origin-vm
-#   make microvm-origin
+#   nix run .#test-origin-vm           # User-mode networking (default)
+#   nix run .#test-origin-vm-tap       # TAP networking (high performance)
+#   make microvm-origin                # Via Makefile
+#
+# Logging:
+#   When logging is enabled, logs are stored in /var/log/nginx/
+#   Use a persistent volume to preserve logs across VM restarts
 #
 { pkgs, lib, config, nixosModule, microvm, nixpkgs }:
 
 let
   system = pkgs.stdenv.hostPlatform.system;
+  log = config.logging;
+  net = config.networking;
+
+  # Is TAP networking enabled?
+  useTap = net.mode == "tap";
 
   # Build the NixOS system for the MicroVM
   # Use nixpkgs.lib.nixosSystem (not pkgs.lib which doesn't have it)
@@ -26,7 +40,31 @@ let
 
       # MicroVM-specific configuration
       ({ lib, ... }: {
-        networking.hostName = "hls-origin-vm";
+        # ═══════════════════════════════════════════════════════════════════════
+        # Network configuration
+        # - User-mode: DHCP from QEMU's built-in server
+        # - TAP mode: Static IP for predictable port forwarding
+        # ═══════════════════════════════════════════════════════════════════════
+        networking = {
+          hostName = "hls-origin-vm";
+          useDHCP = lib.mkDefault (!useTap);
+        };
+
+        # For TAP mode, use systemd-networkd with MAC address matching
+        # (The interface inside the VM is NOT "eth0" - it's "enp*" due to predictable naming)
+        systemd.network = lib.mkIf useTap {
+          enable = true;
+          networks."10-vm" = {
+            # Match by MAC address (reliable across interface naming schemes)
+            matchConfig.MACAddress = net.tap.mac;
+            networkConfig = {
+              DHCP = "no";
+              Address = "${net.staticIp}/24";
+              Gateway = net.gateway;
+              DNS = [ "1.1.1.1" "8.8.8.8" ];
+            };
+          };
+        };
 
         # Allow root login for debugging
         users.users.root.password = "";
@@ -38,11 +76,13 @@ let
         # MicroVM configuration
         microvm = {
           # Use qemu for broadest compatibility
+          # Note: For TAP, could use cloud-hypervisor for even better perf
           hypervisor = "qemu";
 
-          # Memory allocation (1GB for tmpfs + services)
-          mem = 1024;
-          vcpu = 2;
+          # Memory allocation (4GB for high-load testing)
+          # Increase if testing with 500+ clients
+          mem = 4096;
+          vcpu = 4;
 
           # Share host's /nix/store (faster startup, no squashfs build)
           shares = [{
@@ -52,23 +92,68 @@ let
             proto = "9p";  # qemu has 9p built-in
           }];
 
-          # User networking with port forwarding (no host setup required)
-          interfaces = [{
-            type = "user";
-            id = "eth0";
-            mac = "02:00:00:01:01:01";
-          }];
+          # ═══════════════════════════════════════════════════════════════════
+          # Network interface configuration
+          # ═══════════════════════════════════════════════════════════════════
+          interfaces = if useTap then [
+            # TAP networking with multiqueue (high performance)
+            # Requires: make network-setup (creates hlsbr0 bridge + hlstap0 TAP with multi_queue)
+            {
+              type = "tap";
+              id = net.tap.device;
+              mac = net.tap.mac;
+            }
+          ] else [
+            # User-mode networking (default, zero config)
+            {
+              type = "user";
+              id = "eth0";
+              mac = "02:00:00:01:01:01";
+            }
+          ];
 
-          # Forward port 8080 -> VM's 8080
-          forwardPorts = [{
-            from = "host";
-            host.port = config.server.port;
-            guest.port = config.server.port;
-          }];
+          # Port forwarding (only for user-mode networking)
+          # TAP mode uses nftables port forwarding on host instead
+          forwardPorts = lib.mkIf (!useTap) [
+            # HLS origin server
+            {
+              from = "host";
+              host.port = config.server.port;
+              guest.port = config.server.port;
+            }
+            # Prometheus nginx exporter (see docs/PORTS.md)
+            {
+              from = "host";
+              host.port = 17113;  # Host-side port
+              guest.port = 9113;  # Internal exporter port
+            }
+          ];
 
           # Control socket for microvm command
           socket = "control.socket";
+
+          # ═══════════════════════════════════════════════════════════════════
+          # QEMU console configuration
+          # ═══════════════════════════════════════════════════════════════════
+          # Disable default stdio serial so we can use TCP for ttyS0
+          qemu.serialConsole = false;
+          
+          # Add TCP serial as ttyS0 (matches kernel console=ttyS0)
+          qemu.extraArgs = [
+            "-serial" "tcp:0.0.0.0:17022,server=on,wait=off"
+          ];
+
+          # Persistent volume for nginx logs (only if logging enabled)
+          # This preserves logs across VM restarts for post-test analysis
+          volumes = lib.mkIf log.enabled [{
+            image = "nginx-logs.img";
+            mountPoint = log.directory;
+            size = 256;  # 256MB for logs
+          }];
         };
+
+        # Kernel console for TCP serial (since we disabled qemu.serialConsole)
+        boot.kernelParams = [ "console=ttyS0" "earlyprintk=ttyS0" ];
 
         # Additional kernel tuning for the VM
         boot.kernel.sysctl = {
@@ -108,11 +193,45 @@ in {
     echo "╔════════════════════════════════════════════════════════════════════════╗"
     echo "║                    HLS Origin MicroVM                                  ║"
     echo "║                    Profile: ${config._profile.name}                                         ║"
+    echo "║                    Network: ${if useTap then "TAP + vhost-net (high perf)" else "User-mode NAT (default)"}             ║"
     echo "╠════════════════════════════════════════════════════════════════════════╣"
+    ${if useTap then ''
+    echo "║ Stream:   http://${net.staticIp}:${toString config.server.port}/${config.hls.playlistName}                      ║"
+    echo "║ Health:   http://${net.staticIp}:${toString config.server.port}/health                             ║"
+    echo "║ Files:    http://${net.staticIp}:${toString config.server.port}/files/                             ║"
+    echo "║ Metrics:  http://${net.staticIp}:9113/metrics                           ║"
+    echo "╠════════════════════════════════════════════════════════════════════════╣"
+    echo "║ (Port forwarding active - localhost also works)                        ║"
+    '' else ''
     echo "║ Stream:   http://localhost:${toString config.server.port}/${config.hls.playlistName}                               ║"
     echo "║ Health:   http://localhost:${toString config.server.port}/health                                      ║"
+    echo "║ Files:    http://localhost:${toString config.server.port}/files/                                      ║"
+    echo "║ Status:   http://localhost:${toString config.server.port}/nginx_status                                ║"
+    echo "║ Metrics:  http://localhost:17113/metrics                               ║"
+    ''}
+    echo "║ Console:  nc localhost 17022 (or socat - TCP:localhost:17022)        ║"
+    ${lib.optionalString log.enabled ''
+    echo "╠════════════════════════════════════════════════════════════════════════╣"
+    echo "║ Logging:  ENABLED (${log.buffer} buffer, ${log.flushInterval} flush)                       ║"
+    echo "║ Logs:     ${log.directory}/                                            ║"
+    ''}
     echo "╚════════════════════════════════════════════════════════════════════════╝"
     echo ""
+    ${if useTap then ''
+    echo "🚀 TAP networking enabled - ~10 Gbps throughput"
+    echo "   Ensure 'make network-setup' was run first!"
+    echo ""
+    '' else ''
+    echo "📊 Prometheus metrics available at http://localhost:17113/metrics"
+    echo "   curl -s http://localhost:17113/metrics | grep nginx_"
+    echo ""
+    ''}
+    ${lib.optionalString log.enabled ''
+    echo "📝 After testing, view logs in VM console:"
+    echo "   tail -100 ${log.directory}/${log.files.segments}"
+    echo "   awk '{sum+=\$3; count++} END {print \"Avg latency:\", sum/count \"s\"}' ${log.directory}/${log.files.segments}"
+    echo ""
+    ''}
     echo "Starting MicroVM (press Ctrl+A X to exit QEMU)..."
     echo ""
     exec ${nixos.config.microvm.declaredRunner}/bin/microvm-run

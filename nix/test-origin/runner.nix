@@ -77,10 +77,11 @@ pkgs.writeShellApplication {
     trap cleanup EXIT INT TERM
 
     # Start FFmpeg HLS generator
+    # Note: Don't use duration=0 - it breaks HLS segment generation with -re
     echo "▶ Starting FFmpeg HLS generator..."
     ffmpeg -re \
-      -f lavfi -i "${config.testPattern}=size=${toString v.width}x${toString v.height}:rate=${toString enc.framerate}:duration=0" \
-      -f lavfi -i "sine=frequency=${toString a.frequency}:sample_rate=${toString a.sampleRate}:duration=0" \
+      -f lavfi -i "${config.testPattern}=size=${toString v.width}x${toString v.height}:rate=${toString enc.framerate}" \
+      -f lavfi -i "sine=frequency=${toString a.frequency}:sample_rate=${toString a.sampleRate}" \
       -c:v libx264 -preset ${enc.preset} -tune ${enc.tune} \
       -profile:v ${enc.profile} -level ${enc.level} \
       -g ${toString gopSize} \

@@ -70,7 +70,8 @@ pkgs.testers.nixosTest {
 
           script = ''
             # Generate a 60-second test video as HLS
-            # Using testsrc2 for a more interesting pattern
+            # Note: testsrc2 with fixed duration works fine (no -re flag)
+            # The duration=0 bug only affects -re mode with lavfi inputs
             ${pkgs.ffmpeg}/bin/ffmpeg -y \
               -f lavfi -i "testsrc2=duration=60:size=1280x720:rate=30" \
               -f lavfi -i "sine=frequency=1000:duration=60" \
