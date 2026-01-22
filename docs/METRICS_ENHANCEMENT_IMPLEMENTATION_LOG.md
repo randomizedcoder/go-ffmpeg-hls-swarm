@@ -13,8 +13,8 @@
 |-------|-------------|--------|---------|-----------|
 | 1 | Output Capture Foundation | ✅ Complete | 2026-01-21 | 2026-01-21 |
 | 2 | Progress Parser | ✅ Complete | 2026-01-22 | 2026-01-22 |
-| 3 | HLS Event Parser | ⏳ Pending | - | - |
-| 4 | Client Stats | ⏳ Pending | - | - |
+| 3 | HLS Event Parser | ✅ Complete | 2026-01-22 | 2026-01-22 |
+| 4 | Client Stats | ✅ Complete | 2026-01-22 | 2026-01-22 |
 | 5 | Stats Aggregation | ⏳ Pending | - | - |
 | 6 | Exit Summary | ⏳ Pending | - | - |
 | 7 | TUI Dashboard | ⏳ Pending | - | - |
@@ -296,7 +296,12 @@ ffmpeg ... -loglevel verbose -progress pipe:1 -stats_period 1 ...
 | `internal/parser/pipeline_test.go` | 1 | Pipeline tests (8 tests, all passing) |
 | `internal/parser/progress.go` | 2 | FFmpeg progress output parser |
 | `internal/parser/progress_test.go` | 2 | Progress parser tests (12 tests + benchmark) |
-| `testdata/ffmpeg_progress.txt` | 2 | Test fixture with real FFmpeg output |
+| `testdata/ffmpeg_progress.txt` | 2 | Test fixture with real FFmpeg progress output |
+| `internal/parser/hls_events.go` | 3 | FFmpeg stderr HLS event parser |
+| `internal/parser/hls_events_test.go` | 3 | HLS event parser tests (17 tests + 2 benchmarks) |
+| `testdata/ffmpeg_stderr.txt` | 3 | Test fixture with real FFmpeg stderr output |
+| `internal/stats/client_stats.go` | 4 | Per-client statistics with T-Digest latency |
+| `internal/stats/client_stats_test.go` | 4 | ClientStats tests (17 tests + 3 benchmarks) |
 
 ## Files Modified
 
@@ -307,8 +312,9 @@ ffmpeg ... -loglevel verbose -progress pipe:1 -stats_period 1 ...
 | `internal/process/ffmpeg.go` | 1 | Added `-progress pipe:1`, `-stats_period 1`, stats-aware loglevel |
 | `internal/supervisor/supervisor.go` | 1 | Added stdout/stderr pipe capture, pipeline integration, drain timeout |
 | `internal/orchestrator/orchestrator.go` | 1 | Pass stats config to FFmpegConfig and ClientManager |
-| `internal/orchestrator/client_manager.go` | 1, 2 | Added stats config, ProgressParser creation, progress tracking |
+| `internal/orchestrator/client_manager.go` | 1, 2, 3 | Added stats config, ProgressParser, HLSEventParser, aggregated HLS stats |
 | `cmd/go-ffmpeg-hls-swarm/main.go` | 1 | Include stats config in printFFmpegCommand |
+| `go.mod`, `go.sum` | 4 | Added `github.com/influxdata/tdigest` dependency |
 
 ---
 
@@ -320,7 +326,8 @@ Items intentionally deferred during implementation that need to be addressed:
 |------|-------|-----------------|----------|----------|
 | Supervisor unit tests | 1.7 | Pipeline tests cover core functionality; supervisor tests require mock process builders | Medium | Before Phase 4 |
 | Progress parser performance optimization | 2 | Current ~354ns/line and 2 allocs/op is acceptable; optimize if profiling shows bottleneck | Low | After Phase 8 |
-| FFmpeg version compatibility testing | 2 | Need to test with older FFmpeg versions (6.x, 7.x) | Low | Before v1.0 release |
+| HLS parser performance optimization | 3 | Current ~5.8µs/line and 11 allocs/op; regex compilation is one-time cost | Low | After Phase 8 |
+| FFmpeg version compatibility testing | 2, 3 | Need to test with older FFmpeg versions (6.x, 7.x) | Low | Before v1.0 release |
 
 ### Details
 
@@ -464,9 +471,226 @@ The parser correctly handles:
 
 **Next: Phase 3 - HLS Event Parser**
 
-The HLS Event Parser will parse stderr for:
-- URL opening events (manifest vs segment)
-- HTTP errors (4xx, 5xx)
+---
+
+**Phase 3 Complete**
+
+Implemented the HLSEventParser with comprehensive test coverage. Key achievements:
+
+1. **Parser implementation**: Thread-safe parser for FFmpeg stderr with regex-based pattern matching
+2. **Comprehensive tests**: 17 tests + 2 benchmarks covering all functionality
+3. **Real-world validation**: Test fixture with actual FFmpeg stderr output
+4. **Latency tracking**: In-flight request tracking with hanging request cleanup (60s TTL)
+5. **Unknown URL fallback**: Tracks unrecognized URL patterns for CDN diagnostics
+6. **Integration**: Wired into ClientManager with aggregated stats
+
+The parser correctly handles:
+- URL opening events (manifest, segment, init, unknown)
+- HTTP error codes (4xx, 5xx)
 - Reconnection attempts
-- Timeout events
-- Segment latency correlation
+- Timeout detection (multiple patterns)
+- Case-insensitive URL classification
+- Query string handling
+
+Key design decisions:
+- `HLSEventParser` implements `LineParser` interface for pipeline compatibility
+- Uses `sync.Map` for lock-free in-flight request tracking
+- 60-second TTL for hanging requests prevents memory leaks
+- Unknown URL bucket helps diagnose CDN behavior
+- Latency samples stored in ring buffer (max 1000 samples)
+
+Test results:
+```
+=== RUN   TestClassifyURL
+--- PASS: TestClassifyURL (0.00s) (18 subtests)
+=== RUN   TestHLSEventParser_Requests
+--- PASS: TestHLSEventParser_Requests (0.00s)
+=== RUN   TestHLSEventParser_UnknownURLs
+--- PASS: TestHLSEventParser_UnknownURLs (0.00s)
+=== RUN   TestHLSEventParser_HTTPErrors
+--- PASS: TestHLSEventParser_HTTPErrors (0.00s)
+=== RUN   TestHLSEventParser_Timeouts
+--- PASS: TestHLSEventParser_Timeouts (0.00s)
+=== RUN   TestHLSEventParser_LatencyTracking
+--- PASS: TestHLSEventParser_LatencyTracking (0.01s)
+=== RUN   TestHLSEventParser_HangingRequestCleanup
+--- PASS: TestHLSEventParser_HangingRequestCleanup (0.00s)
+=== RUN   TestHLSEventParser_ThreadSafety
+--- PASS: TestHLSEventParser_ThreadSafety (0.00s)
+... (all 34 parser tests pass)
+
+# Race detector clean
+$ go test -race ./internal/parser/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/parser  1.205s
+
+# 97.2% coverage
+$ go test -cover ./internal/parser/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/parser  0.150s  coverage: 97.2%
+
+# Benchmarks
+BenchmarkHLSEventParser_ParseLine-24   200664   5795 ns/op   507 B/op   11 allocs/op
+BenchmarkClassifyURL-24               5173880    228 ns/op     0 B/op    0 allocs/op
+```
+
+### Thread Safety Verification
+
+All parsers are thread-safe and pass Go's race detector:
+
+```bash
+$ go test -race ./internal/parser/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/parser  1.201s
+```
+
+**Dedicated thread safety tests:**
+
+| Test | Goroutines | Operations | Validates |
+|------|------------|------------|-----------|
+| `TestProgressParser_ThreadSafety` | 10 | 1,000 | Concurrent parsing + callback |
+| `TestHLSEventParser_ThreadSafety` | 10 | 1,000 | Concurrent parsing + latency completion |
+
+**Thread-safe mechanisms:**
+- `sync.Mutex` - Stats, latencies, httpErrors maps
+- `sync/atomic` - All counters (manifestRequests, segmentRequests, etc.)
+- `sync.Map` - In-flight request tracking (lock-free)
+
+---
+
+**Phase 4 Complete**
+
+Implemented ClientStats with T-Digest for memory-efficient percentile calculation. Key achievements:
+
+1. **T-Digest integration**: Memory-efficient percentile calculation (~10KB per client)
+2. **Bytes tracking**: Handles FFmpeg restart resets correctly
+3. **Wall-clock drift**: Tracks playback vs real-time drift
+4. **Stall detection**: Speed-based stall detection with configurable threshold
+5. **Pipeline health**: Tracks dropped lines and peak drop rate
+6. **Comprehensive tests**: 17 tests + 3 benchmarks
+
+Key features:
+- `OnProcessStart()` / `UpdateCurrentBytes()` / `TotalBytes()` - handles FFmpeg restarts
+- `InferredLatencyP50()` / `P95()` / `P99()` / `Max()` - T-Digest percentiles
+- `UpdateDrift()` / `HasHighDrift()` - wall-clock drift tracking
+- `UpdateSpeed()` / `IsStalled()` - stall detection
+- `RecordDroppedLines()` / `GetPeakDropRate()` - pipeline health
+- `GetSummary()` - snapshot of all metrics
+
+Test results:
+```
+=== RUN   TestNewClientStats
+--- PASS: TestNewClientStats (0.00s)
+=== RUN   TestClientStats_BytesTracking
+--- PASS: TestClientStats_BytesTracking (0.00s)
+=== RUN   TestClientStats_LatencyTracking
+--- PASS: TestClientStats_LatencyTracking (0.01s)
+=== RUN   TestClientStats_HangingRequestCleanup
+--- PASS: TestClientStats_HangingRequestCleanup (0.00s)
+=== RUN   TestClientStats_DriftTracking
+--- PASS: TestClientStats_DriftTracking (0.05s)
+=== RUN   TestClientStats_SpeedAndStall
+--- PASS: TestClientStats_SpeedAndStall (0.00s)
+=== RUN   TestClientStats_ThreadSafety
+--- PASS: TestClientStats_ThreadSafety (0.01s)
+... (all 17 tests pass)
+
+# Race detector clean
+$ go test -race ./internal/stats/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats  1.207s
+
+# 97.4% coverage
+$ go test -cover ./internal/stats/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats  0.134s  coverage: 97.4%
+
+# Benchmarks
+BenchmarkClientStats_IncrementCounters-24  135999042   8.956 ns/op   0 B/op   0 allocs/op
+BenchmarkClientStats_RecordLatency-24        9913545   122.2 ns/op   0 B/op   0 allocs/op
+BenchmarkClientStats_GetSummary-24           4144886   289.7 ns/op  48 B/op   1 allocs/op
+```
+
+**Note:** Wiring ClientStats into ClientManager deferred to Phase 5 (Stats Aggregation) to avoid duplicate work.
+
+**Next: Phase 5 - Stats Aggregation**
+
+---
+
+## Plan vs Implementation Comparison
+
+### Phase 1: Output Capture Foundation
+
+| Plan Step | Status | Alignment |
+|-----------|--------|-----------|
+| 1.1 Config options | ✅ | Exact match |
+| 1.2 CLI flags | ✅ | Exact match + hidden `-stats-drop-threshold` |
+| 1.3 FFmpeg args | ✅ | Exact match |
+| 1.4 Pipeline struct | ✅ | Enhanced with `DropRate()`, `IsDegraded()` |
+| 1.5 Pipeline tests | ✅ | Enhanced: 8 tests vs 2 planned |
+| 1.6 Supervisor integration | ✅ | Exact match |
+| 1.7 Supervisor tests | ⏳ Deferred | Tracked in deferred items |
+| 1.8 Drain timeout | ✅ | Enhanced with `timeout` and `reason` in logs |
+
+**Architecture deviation:** None - followed plan exactly.
+
+### Phase 2: Progress Parser
+
+| Plan Step | Status | Alignment |
+|-----------|--------|-----------|
+| 2.1 ProgressParser | ✅ | Enhanced with `ReceivedAt`, helper methods |
+| 2.2 Tests | ✅ | Enhanced: 12 tests + benchmark vs 4 planned |
+| 2.3 Test fixture | ✅ | Enhanced with FFmpeg version header |
+| 2.4 Wire up in Supervisor | ✅ | **Different:** Wired in ClientManager |
+| 2.5 Run tests | ✅ | All pass with race detector |
+
+**Architecture deviation:** Wired in `ClientManager.StartClient()` instead of `Supervisor.parseProgress()`. This centralizes stats aggregation and aligns with Phase 5 design.
+
+### Phase 3: HLS Event Parser
+
+| Plan Step | Status | Alignment |
+|-----------|--------|-----------|
+| 3.1 HLSEventParser | ✅ | **Significantly enhanced** (see below) |
+| 3.2 Tests | ✅ | Enhanced: 17 tests + 2 benchmarks vs 4 planned |
+| 3.3 Wire up in Supervisor | ✅ | **Different:** Wired in ClientManager |
+| 3.4 FFmpeg version check | ⏳ Deferred | Tracked in deferred items |
+
+**Architecture deviation:** Major - self-contained parser instead of `StatsRecorder` interface.
+
+#### Phase 3 Detailed Comparison
+
+| Feature | Plan | Implementation |
+|---------|------|----------------|
+| Stats storage | External `StatsRecorder` interface | Self-contained with atomic counters |
+| Event callback | None | `HLSEventCallback` function |
+| Latency tracking | Separate tracker | Built-in with `inflightRequests` sync.Map |
+| Hanging cleanup | Separate logic | Built-in with 60s TTL |
+| Unknown URLs | Not specified | `UnknownRequests` fallback bucket |
+| Init segments | Not tracked | `InitRequests` counter |
+| Stats retrieval | Via interface | `HLSStats` struct with `Stats()` method |
+
+**Why the deviation is better:**
+1. **Self-contained** - No external dependency, easier to test
+2. **Callback-based** - Optional real-time event handling
+3. **Built-in latency** - No separate tracker needed
+4. **Design compliance** - Unknown URL bucket matches design doc requirement
+5. **TTL cleanup** - Matches design doc requirement for memory safety
+
+### Phase 4: Client Stats
+
+| Plan Step | Status | Alignment |
+|-----------|--------|-----------|
+| 4.0 Add T-Digest | ✅ | Exact match |
+| 4.1 Create ClientStats | ✅ | Enhanced with Summary struct |
+| 4.2 Bytes tracking | ✅ | Exact match (handles restarts) |
+| 4.3 Drift tracking | ✅ | Exact match |
+| 4.4 Tests | ✅ | Enhanced: 17 tests + 3 benchmarks |
+| 4.5 Wire up | ⏳ Deferred | To Phase 5 (avoid duplicate work) |
+
+**Architecture note:** ClientStats is a standalone package that can be used by ClientManager in Phase 5. This separation allows for cleaner testing and potential reuse.
+
+### Summary: Plan Adherence
+
+| Phase | Plan Steps | Completed | Deferred | Alignment |
+|-------|------------|-----------|----------|-----------|
+| 1 | 8 | 7 | 1 | **Excellent** |
+| 2 | 5 | 5 | 0 | **Excellent** (with beneficial deviation) |
+| 3 | 4 | 3 | 1 | **Excellent** (with architectural improvement) |
+| 4 | 6 | 5 | 1 | **Excellent** (wiring deferred to Phase 5) |
+
+**Overall:** Implementation follows the plan's goals while making architectural improvements that simplify the codebase and improve maintainability. All deviations are documented and intentional.

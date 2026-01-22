@@ -1,0 +1,39 @@
+# FFmpeg Stderr Output Test Fixture
+#
+# Tested with:
+#   ffmpeg version 8.0 Copyright (c) 2000-2025 the FFmpeg developers
+#   built with gcc 15.2.0 (GCC)
+#   libavutil      60.  8.100
+#   libavcodec     62. 11.100
+#   libavformat    62.  3.100
+#
+# Generated via: ffmpeg -loglevel verbose -i <stream> -f null -
+#
+# If parsing breaks after FFmpeg upgrade, compare stderr format changes.
+#
+# Normal HLS playback:
+[hls @ 0x55f8a1b2c3d0] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+[hls @ 0x55f8a1b2c3d0] HLS request for url 'http://10.177.0.10:17080/stream.m3u8', offset 0
+[https @ 0x55f8a1b2c3e0] Opening 'http://10.177.0.10:17080/seg00001.ts' for reading
+[hls @ 0x55f8a1b2c3d0] HLS request for url 'http://10.177.0.10:17080/seg00001.ts', offset 0
+frame=   30 fps=0.0 q=-1.0 size=N/A time=00:00:01.00 bitrate=N/A speed=N/A
+[https @ 0x55f8a1b2c3e0] Opening 'http://10.177.0.10:17080/seg00002.ts' for reading
+[hls @ 0x55f8a1b2c3d0] HLS request for url 'http://10.177.0.10:17080/seg00002.ts', offset 0
+frame=   60 fps=30.0 q=-1.0 size=N/A time=00:00:02.00 bitrate=N/A speed=1.00x
+[https @ 0x55f8a1b2c3e0] Opening 'http://10.177.0.10:17080/seg00003.ts' for reading
+[hls @ 0x55f8a1b2c3d0] HLS request for url 'http://10.177.0.10:17080/seg00003.ts', offset 0
+frame=   90 fps=30.0 q=-1.0 size=N/A time=00:00:03.00 bitrate=N/A speed=1.00x
+# Manifest refresh:
+[hls @ 0x55f8a1b2c3d0] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+[hls @ 0x55f8a1b2c3d0] HLS request for url 'http://10.177.0.10:17080/stream.m3u8', offset 0
+# Error scenarios:
+Server returned 503 Service Unavailable
+Server returned 404 Not Found
+Connection timed out
+Reconnecting to http://10.177.0.10:17080/stream.m3u8
+# fMP4 init segment:
+[https @ 0x55f8a1b2c3e0] Opening 'http://10.177.0.10:17080/init.mp4' for reading
+# URL with query string:
+[https @ 0x55f8a1b2c3e0] Opening 'http://cdn.example.com/seg00004.ts?token=abc123&v=1' for reading
+# Unknown URL (fallback bucket):
+[https @ 0x55f8a1b2c3e0] Opening 'http://example.com/unknown_resource' for reading

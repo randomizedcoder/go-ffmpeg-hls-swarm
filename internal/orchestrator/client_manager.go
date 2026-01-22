@@ -34,9 +34,22 @@ type ClientManager struct {
 	latestProgress map[int]*parser.ProgressUpdate
 	progressMu     sync.RWMutex
 
+	// Per-client HLS event tracking (Phase 3)
+	// Maps clientID -> HLSEventParser
+	hlsParsers map[int]*parser.HLSEventParser
+	hlsMu      sync.RWMutex
+
 	// Aggregated stats (Phase 5 will expand this)
 	totalBytesDownloaded atomic.Int64
 	totalProgressUpdates atomic.Int64
+
+	// HLS aggregated stats (Phase 3)
+	totalManifestRequests atomic.Int64
+	totalSegmentRequests  atomic.Int64
+	totalUnknownRequests  atomic.Int64
+	totalHTTPErrors       atomic.Int64
+	totalReconnections    atomic.Int64
+	totalTimeouts         atomic.Int64
 
 	// Supervisors indexed by client ID
 	supervisors map[int]*supervisor.Supervisor
@@ -108,6 +121,7 @@ func NewClientManager(cfg ManagerConfig) *ClientManager {
 		callbacks:          cfg.Callbacks,
 		supervisors:        make(map[int]*supervisor.Supervisor),
 		latestProgress:     make(map[int]*parser.ProgressUpdate),
+		hlsParsers:         make(map[int]*parser.HLSEventParser),
 		configSeed:         time.Now().UnixNano(),
 	}
 }
@@ -124,6 +138,19 @@ func (m *ClientManager) StartClient(ctx context.Context, clientID int) {
 		progressParser = parser.NewProgressParser(m.createProgressCallback(clientID))
 	}
 
+	// Create HLS event parser for this client (Phase 3)
+	var stderrParser parser.LineParser
+	var hlsParser *parser.HLSEventParser
+	if m.statsEnabled {
+		hlsParser = parser.NewHLSEventParser(clientID, m.createHLSEventCallback(clientID))
+		stderrParser = hlsParser
+
+		// Store reference for stats aggregation
+		m.hlsMu.Lock()
+		m.hlsParsers[clientID] = hlsParser
+		m.hlsMu.Unlock()
+	}
+
 	// Create supervisor with callbacks
 	sup := supervisor.New(supervisor.Config{
 		ClientID:    clientID,
@@ -135,9 +162,9 @@ func (m *ClientManager) StartClient(ctx context.Context, clientID int) {
 		StatsEnabled:       m.statsEnabled,
 		StatsBufferSize:    m.statsBufferSize,
 		StatsDropThreshold: m.statsDropThreshold,
-		// Parsers (Phase 2 - ProgressParser, Phase 3 will add HLSEventParser)
+		// Parsers (Phase 2 - ProgressParser, Phase 3 - HLSEventParser)
 		ProgressParser: progressParser,
-		// StderrParser will be added in Phase 3
+		StderrParser:   stderrParser,
 		Callbacks: supervisor.Callbacks{
 			OnStateChange: m.handleStateChange,
 			OnStart:       m.handleStart,
@@ -296,6 +323,11 @@ func (m *ClientManager) createProgressCallback(clientID int) parser.ProgressCall
 		}
 		// If update.TotalSize < prev.TotalSize, FFmpeg restarted - don't subtract
 
+		// Complete oldest in-flight segment for latency tracking (Phase 3)
+		// Progress updates indicate that a segment download likely completed.
+		// This is "inferred latency" - see METRICS_ENHANCEMENT_DESIGN.md
+		m.CompleteSegmentForClient(clientID)
+
 		// Log stalling detection at debug level
 		if update.IsStalling() {
 			m.logger.Debug("client_stalling",
@@ -360,4 +392,94 @@ func (m *ClientManager) GetClientProgress(clientID int) *parser.ProgressUpdate {
 		return &copy
 	}
 	return nil
+}
+
+// createHLSEventCallback creates a callback for the HLSEventParser.
+// This callback is called for each HLS event (request, error, reconnect, timeout).
+func (m *ClientManager) createHLSEventCallback(clientID int) parser.HLSEventCallback {
+	return func(event *parser.HLSEvent) {
+		switch event.Type {
+		case parser.EventRequest:
+			switch event.URLType {
+			case parser.URLTypeManifest:
+				m.totalManifestRequests.Add(1)
+			case parser.URLTypeSegment:
+				m.totalSegmentRequests.Add(1)
+			case parser.URLTypeUnknown:
+				m.totalUnknownRequests.Add(1)
+			}
+		case parser.EventHTTPError:
+			m.totalHTTPErrors.Add(1)
+		case parser.EventReconnect:
+			m.totalReconnections.Add(1)
+		case parser.EventTimeout:
+			m.totalTimeouts.Add(1)
+		}
+	}
+}
+
+// HLSStats returns aggregated HLS event statistics.
+type HLSStats struct {
+	TotalManifestRequests int64
+	TotalSegmentRequests  int64
+	TotalUnknownRequests  int64 // Fallback bucket for unrecognized URL patterns
+	TotalHTTPErrors       int64
+	TotalReconnections    int64
+	TotalTimeouts         int64
+	ClientsWithHLSStats   int
+}
+
+// GetHLSStats returns current HLS event statistics across all clients.
+func (m *ClientManager) GetHLSStats() HLSStats {
+	m.hlsMu.RLock()
+	defer m.hlsMu.RUnlock()
+
+	return HLSStats{
+		TotalManifestRequests: m.totalManifestRequests.Load(),
+		TotalSegmentRequests:  m.totalSegmentRequests.Load(),
+		TotalUnknownRequests:  m.totalUnknownRequests.Load(),
+		TotalHTTPErrors:       m.totalHTTPErrors.Load(),
+		TotalReconnections:    m.totalReconnections.Load(),
+		TotalTimeouts:         m.totalTimeouts.Load(),
+		ClientsWithHLSStats:   len(m.hlsParsers),
+	}
+}
+
+// GetClientHLSStats returns HLS statistics for a specific client.
+// Returns nil if no HLS parser exists for this client.
+func (m *ClientManager) GetClientHLSStats(clientID int) *parser.HLSStats {
+	m.hlsMu.RLock()
+	defer m.hlsMu.RUnlock()
+
+	if hlsParser, ok := m.hlsParsers[clientID]; ok {
+		stats := hlsParser.Stats()
+		return &stats
+	}
+	return nil
+}
+
+// GetClientLatencies returns latency samples for a specific client.
+// Returns nil if no HLS parser exists for this client.
+func (m *ClientManager) GetClientLatencies(clientID int) []time.Duration {
+	m.hlsMu.RLock()
+	defer m.hlsMu.RUnlock()
+
+	if hlsParser, ok := m.hlsParsers[clientID]; ok {
+		return hlsParser.Latencies()
+	}
+	return nil
+}
+
+// CompleteSegmentForClient completes the oldest in-flight segment for a client.
+// This should be called when a progress update is received, indicating a segment
+// download likely completed. Returns the inferred latency.
+func (m *ClientManager) CompleteSegmentForClient(clientID int) time.Duration {
+	m.hlsMu.RLock()
+	hlsParser := m.hlsParsers[clientID]
+	m.hlsMu.RUnlock()
+
+	if hlsParser != nil {
+		return hlsParser.CompleteOldestSegment()
+	}
+	return 0
 }
