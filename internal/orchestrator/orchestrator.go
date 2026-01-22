@@ -9,11 +9,14 @@ import (
 	"syscall"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/config"
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/metrics"
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/preflight"
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/process"
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats"
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/supervisor"
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/tui"
 )
 
 // Orchestrator coordinates all components for an HLS load test.
@@ -58,7 +61,13 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 	rampScheduler := NewRampScheduler(cfg.RampRate, cfg.RampJitter)
 
 	// Create metrics
-	collector := metrics.NewCollector(cfg.Clients)
+	collector := metrics.NewCollector(metrics.CollectorConfig{
+		TargetClients:    cfg.Clients,
+		TestDuration:     cfg.Duration,
+		StreamURL:        cfg.StreamURL,
+		Variant:          cfg.Variant,
+		PerClientMetrics: cfg.PromClientMetrics,
+	})
 	metricsServer := metrics.NewServer(cfg.MetricsAddr, logger)
 
 	orch := &Orchestrator{
@@ -148,6 +157,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		o.rampUp(ctx)
 	}()
 
+	// Start stats update loop for Prometheus
+	if o.config.StatsEnabled {
+		go o.statsUpdateLoop(ctx)
+	}
+
 	// Setup duration timer if configured
 	var durationTimer <-chan time.Time
 	if o.config.Duration > 0 {
@@ -155,13 +169,18 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Wait for completion signal
-	select {
-	case sig := <-sigCh:
-		o.logger.Info("received_signal", "signal", sig.String())
-	case <-durationTimer:
-		o.logger.Info("duration_elapsed", "duration", o.config.Duration.String())
-	case <-ctx.Done():
-		o.logger.Info("context_cancelled")
+	// If TUI is enabled, run TUI instead of simple signal wait
+	if o.config.TUIEnabled {
+		o.runWithTUI(ctx, cancel, sigCh, durationTimer)
+	} else {
+		select {
+		case sig := <-sigCh:
+			o.logger.Info("received_signal", "signal", sig.String())
+		case <-durationTimer:
+			o.logger.Info("duration_elapsed", "duration", o.config.Duration.String())
+		case <-ctx.Done():
+			o.logger.Info("context_cancelled")
+		}
 	}
 
 	// Cancel context to stop all clients
@@ -257,66 +276,38 @@ func (o *Orchestrator) onRestart(clientID int, attempt int, delay time.Duration)
 
 // printExitSummary prints a summary of the load test run.
 func (o *Orchestrator) printExitSummary() {
-	summary := o.metrics.GenerateSummary()
+	metricsSummary := o.metrics.GenerateSummary()
 
-	fmt.Println()
-	fmt.Println("═══════════════════════════════════════════════════════════════════")
-	fmt.Println("                        go-ffmpeg-hls-swarm Exit Summary")
-	fmt.Println("═══════════════════════════════════════════════════════════════════")
-	fmt.Printf("Run Duration:           %s\n", formatDuration(summary.Duration))
-	fmt.Printf("Target Clients:         %d\n", summary.TargetClients)
-	fmt.Printf("Peak Active Clients:    %d\n", summary.PeakActiveClients)
-	fmt.Println()
-
-	if summary.UptimeP50 > 0 || summary.UptimeP95 > 0 {
-		fmt.Println("Uptime Distribution:")
-		fmt.Printf("  P50 (median):         %s\n", formatDuration(summary.UptimeP50))
-		fmt.Printf("  P95:                  %s\n", formatDuration(summary.UptimeP95))
-		fmt.Printf("  P99:                  %s\n", formatDuration(summary.UptimeP99))
-		fmt.Println()
+	// Build SummaryConfig from metrics collector data
+	cfg := stats.SummaryConfig{
+		TargetClients: metricsSummary.TargetClients,
+		Duration:      metricsSummary.Duration,
+		MetricsAddr:   o.config.MetricsAddr,
+		TotalStarts:   int(metricsSummary.TotalStarts),
+		TotalRestarts: int(metricsSummary.TotalRestarts),
+		UptimeP50:     metricsSummary.UptimeP50,
+		UptimeP95:     metricsSummary.UptimeP95,
+		UptimeP99:     metricsSummary.UptimeP99,
 	}
 
-	fmt.Println("Lifecycle:")
-	fmt.Printf("  Total Starts:         %d\n", summary.TotalStarts)
-	fmt.Printf("  Total Restarts:       %d\n", summary.TotalRestarts)
-	fmt.Println()
-
-	if len(summary.ExitCodes) > 0 {
-		fmt.Println("Exit Codes:")
-		for code, count := range summary.ExitCodes {
-			label := exitCodeLabel(code)
-			fmt.Printf("  %3d %-16s %d\n", code, label, count)
+	// Convert exit codes from int64 to int
+	if len(metricsSummary.ExitCodes) > 0 {
+		cfg.ExitCodes = make(map[int]int, len(metricsSummary.ExitCodes))
+		for code, count := range metricsSummary.ExitCodes {
+			cfg.ExitCodes[code] = int(count)
 		}
-		fmt.Println()
 	}
 
-	fmt.Printf("Metrics endpoint was: http://%s/metrics\n", o.config.MetricsAddr)
-	fmt.Println("═══════════════════════════════════════════════════════════════════")
-}
-
-// formatDuration formats a duration as HH:MM:SS.
-func formatDuration(d time.Duration) string {
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	s := int(d.Seconds()) % 60
-	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
-}
-
-// exitCodeLabel returns a human-readable label for common exit codes.
-func exitCodeLabel(code int) string {
-	switch code {
-	case 0:
-		return "(clean)"
-	case 1:
-		return "(error)"
-	case 137:
-		return "(SIGKILL)"
-	case 143:
-		return "(SIGTERM)"
-	default:
-		return ""
+	// Get aggregated stats if stats collection is enabled
+	var aggregatedStats *stats.AggregatedStats
+	if o.config.StatsEnabled {
+		aggregatedStats = o.GetAggregatedStats()
 	}
+
+	// Print the enhanced exit summary
+	fmt.Print(stats.FormatExitSummary(aggregatedStats, cfg))
 }
+
 
 // ClientManager returns the client manager for external access.
 func (o *Orchestrator) ClientManager() *ClientManager {
@@ -331,4 +322,152 @@ func (o *Orchestrator) Runner() *process.FFmpegRunner {
 // Metrics returns the metrics collector for external access.
 func (o *Orchestrator) Metrics() *metrics.Collector {
 	return o.metrics
+}
+
+// GetAggregatedStats returns aggregated statistics across all clients.
+// This is the primary method for getting comprehensive stats (Phase 5).
+func (o *Orchestrator) GetAggregatedStats() *stats.AggregatedStats {
+	return o.clientManager.GetAggregatedStats()
+}
+
+// GetStatsAggregator returns the stats aggregator for direct access.
+func (o *Orchestrator) GetStatsAggregator() *stats.StatsAggregator {
+	return o.clientManager.GetStatsAggregator()
+}
+
+// runWithTUI runs the orchestrator with the TUI dashboard.
+func (o *Orchestrator) runWithTUI(ctx context.Context, cancel context.CancelFunc, sigCh <-chan os.Signal, durationTimer <-chan time.Time) {
+	// Create TUI model
+	tuiModel := tui.New(tui.Config{
+		TargetClients: o.config.Clients,
+		StreamURL:     o.config.StreamURL,
+		MetricsAddr:   o.config.MetricsAddr,
+		StatsSource:   o,
+	})
+
+	// Create Bubble Tea program
+	p := tea.NewProgram(tuiModel, tea.WithAltScreen())
+
+	// Monitor for external quit signals in background
+	go func() {
+		select {
+		case sig := <-sigCh:
+			o.logger.Info("received_signal", "signal", sig.String())
+			p.Send(tui.QuitMsg{})
+		case <-durationTimer:
+			o.logger.Info("duration_elapsed", "duration", o.config.Duration.String())
+			p.Send(tui.QuitMsg{})
+		case <-ctx.Done():
+			o.logger.Info("context_cancelled")
+			p.Send(tui.QuitMsg{})
+		}
+	}()
+
+	// Run TUI (blocks until user quits or external signal)
+	if _, err := p.Run(); err != nil {
+		o.logger.Error("tui_error", "error", err)
+	}
+
+	// TUI has exited, trigger shutdown
+	cancel()
+}
+
+// statsUpdateLoop periodically updates Prometheus metrics from aggregated stats.
+func (o *Orchestrator) statsUpdateLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Second) // Update every second
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			aggStats := o.GetAggregatedStats()
+			if aggStats == nil {
+				continue
+			}
+
+			// Convert stats.AggregatedStats to metrics.AggregatedStatsUpdate
+			update := o.convertToMetricsUpdate(aggStats)
+			o.metrics.RecordStats(update)
+
+			// Also record latency samples to histogram
+			// Note: T-Digest percentiles are approximate, so we use the P50 as a proxy
+			// for histogram observation. The histogram buckets will provide more
+			// accurate distribution data for Grafana.
+		}
+	}
+}
+
+// convertToMetricsUpdate converts stats.AggregatedStats to metrics.AggregatedStatsUpdate.
+func (o *Orchestrator) convertToMetricsUpdate(aggStats *stats.AggregatedStats) *metrics.AggregatedStatsUpdate {
+	update := &metrics.AggregatedStatsUpdate{
+		// Client counts
+		ActiveClients:  aggStats.ActiveClients,
+		StalledClients: aggStats.StalledClients,
+
+		// Request totals
+		TotalManifestReqs: aggStats.TotalManifestReqs,
+		TotalSegmentReqs:  aggStats.TotalSegmentReqs,
+		TotalInitReqs:     aggStats.TotalInitReqs,
+		TotalUnknownReqs:  aggStats.TotalUnknownReqs,
+		TotalBytes:        aggStats.TotalBytes,
+
+		// Rates
+		ManifestReqRate:       aggStats.InstantManifestRate,
+		SegmentReqRate:        aggStats.InstantSegmentRate,
+		ThroughputBytesPerSec: aggStats.InstantThroughputRate,
+
+		// Errors
+		TotalHTTPErrors:    aggStats.TotalHTTPErrors,
+		TotalReconnections: aggStats.TotalReconnections,
+		TotalTimeouts:      aggStats.TotalTimeouts,
+		ErrorRate:          aggStats.ErrorRate,
+
+		// Latency (inferred)
+		InferredLatencyP50: aggStats.InferredLatencyP50,
+		InferredLatencyP95: aggStats.InferredLatencyP95,
+		InferredLatencyP99: aggStats.InferredLatencyP99,
+		InferredLatencyMax: aggStats.InferredLatencyMax,
+
+		// Health
+		ClientsAboveRealtime: aggStats.ClientsAboveRealtime,
+		ClientsBelowRealtime: aggStats.ClientsBelowRealtime,
+		AverageSpeed:         aggStats.AverageSpeed,
+		ClientsWithHighDrift: aggStats.ClientsWithHighDrift,
+		AverageDrift:         aggStats.AverageDrift,
+		MaxDrift:             aggStats.MaxDrift,
+
+		// Pipeline health
+		TotalLinesDropped: aggStats.TotalLinesDropped,
+		TotalLinesRead:    aggStats.TotalLinesRead,
+		ClientsWithDrops:  aggStats.ClientsWithDrops,
+		MetricsDegraded:   aggStats.MetricsDegraded,
+		PeakDropRate:      aggStats.PeakDropRate,
+
+		// Per-stream breakdown (approximation: assume 50/50 split)
+		// The aggregator doesn't track per-stream, but Prometheus needs it
+		ProgressLinesDropped: aggStats.TotalLinesDropped / 2,
+		ProgressLinesRead:    aggStats.TotalLinesRead / 2,
+		StderrLinesDropped:   aggStats.TotalLinesDropped - aggStats.TotalLinesDropped/2,
+		StderrLinesRead:      aggStats.TotalLinesRead - aggStats.TotalLinesRead/2,
+
+		// Note: Uptime percentiles are tracked separately by metrics.Collector
+		// via RecordExit() calls, not from aggregated stats
+	}
+
+	// Add per-client stats if enabled
+	if o.metrics.PerClientEnabled() && len(aggStats.PerClientSummaries) > 0 {
+		update.PerClientStats = make([]metrics.PerClientStatsUpdate, len(aggStats.PerClientSummaries))
+		for i, summary := range aggStats.PerClientSummaries {
+			update.PerClientStats[i] = metrics.PerClientStatsUpdate{
+				ClientID:     summary.ClientID,
+				CurrentSpeed: summary.CurrentSpeed,
+				CurrentDrift: summary.CurrentDrift,
+				TotalBytes:   summary.TotalBytes,
+			}
+		}
+	}
+
+	return update
 }

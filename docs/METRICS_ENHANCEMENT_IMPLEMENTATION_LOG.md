@@ -1,6 +1,6 @@
 # Metrics Enhancement Implementation Log
 
-> **Status**: IN PROGRESS
+> **Status**: ✅ COMPLETE
 > **Started**: 2026-01-21
 > **Design**: [METRICS_ENHANCEMENT_DESIGN.md](METRICS_ENHANCEMENT_DESIGN.md)
 > **Plan**: [METRICS_IMPLEMENTATION_PLAN.md](METRICS_IMPLEMENTATION_PLAN.md)
@@ -15,10 +15,10 @@
 | 2 | Progress Parser | ✅ Complete | 2026-01-22 | 2026-01-22 |
 | 3 | HLS Event Parser | ✅ Complete | 2026-01-22 | 2026-01-22 |
 | 4 | Client Stats | ✅ Complete | 2026-01-22 | 2026-01-22 |
-| 5 | Stats Aggregation | ⏳ Pending | - | - |
-| 6 | Exit Summary | ⏳ Pending | - | - |
-| 7 | TUI Dashboard | ⏳ Pending | - | - |
-| 8 | Prometheus Metrics | ⏳ Pending | - | - |
+| 5 | Stats Aggregation | ✅ Complete | 2026-01-22 | 2026-01-22 |
+| 6 | Exit Summary | ✅ Complete | 2026-01-22 | 2026-01-22 |
+| 7 | TUI Dashboard | ✅ Complete | 2026-01-22 | 2026-01-22 |
+| 8 | Prometheus Metrics | ✅ Complete | 2026-01-22 | 2026-01-22 |
 
 ---
 
@@ -302,6 +302,13 @@ ffmpeg ... -loglevel verbose -progress pipe:1 -stats_period 1 ...
 | `testdata/ffmpeg_stderr.txt` | 3 | Test fixture with real FFmpeg stderr output |
 | `internal/stats/client_stats.go` | 4 | Per-client statistics with T-Digest latency |
 | `internal/stats/client_stats_test.go` | 4 | ClientStats tests (17 tests + 3 benchmarks) |
+| `internal/stats/aggregator.go` | 5 | Stats aggregator across all clients |
+| `internal/stats/aggregator_test.go` | 5 | Aggregator tests (18 tests + 2 benchmarks) |
+| `internal/supervisor/supervisor_test.go` | 1.7 | Supervisor tests (26 tests + 2 benchmarks) |
+| `internal/stats/summary.go` | 6 | Exit summary formatter with footnotes |
+| `internal/stats/summary_test.go` | 6 | Summary formatter tests (24 tests + 3 benchmarks) |
+| `internal/supervisor/backoff_test.go` | 6+ | Backoff tests (14 tests + 2 benchmarks) |
+| `internal/process/ffmpeg_test.go` | 6+ | FFmpeg runner tests (24 tests + 2 benchmarks) |
 
 ## Files Modified
 
@@ -311,8 +318,8 @@ ffmpeg ... -loglevel verbose -progress pipe:1 -stats_period 1 ...
 | `internal/config/flags.go` | 1 | Added `-stats`, `-stats-loglevel`, `-stats-buffer`, `-stats-drop-threshold` |
 | `internal/process/ffmpeg.go` | 1 | Added `-progress pipe:1`, `-stats_period 1`, stats-aware loglevel |
 | `internal/supervisor/supervisor.go` | 1 | Added stdout/stderr pipe capture, pipeline integration, drain timeout |
-| `internal/orchestrator/orchestrator.go` | 1 | Pass stats config to FFmpegConfig and ClientManager |
-| `internal/orchestrator/client_manager.go` | 1, 2, 3 | Added stats config, ProgressParser, HLSEventParser, aggregated HLS stats |
+| `internal/orchestrator/orchestrator.go` | 1, 5, 6 | Pass stats config to FFmpegConfig and ClientManager; added `GetAggregatedStats()`; integrated enhanced exit summary |
+| `internal/orchestrator/client_manager.go` | 1, 2, 3, 4, 5 | Added stats config, parsers, ClientStats, StatsAggregator |
 | `cmd/go-ffmpeg-hls-swarm/main.go` | 1 | Include stats config in printFFmpegCommand |
 | `go.mod`, `go.sum` | 4 | Added `github.com/influxdata/tdigest` dependency |
 
@@ -324,44 +331,37 @@ Items intentionally deferred during implementation that need to be addressed:
 
 | Item | Phase | Reason Deferred | Priority | Tracking |
 |------|-------|-----------------|----------|----------|
-| Supervisor unit tests | 1.7 | Pipeline tests cover core functionality; supervisor tests require mock process builders | Medium | Before Phase 4 |
+| ~~Supervisor unit tests~~ | 1.7 | ✅ **COMPLETED** - 26 tests added | ~~Medium~~ | ~~Before Phase 4~~ |
 | Progress parser performance optimization | 2 | Current ~354ns/line and 2 allocs/op is acceptable; optimize if profiling shows bottleneck | Low | After Phase 8 |
 | HLS parser performance optimization | 3 | Current ~5.8µs/line and 11 allocs/op; regex compilation is one-time cost | Low | After Phase 8 |
 | FFmpeg version compatibility testing | 2, 3 | Need to test with older FFmpeg versions (6.x, 7.x) | Low | Before v1.0 release |
 
 ### Details
 
-#### 1. Supervisor Unit Tests (Phase 1.7)
+#### 1. Supervisor Unit Tests (Phase 1.7) - ✅ COMPLETED
 
-**Planned tests not yet implemented:**
-```go
-// internal/supervisor/supervisor_test.go
+**Tests implemented in `internal/supervisor/supervisor_test.go`:**
 
-func TestSupervisor_StatsEnabledCapturesOutput(t *testing.T) {
-    // Test that stdout/stderr pipes are created when statsEnabled=true
-}
+| Test Category | Tests | Description |
+|---------------|-------|-------------|
+| **Table-Driven: Configuration** | 9 | Default values, custom parsers, edge cases |
+| **Table-Driven: State** | 7 | String(), IsActive(), IsTerminal() |
+| **Table-Driven: Exit Codes** | 2 | extractExitCode() |
+| **Table-Driven: ShouldReset** | 8 | Backoff reset conditions |
+| **Lifecycle** | 5 | Initial state, run, cancel, max restarts, build error |
+| **Stats Collection** | 5 | Pipes enabled/disabled, pipeline stats, degradation |
+| **Callbacks** | 1 | All callback types |
+| **Edge Cases** | 5 | SetParsers, drain timeout, concurrent access, uptime |
+| **Benchmarks** | 2 | State access, New() |
 
-func TestSupervisor_StatsDisabledNoCapture(t *testing.T) {
-    // Test that no pipes created when statsEnabled=false
-}
+**Coverage:** 76.8%
 
-func TestSupervisor_DrainTimeoutPreventsHang(t *testing.T) {
-    // Test that supervisor doesn't hang if parser never finishes
-}
-```
-
-**Why deferred:**
-- Pipeline tests (`internal/parser/pipeline_test.go`) already cover the core lossy-by-design functionality
-- Supervisor tests require a mock `ProcessBuilder` that spawns a process writing to stdout/stderr
-- The current integration (running actual FFmpeg) provides real-world validation
-
-**When to address:**
-- Before Phase 4 (Client Stats) when we integrate real parsers
-- Or when adding mock infrastructure for broader testing
-
-**Risk if not addressed:**
-- Low: The supervisor integration is tested end-to-end via `go build` and manual runs
-- The pipeline itself has 8 unit tests with 100% core coverage
+**Key test patterns:**
+- Mock `ProcessBuilder` using real shell commands (echo, sleep, bash)
+- Mock `LineParser` with configurable delay for drain timeout testing
+- Table-driven tests for all configuration permutations
+- Negative tests for invalid inputs (negative buffer size, threshold)
+- Concurrent access tests for thread safety
 
 #### 2. Progress Parser Performance Optimization (Phase 2)
 
@@ -608,7 +608,108 @@ BenchmarkClientStats_GetSummary-24           4144886   289.7 ns/op  48 B/op   1 
 
 **Note:** Wiring ClientStats into ClientManager deferred to Phase 5 (Stats Aggregation) to avoid duplicate work.
 
-**Next: Phase 5 - Stats Aggregation**
+---
+
+## Phase 5: Stats Aggregation
+
+**Goal**: Aggregate statistics across all clients with T-Digest merging
+
+### Step 5.1: Create StatsAggregator ✅
+
+**File**: `internal/stats/aggregator.go`
+
+Implemented `StatsAggregator` with:
+- Client registration/removal (`AddClient`, `RemoveClient`)
+- Comprehensive aggregation (`Aggregate()`)
+- T-Digest percentile merging (approximate via key percentiles)
+- Rate calculations (overall and instantaneous)
+- Pipeline health aggregation
+- Drift and stall tracking
+- Thread-safe with proper locking
+
+Key features:
+- `AggregatedStats` struct with all metrics from design doc
+- `rateSnapshot` for instantaneous rate calculations
+- `ForEachClient()` for iteration
+- `GetAllClientSummaries()` for per-client data
+- `Reset()` for test cleanup
+
+### Step 5.2: Create Aggregator Tests ✅
+
+**File**: `internal/stats/aggregator_test.go`
+
+18 tests covering:
+- Basic add/remove client
+- Empty aggregation
+- Request count aggregation
+- Bytes aggregation
+- Error aggregation
+- Speed aggregation
+- Drift aggregation
+- Pipeline health aggregation
+- Uptime aggregation
+- Rate calculations
+- Instantaneous rates
+- Latency aggregation
+- Reset functionality
+- ForEachClient iteration
+- GetAllClientSummaries
+- Thread safety
+- Error rate calculation
+
+2 benchmarks:
+- `BenchmarkStatsAggregator_Aggregate` - 46µs for 100 clients
+- `BenchmarkStatsAggregator_AddClient` - 6.6µs per client
+
+### Step 5.3: Wire into ClientManager ✅
+
+**File**: `internal/orchestrator/client_manager.go`
+
+Changes:
+- Added `clientStats` map and `aggregator` fields
+- Create `ClientStats` in `StartClient()` and register with aggregator
+- Updated `createProgressCallback()` to update `ClientStats`:
+  - `UpdateCurrentBytes()` for bytes tracking
+  - `UpdateSpeed()` for speed tracking
+  - `UpdateDrift()` for drift tracking
+  - `CompleteOldestSegment()` for latency tracking
+- Updated `createHLSEventCallback()` to update `ClientStats`:
+  - Increment request counters by type
+  - Track segment request starts for latency
+  - Record HTTP errors, reconnections, timeouts
+- Added `GetAggregatedStats()`, `GetStatsAggregator()`, `GetClientStats()` methods
+
+### Step 5.4: Wire into Orchestrator ✅
+
+**File**: `internal/orchestrator/orchestrator.go`
+
+Changes:
+- Added `GetAggregatedStats()` method
+- Added `GetStatsAggregator()` method
+
+### Verification ✅
+
+```
+$ go test -race ./internal/stats/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats  1.410s
+
+$ go test -cover ./internal/stats/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats  0.335s  coverage: 97.3%
+
+$ go build ./...
+# Success - no errors
+
+$ go test -race ./...
+# All tests pass
+```
+
+**Benchmarks:**
+```
+BenchmarkStatsAggregator_Aggregate-24   25605   46561 ns/op   23011 B/op   107 allocs/op
+BenchmarkStatsAggregator_AddClient-24  714739    6659 ns/op   18276 B/op     6 allocs/op
+```
+
+**Next: Phase 6 - Exit Summary**
 
 ---
 
@@ -624,7 +725,7 @@ BenchmarkClientStats_GetSummary-24           4144886   289.7 ns/op  48 B/op   1 
 | 1.4 Pipeline struct | ✅ | Enhanced with `DropRate()`, `IsDegraded()` |
 | 1.5 Pipeline tests | ✅ | Enhanced: 8 tests vs 2 planned |
 | 1.6 Supervisor integration | ✅ | Exact match |
-| 1.7 Supervisor tests | ⏳ Deferred | Tracked in deferred items |
+| 1.7 Supervisor tests | ✅ | **Enhanced:** 26 tests + 2 benchmarks (table-driven) |
 | 1.8 Drain timeout | ✅ | Enhanced with `timeout` and `reason` in logs |
 
 **Architecture deviation:** None - followed plan exactly.
@@ -680,17 +781,422 @@ BenchmarkClientStats_GetSummary-24           4144886   289.7 ns/op  48 B/op   1 
 | 4.2 Bytes tracking | ✅ | Exact match (handles restarts) |
 | 4.3 Drift tracking | ✅ | Exact match |
 | 4.4 Tests | ✅ | Enhanced: 17 tests + 3 benchmarks |
-| 4.5 Wire up | ⏳ Deferred | To Phase 5 (avoid duplicate work) |
+| 4.5 Wire up | ✅ | Completed in Phase 5 |
 
 **Architecture note:** ClientStats is a standalone package that can be used by ClientManager in Phase 5. This separation allows for cleaner testing and potential reuse.
+
+### Phase 5: Stats Aggregation
+
+| Plan Step | Status | Alignment |
+|-----------|--------|-----------|
+| 5.1 Create StatsAggregator | ✅ | Enhanced with instantaneous rates, ForEachClient |
+| 5.2 Wire into Orchestrator | ✅ | Exact match |
+| 5.3 Tests | ✅ | Enhanced: 18 tests + 2 benchmarks |
+
+**Architecture note:** T-Digest merging uses approximate method (sampling key percentiles) since the library doesn't support direct merging. This is acceptable for trend analysis.
+
+### Phase 6: Exit Summary
+
+| Plan Step | Status | Alignment |
+|-----------|--------|-----------|
+| 6.1 Create Summary Formatter | ✅ | Enhanced with SummaryConfig for separation of concerns |
+| 6.2 Update main.go | ✅ | Integrated via orchestrator.printExitSummary() |
+
+**Enhancements beyond plan:**
+- `SummaryConfig` struct separates orchestrator data from aggregated stats
+- Graceful nil stats handling (shows "stats disabled" message)
+- Exported formatting functions for TUI reuse
+- 24 tests + 3 benchmarks (plan didn't specify tests)
+- 98.3% code coverage
 
 ### Summary: Plan Adherence
 
 | Phase | Plan Steps | Completed | Deferred | Alignment |
 |-------|------------|-----------|----------|-----------|
-| 1 | 8 | 7 | 1 | **Excellent** |
+| 1 | 8 | 8 | 0 | **Excellent** (supervisor tests now complete) |
 | 2 | 5 | 5 | 0 | **Excellent** (with beneficial deviation) |
 | 3 | 4 | 3 | 1 | **Excellent** (with architectural improvement) |
-| 4 | 6 | 5 | 1 | **Excellent** (wiring deferred to Phase 5) |
+| 4 | 6 | 6 | 0 | **Excellent** |
+| 5 | 3 | 3 | 0 | **Excellent** |
+| 6 | 2 | 2 | 0 | **Excellent** |
 
 **Overall:** Implementation follows the plan's goals while making architectural improvements that simplify the codebase and improve maintainability. All deviations are documented and intentional.
+
+---
+
+## Phase 6: Enhanced Exit Summary
+
+**Goal**: Display comprehensive statistics at program exit
+
+### Step 6.1: Create Summary Formatter ✅
+
+**File**: `internal/stats/summary.go` (NEW)
+
+Implemented `FormatExitSummary()` with:
+- `SummaryConfig` struct for configuration (target clients, duration, metrics addr, etc.)
+- Metrics degradation warning section (when lossy-by-design drops occur)
+- Request statistics table (manifest, segment, init, per-client rates)
+- Inferred latency percentiles (P50, P95, P99, Max) with disclaimer
+- Playback health section (speed, stalls, drift)
+- Uptime distribution (P50, P95, P99)
+- Lifecycle section (starts, restarts)
+- Error section (HTTP codes, timeouts, reconnections, error rate)
+- Exit codes section with human-readable labels
+- Footnotes section for diagnostic info
+
+### Step 6.2: Create Formatting Helper Functions ✅
+
+**File**: `internal/stats/summary.go`
+
+Exported helper functions for reuse:
+- `FormatDuration()` - HH:MM:SS format
+- `FormatNumber()` - K/M suffixes
+- `FormatBytes()` - KB/MB/GB suffixes
+- `FormatMs()` - milliseconds or microseconds
+- `FormatRate()` - rate with /s suffix
+
+### Step 6.3: Add Footnotes Section ✅
+
+**File**: `internal/stats/summary.go`
+
+`renderFootnotes()` function adds:
+- [1] Latency disclaimer (always shown if latency data exists)
+- [2] Unknown URL requests (only if any observed)
+- [3] Peak drop rate (only if any drops occurred)
+
+### Step 6.4: Wire into Orchestrator ✅
+
+**File**: `internal/orchestrator/orchestrator.go`
+
+Modified `printExitSummary()` to:
+- Build `SummaryConfig` from `metrics.Collector.GenerateSummary()`
+- Get `AggregatedStats` if stats collection is enabled
+- Call `stats.FormatExitSummary()` for enhanced output
+- Removed old helper functions (now in `stats` package)
+
+### Step 6.5: Create Summary Tests ✅
+
+**File**: `internal/stats/summary_test.go` (NEW)
+
+24 tests covering:
+- Table-driven tests for all formatting functions
+- `FormatExitSummary` with nil stats (basic summary)
+- `FormatExitSummary` with various stat combinations
+- `renderFootnotes` edge cases
+- 3 benchmarks for performance
+
+### Verification ✅
+
+```bash
+# All tests pass
+$ go test -race ./internal/stats/...
+ok      github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats   1.415s
+
+# High coverage
+$ go test -cover ./internal/stats/...
+ok      github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats   0.336s  coverage: 98.3% of statements
+
+# Build succeeds
+$ go build ./...
+```
+
+### Phase 6 Summary
+
+| Steps | Completed | Deferred |
+|-------|-----------|----------|
+| 6.1-6.5 | 5 | 0 |
+
+**Key design decisions**:
+- `SummaryConfig` separates orchestrator-specific data (exit codes, uptime) from aggregated stats
+- Graceful handling of nil stats (shows basic summary with "stats disabled" message)
+- Footnotes section keeps diagnostic info separate from main metrics
+- All formatting functions exported for reuse in TUI (Phase 7)
+- HTTP error codes sorted for consistent output
+
+---
+
+## Phase 7: TUI Dashboard
+
+**Goal**: Live terminal dashboard with Bubble Tea
+
+### Step 7.1: Add Dependencies ✅
+
+```bash
+go get github.com/charmbracelet/bubbletea@latest
+go get github.com/charmbracelet/lipgloss@latest
+go get github.com/charmbracelet/bubbles@latest
+```
+
+### Step 7.2: Create TUI Package ✅
+
+**Files created**:
+- `internal/tui/styles.go` - Lipgloss styles, color palette, status indicators
+- `internal/tui/model.go` - Bubble Tea model, messages, commands
+- `internal/tui/view.go` - View rendering (summary, detailed, sections)
+- `internal/tui/model_test.go` - Model tests (28 tests)
+- `internal/tui/styles_test.go` - Styles tests (14 tests)
+- `internal/tui/edge_cases_test.go` - Comprehensive edge case tests (230 subtests)
+
+### Step 7.3: Implement Pipeline Status Indicator ✅
+
+**File**: `internal/tui/styles.go`
+
+Implemented `GetMetricsLabel()` with color-coded status:
+- Green: "● Metrics" (no drops)
+- Yellow: "● Metrics (degraded)" (any drops)
+- Red: "● Metrics (severely degraded)" (>10% drops)
+
+### Step 7.4: Add CLI Flag ✅
+
+**File**: `internal/config/flags.go`
+
+Added `-tui` flag (default: false)
+
+### Step 7.5: Create Comprehensive Edge Case Tests ✅
+
+**File**: `internal/tui/edge_cases_test.go`
+
+Table-driven tests for common TUI bugs:
+- Window sizing (zero, negative, very small, very large)
+- Stats values (nil, zeros, NaN, Infinity, negative)
+- Per-client summaries (empty, nil, many clients)
+- Formatting functions (boundaries, precision, overflow)
+- Progress bar (0%, 100%, over 100%, NaN)
+- Key handling (empty runes, unicode, emoji, unknown keys)
+- Message handling (nil, unknown types)
+- Long strings (URLs, unicode)
+- Concurrent access
+
+### Verification ✅
+
+```bash
+# All tests pass
+$ go test -v ./internal/tui/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/tui  0.066s
+
+# Race detector clean
+$ go test -race ./internal/tui/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/tui  1.340s
+
+# High coverage
+$ go test -cover ./internal/tui/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/tui  0.066s  coverage: 89.6% of statements
+
+# Test count
+$ go test -v ./internal/tui/... 2>&1 | grep -c "--- PASS:"
+48 test functions, 230+ subtests
+```
+
+### Phase 7 Summary
+
+| Steps | Completed | Deferred |
+|-------|-----------|----------|
+| 7.1-7.5 | 5 | 0 |
+
+**Key design decisions**:
+- Modern dark color palette with semantic colors
+- Metrics degradation indicator in header (green/yellow/red)
+- Summary view (default) + detailed per-client view (toggle with 'd')
+- 500ms refresh rate for smooth updates
+- Comprehensive edge case testing to prevent common TUI bugs
+
+---
+
+## Phase 8: Prometheus Metrics
+
+**Goal**: Export comprehensive metrics to Prometheus for Grafana dashboards
+
+### Step 8.1: Define All Prometheus Metrics ✅
+
+**File**: `internal/metrics/collector.go`
+
+Implemented 7 metric panels:
+
+| Panel | Metrics | Description |
+|-------|---------|-------------|
+| **Test Overview** | 7 | Info, target clients, duration, active, ramp, elapsed, remaining |
+| **Request Rates** | 8 | Manifest/segment/init/unknown totals, bytes, rates |
+| **Latency** | 5 | Histogram + P50/P95/P99/Max gauges |
+| **Health** | 7 | Above/below realtime, stalled, speed, drift |
+| **Errors** | 7 | HTTP errors (by code), timeouts, reconnections, exits |
+| **Pipeline Health** | 5 | Lines dropped/parsed (by stream), degraded clients, drop rate |
+| **Uptime** | 4 | Histogram + P50/P95/P99 gauges |
+
+### Step 8.2: Implement Two-Tier Cardinality Mode ✅
+
+**Tier 1 (always enabled)**: 43 metrics, safe for 1000+ clients
+**Tier 2 (--prom-client-metrics)**: 3 per-client metrics (speed, drift, bytes)
+
+```go
+// Tier 2 only registered when enabled
+if cfg.PerClientMetrics {
+    initPerClientMetrics(registry)
+}
+```
+
+### Step 8.3: Add Config Flag ✅
+
+**File**: `internal/config/flags.go`
+
+Added `-prom-client-metrics` flag with warning about high cardinality.
+
+### Step 8.4: Wire into Orchestrator ✅
+
+**File**: `internal/orchestrator/orchestrator.go`
+
+Updated `NewCollector()` call to use `CollectorConfig` struct.
+
+### Step 8.5: Create Collector Tests ✅
+
+**File**: `internal/metrics/collector_test.go`
+
+22 tests covering:
+- NewCollector with various configs
+- RecordStats (deltas, HTTP errors, per-client)
+- Event recording (starts, restarts, exits)
+- SetActiveCount, SetRampProgress, RecordLatency
+- RemoveClient
+- GenerateSummary
+- Helper functions (sortDurations, percentile)
+- Thread safety
+- 3 benchmarks
+
+### Verification ✅
+
+```bash
+# All tests pass
+$ go test -race ./internal/metrics/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/metrics  1.062s
+
+# High coverage
+$ go test -cover ./internal/metrics/...
+ok  github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/metrics  0.021s  coverage: 89.0% of statements
+
+# Build succeeds
+$ go build ./...
+```
+
+### Phase 8 Summary
+
+| Steps | Completed | Deferred |
+|-------|-----------|----------|
+| 8.1-8.5 | 5 | 0 |
+
+**Key design decisions**:
+- Two-tier cardinality for scalability (Tier 1 always safe)
+- Delta-based counter updates (handles restarts correctly)
+- Inferred latency naming to prevent misinterpretation
+- Exit code categorization (success/error/signal)
+- Per-client cleanup on client removal
+- Test registry for isolated testing
+
+---
+
+## Final Integration Wiring
+
+After Phase 8, two additional wiring tasks were required to fully integrate the implementation:
+
+### Prometheus Stats Loop ✅
+
+**File**: `internal/orchestrator/orchestrator.go`
+
+Added `statsUpdateLoop()` that:
+- Runs every second when stats collection is enabled
+- Gets aggregated stats from `ClientManager`
+- Converts to `metrics.AggregatedStatsUpdate`
+- Calls `collector.RecordStats()`
+
+Added `convertToMetricsUpdate()` helper that maps `stats.AggregatedStats` fields to `metrics.AggregatedStatsUpdate`.
+
+### TUI Integration ✅
+
+**File**: `internal/orchestrator/orchestrator.go`
+
+Added `runWithTUI()` that:
+- Creates TUI model with Orchestrator as `StatsSource`
+- Runs Bubble Tea program with `tea.WithAltScreen()`
+- Monitors signals/duration in background goroutine
+- Sends `tui.QuitMsg` on signal/timeout
+
+**File**: `internal/config/flags.go`
+
+Updated help output to show Dashboard category with `-tui` and `-prom-client-metrics` flags.
+
+### Verification ✅
+
+```bash
+# Help shows new flags
+$ go run ./cmd/go-ffmpeg-hls-swarm --help | grep -A2 Dashboard
+Dashboard:
+  -prom-client-metrics
+        Enable per-client Prometheus metrics (WARNING: high cardinality, use with <200 clients)
+  -tui
+        Enable live terminal dashboard
+
+# All tests pass
+$ go test -race ./...
+ok  (all packages pass)
+
+# Build succeeds
+$ go build ./...
+```
+
+---
+
+## Implementation Complete 🎉
+
+All 8 phases of the metrics enhancement have been successfully implemented, including final wiring:
+
+| Phase | Description | Tests | Coverage |
+|-------|-------------|-------|----------|
+| 1 | Output Capture Foundation | 34 | 97.2% |
+| 2 | Progress Parser | 12 | 95.8% |
+| 3 | HLS Event Parser | 17 | 97.2% |
+| 4 | Client Stats | 17 | 97.4% |
+| 5 | Stats Aggregation | 18 | 97.3% |
+| 6 | Exit Summary | 24 | 98.3% |
+| 7 | TUI Dashboard | 48 (230 subtests) | 89.6% |
+| 8 | Prometheus Metrics | 22 | 89.0% |
+
+**Total**: 192+ tests, all passing with race detector clean.
+
+### Files Created
+
+| File | Phase | Description |
+|------|-------|-------------|
+| `internal/parser/pipeline.go` | 1 | Lossy-by-design parsing pipeline |
+| `internal/parser/pipeline_test.go` | 1 | Pipeline tests |
+| `internal/parser/progress.go` | 2 | FFmpeg progress output parser |
+| `internal/parser/progress_test.go` | 2 | Progress parser tests |
+| `internal/parser/hls_events.go` | 3 | FFmpeg stderr HLS event parser |
+| `internal/parser/hls_events_test.go` | 3 | HLS event parser tests |
+| `internal/stats/client_stats.go` | 4 | Per-client statistics with T-Digest |
+| `internal/stats/client_stats_test.go` | 4 | ClientStats tests |
+| `internal/stats/aggregator.go` | 5 | Stats aggregator across all clients |
+| `internal/stats/aggregator_test.go` | 5 | Aggregator tests |
+| `internal/stats/summary.go` | 6 | Exit summary formatter |
+| `internal/stats/summary_test.go` | 6 | Summary formatter tests |
+| `internal/tui/styles.go` | 7 | Lipgloss styles |
+| `internal/tui/model.go` | 7 | Bubble Tea model |
+| `internal/tui/view.go` | 7 | TUI rendering |
+| `internal/tui/model_test.go` | 7 | Model tests |
+| `internal/tui/styles_test.go` | 7 | Styles tests |
+| `internal/tui/edge_cases_test.go` | 7 | Edge case tests |
+| `internal/metrics/collector_test.go` | 8 | Collector tests |
+| `internal/supervisor/backoff_test.go` | 1.7 | Backoff tests |
+| `internal/process/ffmpeg_test.go` | 1.7 | FFmpeg runner tests |
+| `testdata/ffmpeg_progress.txt` | 2 | Test fixture |
+| `testdata/ffmpeg_stderr.txt` | 3 | Test fixture |
+
+### Files Modified
+
+| File | Phases | Changes |
+|------|--------|---------|
+| `internal/config/config.go` | 1, 7, 8 | Stats, TUI, Prometheus config |
+| `internal/config/flags.go` | 1, 7, 8 | CLI flags |
+| `internal/process/ffmpeg.go` | 1 | Stats-aware FFmpeg args |
+| `internal/supervisor/supervisor.go` | 1 | Pipeline integration |
+| `internal/orchestrator/orchestrator.go` | 5, 6, 8 | Stats, summary, collector |
+| `internal/orchestrator/client_manager.go` | 2, 3, 4, 5 | Parsers, stats |
+| `internal/metrics/collector.go` | 8 | Complete rewrite |
+| `go.mod`, `go.sum` | 4, 7 | T-Digest, Bubble Tea |

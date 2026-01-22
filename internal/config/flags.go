@@ -58,6 +58,9 @@ Orchestration Flags:
 		fmt.Fprintf(os.Stderr, "\nStats Collection:\n")
 		printFlagCategory([]string{"stats", "stats-loglevel", "stats-buffer"})
 
+		fmt.Fprintf(os.Stderr, "\nDashboard:\n")
+		printFlagCategory([]string{"tui", "prom-client-metrics"})
+
 		fmt.Fprintf(os.Stderr, `
 Flag Convention:
   Single-dash flags (-clients, -resolve) are normal options.
@@ -120,6 +123,13 @@ Examples:
 	flag.IntVar(&cfg.StatsBufferSize, "stats-buffer", cfg.StatsBufferSize, "Lines to buffer per client (increase if seeing drops)")
 	// Note: stats-drop-threshold is intentionally not documented (hidden advanced flag)
 	flag.Float64Var(&cfg.StatsDropThreshold, "stats-drop-threshold", cfg.StatsDropThreshold, "")
+
+	// TUI (Terminal User Interface)
+	flag.BoolVar(&cfg.TUIEnabled, "tui", cfg.TUIEnabled, "Enable live terminal dashboard")
+
+	// Prometheus
+	flag.BoolVar(&cfg.PromClientMetrics, "prom-client-metrics", cfg.PromClientMetrics,
+		"Enable per-client Prometheus metrics (WARNING: high cardinality, use with <200 clients)")
 
 	// Parse
 	flag.Parse()

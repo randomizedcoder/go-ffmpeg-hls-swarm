@@ -56,6 +56,12 @@ type Config struct {
 	StatsLogLevel      string  `json:"stats_log_level"`      // FFmpeg loglevel: "verbose" or "debug"
 	StatsBufferSize    int     `json:"stats_buffer_size"`    // Lines to buffer per client pipeline
 	StatsDropThreshold float64 `json:"stats_drop_threshold"` // Degradation threshold (0.01 = 1%)
+
+	// TUI (Terminal User Interface)
+	TUIEnabled bool `json:"tui_enabled"` // Enable live terminal dashboard
+
+	// Prometheus
+	PromClientMetrics bool `json:"prom_client_metrics"` // Enable per-client Prometheus metrics (high cardinality)
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -100,5 +106,11 @@ func DefaultConfig() *Config {
 		StatsLogLevel:      "verbose",
 		StatsBufferSize:    1000,
 		StatsDropThreshold: 0.01, // 1% drop rate = degraded
+
+		// TUI
+		TUIEnabled: false, // Disabled by default (use -tui to enable)
+
+		// Prometheus
+		PromClientMetrics: false, // Disabled by default (high cardinality)
 	}
 }
