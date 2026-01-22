@@ -1200,3 +1200,124 @@ All 8 phases of the metrics enhancement have been successfully implemented, incl
 | `internal/orchestrator/client_manager.go` | 2, 3, 4, 5 | Parsers, stats |
 | `internal/metrics/collector.go` | 8 | Complete rewrite |
 | `go.mod`, `go.sum` | 4, 7 | T-Digest, Bubble Tea |
+
+---
+
+## Live Testing Validation
+
+### 100-Client Test Against MicroVM Origin
+
+**Date**: 2026-01-22
+**Configuration**:
+- Origin: MicroVM at `10.177.0.10:17080`
+- Stream: Live HLS with 2-second segments (~51KB each)
+- Clients: 100
+- Duration: 30 seconds
+- Ramp rate: 20 clients/sec
+
+**Results**:
+
+```
+Request Statistics:
+  Manifest (.m3u8)      1.8K         59.6/s           18/client
+  Segments (.ts)        1.3K         41.7/s           12/client
+  Total Bytes:          0 B  (0 B/s)  ← Expected for live HLS
+
+Inferred Segment Latency:
+  P50 (median)          4485 ms       ← Includes segment wait time
+  P95                   5210 ms
+  P99                   5993 ms
+  Samples               1100
+
+Playback Health:
+  >= 1.0x (healthy)     37 (38%)
+  < 1.0x (buffering)    58 (61%)
+  Average Speed:        1.00x
+  Stalled Clients:      0
+  Average Drift:        1907 ms
+  Max Drift:            4218 ms
+```
+
+### Key Discoveries
+
+#### 1. `total_size=N/A` for Live HLS
+
+FFmpeg outputs `total_size=N/A` instead of a numeric value for live streams:
+
+```bash
+$ timeout 5 ffmpeg -progress pipe:1 -i http://10.177.0.10:17080/stream.m3u8 -f null - 2>/dev/null
+frame=163
+fps=162.99
+bitrate=N/A
+total_size=N/A    ← Not available for live streams!
+out_time_us=5433333
+speed=5.43x
+progress=continue
+```
+
+**Impact**: `TotalBytes` and throughput will be 0 in exit summary for live HLS.
+
+**Documentation updated**: See METRICS_ENHANCEMENT_DESIGN.md §5.1
+
+#### 2. Inferred Latency Includes Segment Availability
+
+For live HLS, "latency" includes waiting for segments to be generated:
+
+- Segment duration: 2 seconds
+- Expected latency: 1.5-2.5 × segment duration = 3-5 seconds
+- Observed P50: 4485ms ✅ (matches expectation)
+
+**Why 51KB segments have ~4.5s "latency":**
+- Client requests segment N
+- Segment N may not exist yet (live encoding)
+- Wait for FFmpeg to encode and write segment
+- Then download (~5ms from local nginx)
+
+**Documentation updated**: See METRICS_ENHANCEMENT_DESIGN.md §5.2
+
+### Validation Status
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Request counting | ✅ Working | 1.8K manifests, 1.3K segments |
+| Inferred latency | ✅ Working | P50=4485ms matches live HLS expectation |
+| Speed tracking | ✅ Working | Average 1.00x, 61% buffering |
+| Drift tracking | ✅ Working | Avg=1907ms, Max=4218ms |
+| Bytes tracking | ⚠️ N/A | Expected for live HLS |
+| TUI dashboard | ⚠️ Defects | See [TUI_DEFECTS.md](TUI_DEFECTS.md) |
+| Prometheus | ⏳ Untested | Available at :17091/metrics |
+
+---
+
+## TUI Dashboard Testing (300-client test)
+
+**Date**: 2026-01-22
+**Test**: 300 clients, 2 minutes, TAP networking
+
+### Screenshot Analysis
+
+A 300-client test was run with TUI enabled. Multiple rendering and logic issues were observed:
+
+| Defect | Severity | Description |
+|--------|----------|-------------|
+| A | High | Duplicate ramp progress indicators (165/300 stuck + "All clients running") |
+| B | Medium | "All clients running" missing count (should say "300/300") |
+| C | Medium | Request Statistics has duplicate labels, unclear differentiation |
+| D | High | Playback Health numbers don't add up (150 + 141 + 277 ≠ 300) |
+| E | High | Raw JSON logs with escape characters breaking layout |
+| F | Low | Large blank space - could display origin Prometheus metrics |
+
+**Full defect documentation**: See [TUI_DEFECTS.md](TUI_DEFECTS.md)
+
+### Root Causes Identified
+
+1. **State synchronization** - Multiple independent state updates not coordinated
+2. **View rendering** - Same data rendered multiple times with different values
+3. **Log handling** - No sanitization of log output before TUI display
+4. **Missing features** - Origin metrics scraping not implemented
+
+### Next Steps
+
+1. Fix P0 defects (D, E) - stats accuracy and log sanitization
+2. Fix P1 defects (A, B, C) - UI clarity
+3. Implement P2 enhancement (F) - origin metrics panel

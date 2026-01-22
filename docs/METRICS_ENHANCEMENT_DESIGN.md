@@ -585,6 +585,31 @@ Prometheus metrics were available at: http://0.0.0.0:17091/metrics
 ═══════════════════════════════════════════════════════════════════════════════
 ```
 
+### Live HLS Exit Summary Differences
+
+When testing against **live HLS streams** (like the test origin), the exit summary will differ:
+
+| Field | VOD Content | Live HLS |
+|-------|-------------|----------|
+| **Total Bytes** | Actual value | `0 B` (FFmpeg reports `N/A`) |
+| **Throughput** | MB/s calculated | `0 B/s` |
+| **P50 Latency** | ~10-50ms (network) | ~4-5s (includes segment wait) |
+| **P99 Latency** | Network tail latency | ~6s (worst segment timing) |
+
+**Example live HLS output:**
+```
+  Total Bytes:          0 B  (0 B/s)   ← N/A for live streams
+
+  P50 (median)          4485 ms        ← Includes 2 segment waits (~4s)
+  P99                   5993 ms        ← Worst case segment timing
+```
+
+**Interpreting live HLS latency:**
+- Expect latency ≈ `segment_duration × (1.5 to 2.5)`
+- For 2-second segments: P50 of 4-5s is **normal**
+- Focus on **trends over time**, not absolute values
+- Compare runs with identical segment durations
+
 ---
 
 ## Prometheus Integration
@@ -1006,7 +1031,74 @@ func (s *Supervisor) runOnce(ctx context.Context) (...) {
 }
 ```
 
-### 5. Segment Size Estimation
+### 5. Live HLS Stream Limitations
+
+When streaming **live HLS content** (as opposed to VOD), FFmpeg has specific behaviors that affect metrics:
+
+#### 5.1 `total_size=N/A` for Live Streams
+
+For live HLS streams, FFmpeg outputs `total_size=N/A` instead of a numeric value:
+
+```
+frame=163
+fps=81.49
+bitrate=N/A
+total_size=N/A    ← Not available for live streams!
+out_time_us=5433333
+speed=2.72x
+progress=continue
+```
+
+**Why:** Live streams have no defined end, so FFmpeg cannot track cumulative bytes like it does for file-based input. The HLS demuxer fetches segments over HTTP, but doesn't report download bytes through the progress mechanism.
+
+**Impact:**
+- `TotalBytes` will be 0 in exit summary for live streams
+- Throughput (`B/s`) cannot be calculated from progress output
+- Segment sizes cannot be estimated from `total_size` deltas
+
+**Workaround options (not implemented):**
+1. Parse HTTP `Content-Length` headers from stderr (requires `-loglevel debug`)
+2. Use Nginx access logs to track bytes served
+3. Monitor network interfaces on the host
+
+**Test origin note:** The test origin generates 2-second segments at ~51KB each (200kbps test stream). For a 100-client test, expected throughput is ~2.5 MB/s.
+
+#### 5.2 Inferred Latency Includes Segment Availability
+
+For **live streams**, the "inferred segment latency" includes waiting for the segment to be generated:
+
+```
+Timeline for live HLS:
+  |-------- Segment being encoded --------|--- Download ---|
+  ^                                        ^                ^
+  FFmpeg requests segment            Segment available    Complete
+  ("Opening URL")                    on origin server     ("200 OK")
+
+  |<-------------- Inferred Latency ---------------------->|
+                    (includes WAIT TIME!)
+```
+
+**Example with 2-second segments:**
+- Client starts, sees manifest with segments 100, 101, 102
+- Client requests segment 103 (next one)
+- Segment 103 won't exist until FFmpeg on origin encodes it (~2s)
+- "Inferred latency" = wait time (~2-4s) + actual download (~5ms)
+
+**This explains high latency values for small files:**
+| Metric | Observed | Explanation |
+|--------|----------|-------------|
+| Segment size | 51 KB | Small test stream |
+| Expected download | ~5 ms | Fast from local nginx |
+| P50 latency | ~4500 ms | Includes ~2 segment waits (4s) |
+| P99 latency | ~6000 ms | Worst case segment timing |
+
+**Interpretation guidance:**
+- For **live HLS**: Latency ≈ (segment_duration × 1.5 to 2.5) is normal
+- For **VOD**: Latency should be actual network download time
+- Use latency for **trend analysis** (is it getting worse?) not absolute values
+- Compare latency across test runs with identical segment durations
+
+### 6. Segment Size Estimation
 
 FFmpeg doesn't report individual segment sizes, but we can estimate from `total_size` deltas:
 
@@ -3181,15 +3273,17 @@ For the complete list of all 42 metrics organized by Grafana dashboard panel, se
 
 | Metric | Accuracy | Source | Notes |
 |--------|----------|--------|-------|
-| **Throughput** | ✅ High | `total_size` from stdout | Direct from FFmpeg |
+| **Throughput** | ⚠️ VOD only | `total_size` from stdout | **N/A for live HLS** (see §5.1) |
 | **Request Counts** | ✅ High | stderr `Opening` events | Reliable pattern |
 | **HTTP Errors** | ✅ High | stderr `Server returned` | Reliable pattern |
 | **Stall Detection** | ✅ High | `speed < 1.0` for X seconds | Direct from FFmpeg |
-| **Inferred Latency** | ⚠️ Estimated | Time between stderr events | Use for trends, not absolutes |
-| **Segment Size** | ⚠️ Estimated | Delta of `total_size` | Approximation |
+| **Inferred Latency** | ⚠️ Estimated | Time between stderr events | **Includes segment wait for live** (see §5.2) |
+| **Segment Size** | ⚠️ VOD only | Delta of `total_size` | **N/A for live HLS** (see §5.1) |
 | **Wall-Clock Drift** | ✅ High | `out_time_us` vs wall clock | Calculated |
 | **Playback Position** | ✅ High | `out_time_us` from stdout | Direct from FFmpeg |
 | **Unknown URLs** | ✅ High | Fallback bucket | Helps diagnose CDN behavior |
+
+> **Live HLS Note:** For live streams, FFmpeg reports `total_size=N/A` and inferred latency includes waiting for segments to be generated. See [Section 5: Live HLS Stream Limitations](#5-live-hls-stream-limitations) for details.
 
 ---
 
@@ -3203,6 +3297,8 @@ All latency metrics are derived from FFmpeg events, not directly measured. To pr
 - **Prometheus metrics**: `hls_swarm_inferred_latency_seconds`
 - **Exit summary label**: "Inferred Segment Latency *"
 - **Footnote**: "Inferred from FFmpeg events; use for trends, not absolute values."
+
+**Live HLS Consideration:** For live streams, inferred latency includes time waiting for segments to be generated (typically 1-3× segment duration). A P50 of 4-5 seconds with 2-second segments is expected behavior, not slow downloads. See [Section 5.2: Inferred Latency Includes Segment Availability](#52-inferred-latency-includes-segment-availability).
 
 ### 2. Unknown URL Classification
 

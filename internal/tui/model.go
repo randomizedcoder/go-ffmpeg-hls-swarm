@@ -85,10 +85,9 @@ func New(cfg Config) Model {
 
 // Init initializes the model.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		tickCmd(),
-		tea.EnterAltScreen,
-	)
+	// Note: tea.WithAltScreen() is passed when creating the program,
+	// so we don't need tea.EnterAltScreen here.
+	return tickCmd()
 }
 
 // Update handles messages.

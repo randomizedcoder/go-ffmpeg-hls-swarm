@@ -22,6 +22,8 @@ This document provides a technical deep dive into FFmpeg's HLS implementation, b
 - [9. Implementation Details](#9-implementation-details)
 - [10. Progress Protocol for Metrics](#10-progress-protocol-for-metrics)
 - [11. Command Construction for go-ffmpeg-hls-swarm](#11-command-construction-for-go-ffmpeg-hls-swarm)
+- [12. Debug Output for Detailed Metrics](#12-debug-output-for-detailed-metrics)
+- [13. Clean Output Separation Strategies](#13-clean-output-separation-strategies)
 
 ---
 
@@ -694,3 +696,407 @@ export AV_LOG_FORCE_COLOR=1
 [hls] No longer receiving playlist ...    # Variant disabled
 [https] Reconnecting ...                  # Connection retry
 ```
+
+---
+
+## 12. Debug Output for Detailed Metrics
+
+For deep load testing analysis, FFmpeg's debug output provides granular timing information that can be parsed for per-segment metrics.
+
+### Enhanced Debug Command
+
+```bash
+ffmpeg -hide_banner -nostdin \
+  -loglevel debug \
+  -reconnect 1 \
+  -reconnect_streamed 1 \
+  -reconnect_on_network_error 1 \
+  -rw_timeout 15000000 \
+  -progress pipe:2 \
+  -stats -stats_period 1 \
+  -i "http://origin/stream.m3u8" \
+  -map 0 -c copy -f null -
+```
+
+### Debug Output Patterns
+
+Sample output captured and stored in `testdata/ffmpeg_debug_output.txt`.
+
+#### Segment Request Events
+
+```
+[hls @ 0x55c32c0c5700] HLS request for url 'http://10.177.0.10:17080/seg03440.ts', offset 0, playlist 0
+[hls @ 0x55c32c0c5700] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading
+```
+
+**Regex**:
+```go
+hlsRequestRe := regexp.MustCompile(`\[hls @ 0x[0-9a-f]+\] HLS request for url '([^']+)', offset (\d+), playlist (\d+)`)
+openingRe := regexp.MustCompile(`\[hls @ 0x[0-9a-f]+\] Opening '([^']+)' for reading`)
+```
+
+#### TCP Connection Events
+
+```
+[tcp @ 0x55c32c0d7800] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x55c32c0d7800] Successfully connected to 10.177.0.10 port 17080
+```
+
+**Regex**:
+```go
+tcpStartRe := regexp.MustCompile(`\[tcp @ 0x[0-9a-f]+\] Starting connection attempt to ([\d.]+) port (\d+)`)
+tcpConnectedRe := regexp.MustCompile(`\[tcp @ 0x[0-9a-f]+\] Successfully connected to ([\d.]+) port (\d+)`)
+```
+
+**Use case**: Calculate TCP connection latency by timing between "Starting" and "Successfully connected".
+
+#### HTTP Request Headers
+
+```
+[http @ 0x55c32c0d4b40] request: GET /seg03440.ts HTTP/1.1
+User-Agent: Lavf/62.3.100
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+```
+
+**Regex**:
+```go
+httpRequestRe := regexp.MustCompile(`\[http @ 0x[0-9a-f]+\] request: (GET|HEAD) ([^ ]+) HTTP/[\d.]+`)
+```
+
+#### Manifest Refresh
+
+```
+[hls @ 0x55c32c0c5700] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+[hls @ 0x55c32c0c5700] Skip ('#EXT-X-VERSION:3')
+```
+
+**Regex**:
+```go
+manifestRefreshRe := regexp.MustCompile(`\[hls @ 0x[0-9a-f]+\] Opening '([^']+\.m3u8)' for reading`)
+```
+
+#### Media Sequence Changes (Segment Expiry)
+
+```
+[hls @ 0x55c32c0c5700] Media sequence change (3433 -> 3438) reflected in first_timestamp: 6881421333 -> 6891421333
+```
+
+**Regex**:
+```go
+sequenceChangeRe := regexp.MustCompile(`\[hls @ 0x[0-9a-f]+\] Media sequence change \((\d+) -> (\d+)\)`)
+```
+
+**Use case**: Detect when segments were skipped (client fell behind live edge). If `(new - old) > 1`, segments were missed.
+
+#### Final Statistics (On Exit)
+
+```
+[in#0/hls @ 0x55c32c08bf40] Input file #0 (http://10.177.0.10:17080/stream.m3u8):
+[in#0/hls @ 0x55c32c08bf40]   Input stream #0:0 (video): 480 packets read (63312 bytes);
+[in#0/hls @ 0x55c32c08bf40]   Input stream #0:1 (audio): 750 packets read (262313 bytes);
+[in#0/hls @ 0x55c32c08bf40]   Total: 1230 packets (325625 bytes) demuxed
+[AVIOContext @ 0x55c32c0d7980] Statistics: 258688 bytes read, 0 seeks
+```
+
+**Regex**:
+```go
+totalStatsRe := regexp.MustCompile(`Total: (\d+) packets \((\d+) bytes\) (demuxed|muxed)`)
+bytesReadRe := regexp.MustCompile(`\[AVIOContext @ 0x[0-9a-f]+\] Statistics: (\d+) bytes read`)
+```
+
+### Progress Output (Interleaved)
+
+With `-progress pipe:2`, progress blocks are written to stderr every `-stats_period` seconds:
+
+```
+frame=47878 fps= 68 q=-1.0 size=N/A time=00:00:15.93 bitrate=N/A speed=2.28x elapsed=0:00:07.00
+fps=68.28
+stream_0_0_q=-1.0
+bitrate=N/A
+total_size=N/A
+out_time_us=15933333
+out_time_ms=15933333
+out_time=00:00:15.933333
+dup_frames=0
+drop_frames=0
+speed=2.28x
+progress=continue
+```
+
+**Key fields for load testing**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `speed` | float | Playback speed (1.0x = realtime) |
+| `out_time_us` | int64 | Output position in microseconds |
+| `total_size` | int64/N/A | Total bytes (N/A for live streams!) |
+| `fps` | float | Frames processed per second |
+| `elapsed` | duration | Wall-clock time since start |
+| `progress` | string | `continue` or `end` |
+
+**Note**: For live HLS streams, `total_size=N/A` is expected. See [METRICS_ENHANCEMENT_DESIGN.md §5.1](METRICS_ENHANCEMENT_DESIGN.md#51-total_sizena-for-live-streams).
+
+### Performance Considerations
+
+| Log Level | CPU Overhead | Lines/sec (300 clients) | Recommended |
+|-----------|--------------|-------------------------|-------------|
+| `-loglevel error` | Minimal | ~10 | Production monitoring |
+| `-loglevel warning` | Low | ~50 | Normal testing |
+| `-loglevel info` | Low | ~100 | Standard load tests |
+| `-loglevel verbose` | Medium | ~500 | Detailed analysis |
+| `-loglevel debug` | High | ~2000+ | Deep debugging (<100 clients) |
+
+**Recommendation**: Use `-loglevel verbose` for standard load testing. Only use `-loglevel debug` for detailed analysis with fewer clients.
+
+---
+
+## 13. Clean Output Separation Strategies
+
+FFmpeg outputs can be complex to parse when mixed together. Here are strategies for clean separation.
+
+### Understanding FFmpeg Output Streams
+
+| Stream | File Descriptor | Contents |
+|--------|-----------------|----------|
+| **stdout** | fd 1 | Media data (when piping output) |
+| **stderr** | fd 2 | Status messages, progress bars, errors, debug logs |
+| **-progress** | configurable | Clean key=value progress blocks |
+
+### Strategy 1: Unix Domain Socket for Progress (Recommended)
+
+Inspired by [ffmpeg-go](https://github.com/u2takey/ffmpeg-go)'s `showProgress.go` example.
+
+```go
+// Create a Unix socket for progress reporting
+sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("ffmpeg_%d.sock", clientID))
+listener, err := net.Listen("unix", sockPath)
+if err != nil {
+    return err
+}
+defer os.Remove(sockPath)
+
+// Start goroutine to read progress
+go func() {
+    conn, _ := listener.Accept()
+    defer conn.Close()
+
+    scanner := bufio.NewScanner(conn)
+    current := make(map[string]string)
+
+    for scanner.Scan() {
+        line := scanner.Text()
+        if strings.HasPrefix(line, "progress=") {
+            // Block complete, process current map
+            processProgressBlock(current)
+            current = make(map[string]string)
+        } else if idx := strings.Index(line, "="); idx > 0 {
+            current[line[:idx]] = line[idx+1:]
+        }
+    }
+}()
+
+// FFmpeg command with Unix socket progress
+cmd := exec.Command("ffmpeg",
+    "-i", streamURL,
+    "-progress", "unix://"+sockPath,  // ← Clean progress channel
+    "-loglevel", "verbose",            // ← Detailed logs to stderr
+    "-map", "0", "-c", "copy", "-f", "null", "-",
+)
+```
+
+**Benefits**:
+- Progress is **completely isolated** from stderr debug output
+- No regex needed to separate progress from logs
+- Easy to parse key=value format
+- Works with any `-loglevel` setting
+
+### Strategy 2: TCP Socket for Progress
+
+For distributed scenarios or when Unix sockets aren't available:
+
+```go
+// Start TCP listener for progress
+listener, _ := net.Listen("tcp", "127.0.0.1:0")
+addr := listener.Addr().String()
+
+// FFmpeg command
+cmd := exec.Command("ffmpeg",
+    "-i", streamURL,
+    "-progress", "tcp://"+addr,
+    // ...
+)
+```
+
+### Strategy 3: Named Pipes (FIFO)
+
+On Linux/macOS, create a named pipe:
+
+```go
+fifoPath := filepath.Join(os.TempDir(), fmt.Sprintf("ffmpeg_%d.fifo", clientID))
+syscall.Mkfifo(fifoPath, 0600)
+
+// FFmpeg writes to FIFO
+cmd := exec.Command("ffmpeg", "-progress", fifoPath, ...)
+
+// Read from FIFO in separate goroutine
+go func() {
+    f, _ := os.Open(fifoPath)
+    // ... read progress
+}()
+```
+
+### Strategy 4: Separate Parsers for stdout/stderr (Current Approach)
+
+When using `pipe:2` for progress, parse stdout and stderr separately:
+
+```go
+cmd := exec.Command("ffmpeg",
+    "-i", streamURL,
+    "-progress", "pipe:2",      // Progress to stderr
+    "-loglevel", "verbose",     // Logs also to stderr (mixed!)
+    "-map", "0", "-c", "copy", "-f", "null", "-",
+)
+
+// Separate stdout and stderr
+stdout, _ := cmd.StdoutPipe()  // Empty (output is -f null)
+stderr, _ := cmd.StderrPipe()  // Progress + logs mixed
+
+// Parse stderr with state machine
+go parseStderr(stderr, progressChan, eventChan)
+```
+
+**Comparison**:
+
+| Strategy | Isolation | Complexity | Resource Usage | Cross-Platform |
+|----------|-----------|------------|----------------|----------------|
+| **Unix Socket** | ✅ Perfect | Low | 1 socket/client | Linux/macOS |
+| **TCP Socket** | ✅ Perfect | Medium | 1 port/client | ✅ All |
+| **Named Pipe** | ✅ Perfect | Medium | 1 file/client | Linux/macOS |
+| **Mixed stderr** | ❌ Mixed | High | None extra | ✅ All |
+
+### Recommended Architecture for go-ffmpeg-hls-swarm
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       FFmpeg Process                            │
+├─────────────────────────────────────────────────────────────────┤
+│  stdin  ←  /dev/null                                           │
+│  stdout →  (discarded, -f null -)                              │
+│  stderr →  Pipeline A: HLS events, errors, debug               │
+│  -progress unix:///tmp/ffmpeg_N.sock → Pipeline B: Progress    │
+└─────────────────────────────────────────────────────────────────┘
+                │                              │
+                ▼                              ▼
+       ┌────────────────┐            ┌────────────────┐
+       │ StderrParser   │            │ ProgressParser │
+       │ - HLS events   │            │ - speed        │
+       │ - HTTP errors  │            │ - out_time     │
+       │ - Reconnects   │            │ - fps          │
+       │ - Debug logs   │            │ - frame count  │
+       └────────────────┘            └────────────────┘
+                │                              │
+                └──────────┬───────────────────┘
+                           ▼
+                   ┌──────────────┐
+                   │ ClientStats  │
+                   └──────────────┘
+```
+
+### Implementation Example
+
+```go
+// internal/supervisor/supervisor.go
+
+func (s *Supervisor) runWithSeparateProgress() error {
+    // Create Unix socket for progress
+    sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("hls_swarm_%d.sock", s.clientID))
+    progressListener, err := net.Listen("unix", sockPath)
+    if err != nil {
+        return fmt.Errorf("failed to create progress socket: %w", err)
+    }
+    defer func() {
+        progressListener.Close()
+        os.Remove(sockPath)
+    }()
+
+    // Build FFmpeg command
+    args := s.runner.BuildArgs()
+    args = append(args, "-progress", "unix://"+sockPath)
+
+    cmd := exec.Command("ffmpeg", args...)
+    stderr, _ := cmd.StderrPipe()
+
+    // Start progress reader goroutine
+    var progressWg sync.WaitGroup
+    progressWg.Add(1)
+    go func() {
+        defer progressWg.Done()
+        conn, err := progressListener.Accept()
+        if err != nil {
+            return
+        }
+        defer conn.Close()
+        s.readProgressFromSocket(conn)
+    }()
+
+    // Start stderr parser (events only, no progress mixed in!)
+    go s.parseStderrEvents(stderr)
+
+    // Run FFmpeg
+    if err := cmd.Start(); err != nil {
+        return err
+    }
+
+    // Wait for command and progress reader
+    cmdErr := cmd.Wait()
+    progressListener.Close() // Unblock Accept()
+    progressWg.Wait()
+
+    return cmdErr
+}
+
+func (s *Supervisor) readProgressFromSocket(conn net.Conn) {
+    scanner := bufio.NewScanner(conn)
+    current := &parser.ProgressUpdate{}
+
+    for scanner.Scan() {
+        line := scanner.Text()
+        if line == "progress=continue" || line == "progress=end" {
+            current.Progress = strings.TrimPrefix(line, "progress=")
+            current.ReceivedAt = time.Now()
+            s.progressCallback(current)
+            current = &parser.ProgressUpdate{}
+        } else {
+            s.progressParser.ParseLine(line)
+        }
+    }
+}
+```
+
+### Go exec.Cmd Separate Pipes
+
+For reference, here's how Go separates stdout and stderr:
+
+```go
+cmd := exec.Command("ffmpeg", args...)
+
+// Create separate pipes
+stdout, _ := cmd.StdoutPipe()  // io.ReadCloser
+stderr, _ := cmd.StderrPipe()  // io.ReadCloser
+
+// Start command (non-blocking)
+cmd.Start()
+
+// Read from pipes in separate goroutines
+go io.Copy(os.Stdout, stdout)  // Or parse stdout
+go parseStderr(stderr)         // Parse stderr
+
+// Wait for completion
+cmd.Wait()
+```
+
+**Important**: Must read from pipes before `cmd.Wait()` or it may deadlock if buffers fill.

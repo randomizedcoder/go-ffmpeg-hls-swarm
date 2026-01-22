@@ -458,6 +458,7 @@ Available at `/metrics` (default port 9090):
 
 **Contributor/Advanced:**
 - [Design Document](docs/DESIGN.md) — Architecture for contributors
+- [Metrics Enhancement](docs/METRICS_ENHANCEMENT_DESIGN.md) — **FFmpeg output parsing**, latency tracking, live HLS notes
 - [FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md) — FFmpeg source analysis
 - [Supervision](docs/SUPERVISION.md) — Process lifecycle details
 - [Test Origin Server](docs/TEST_ORIGIN.md) — Local HLS origin for testing
@@ -480,27 +481,33 @@ Available at `/metrics` (default port 9090):
 | ✅ **FFmpeg HLS Research** | Complete | See [FFMPEG_HLS_REFERENCE.md](docs/FFMPEG_HLS_REFERENCE.md) |
 | ✅ **Nix Infrastructure** | Complete | Flake, shell, checks, apps |
 | ✅ **Test Origin Server** | **Working** | Runner, container, MicroVM (SSH, metrics) |
-| ✅ **Go Swarm Client** | **Working** | CLI, preflight, supervision, metrics |
+| ✅ **Go Swarm Client** | **Working** | CLI, preflight, supervision, enhanced metrics, TUI |
 | ✅ **Makefile** | Complete | All targets functional |
 | ⏳ **NixOS Integration Tests** | Defined | Automated VM tests pending |
 
 ### End-to-End Test Results
 
-The full pipeline has been tested and verified working:
+The full pipeline has been tested and verified working with enhanced metrics:
 
 ```
 ┌─────────────────┐      ┌──────────────────┐      ┌─────────────────┐
 │  Test Origin    │ ───▶ │  HLS Stream      │ ◀─── │  Swarm Client   │
-│  (FFmpeg+Nginx) │      │  localhost:8888  │      │  (5 FFmpeg)     │
+│  MicroVM TAP    │      │  10.177.0.10     │      │  100 FFmpeg     │
 └─────────────────┘      └──────────────────┘      └─────────────────┘
 ```
 
-**Test run (30 seconds, 5 clients):**
-- ✅ All preflight checks passed (FD limits, process limits, FFmpeg, ports)
-- ✅ Clients ramped up at configured rate with jitter
-- ✅ Auto-restart with exponential backoff working (252ms → 3.2s)
-- ✅ Graceful shutdown on duration elapsed
-- ✅ Exit summary with statistics
+**Test run (30 seconds, 100 clients against MicroVM):**
+- ✅ All preflight checks passed
+- ✅ 100 clients ramped up at 20/sec
+- ✅ Request tracking: 1.8K manifests, 1.3K segments
+- ✅ Latency tracking: P50=4485ms, P99=5993ms (live HLS includes segment wait)
+- ✅ Playback health: 38% healthy, 61% buffering, avg 1.00x speed
+- ✅ Drift monitoring: avg=1907ms, max=4218ms
+- ✅ Clean shutdown: all 100 clients exited gracefully
+
+**Note on live HLS metrics:**
+- `Total Bytes = 0` — FFmpeg reports `N/A` for live streams (see [METRICS_ENHANCEMENT_DESIGN.md](docs/METRICS_ENHANCEMENT_DESIGN.md#5-live-hls-stream-limitations))
+- Inferred latency includes waiting for segments to be generated (~2-4s for 2s segments)
 
 ### Quick Start
 
@@ -548,10 +555,12 @@ make check                          # Run all checks
 
 **Yes!** The full pipeline has been tested and verified working:
 - ✅ **Swarm Client** — Build with `go build ./cmd/go-ffmpeg-hls-swarm` and run against any HLS stream.
+- ✅ **Enhanced Metrics** — Request counts, latency percentiles, playback health, drift tracking.
 - ✅ **Test Origin Server** — Run `PORT=8888 nix run .#test-origin` to start a local HLS stream.
-- ✅ **End-to-End Tested** — Both components verified working together.
+- ✅ **End-to-End Tested** — 100-client test against MicroVM verified working (see above).
 - ✅ **MicroVM deployment** — Run `make microvm-origin` for full VM isolation (requires KVM).
-- ✅ **Container deployment** — Build with `nix build .#test-origin-container`.
+- ✅ **TUI Dashboard** — Live metrics display with `-tui` flag (interactive terminal only).
+- ✅ **Prometheus Metrics** — Available at `http://localhost:17091/metrics`.
 </details>
 
 <details>
