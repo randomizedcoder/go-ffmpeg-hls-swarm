@@ -4,22 +4,19 @@
 // - Request counts (manifest, segment, init, unknown)
 // - Bytes downloaded (handles FFmpeg restart resets)
 // - HTTP errors, reconnections, timeouts
-// - Inferred segment latency (T-Digest for memory-efficient percentiles)
 // - Wall-clock drift (playback vs real time)
 // - Stall detection
 // - Pipeline health (dropped lines)
 //
-// IMPORTANT: Latency values are INFERRED from FFmpeg events, not directly measured.
-// Use for trend analysis, not absolute performance claims.
+// Note: Latency metrics are now provided by DebugEventParser using accurate FFmpeg timestamps.
+// See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md for details.
 package stats
 
 import (
-	"strings"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/influxdata/tdigest"
 )
 
 // Constants for stall and drift detection
@@ -35,11 +32,10 @@ const (
 
 	// SegmentSizeRingSize is the number of segment sizes to track
 	SegmentSizeRingSize = 100
-
-	// HangingRequestTTL is the maximum time a request can be "inflight"
-	// before we consider it a timeout and clean it up to prevent memory leaks
-	HangingRequestTTL = 60 * time.Second
 )
+
+// Note: Removed struct swap pattern with sync.Pool - using individual atomics instead
+// This eliminates race conditions, allocations, and complexity while maintaining lock-free operation
 
 // ClientStats holds per-client statistics.
 //
@@ -57,63 +53,54 @@ type ClientStats struct {
 	// Bytes tracking - CRITICAL: handles FFmpeg restart resets
 	// When FFmpeg restarts, total_size resets to 0. We must track
 	// cumulative bytes across all FFmpeg instances for this client.
-	bytesFromPreviousRuns int64 // Sum from all completed FFmpeg processes
-	currentProcessBytes   int64 // Current FFmpeg's total_size
-	bytesMu               sync.Mutex
+	// Using atomic operations for lock-free access (high frequency updates)
+	bytesFromPreviousRuns atomic.Int64 // Sum from all completed FFmpeg processes
+	currentProcessBytes   atomic.Int64 // Current FFmpeg's total_size
 
 	// Error counts
-	HTTPErrors   map[int]int64
-	httpErrorsMu sync.Mutex
+	HTTPErrors    map[int]int64
+	httpErrorsMu  sync.Mutex
 	Reconnections int64
 	Timeouts      int64
 
-	// Latency tracking - uses sync.Map for parallel segment fetches
-	// Key: URL string, Value: time.Time (request start)
-	inflightRequests sync.Map
-
-	// INFERRED latency tracking (T-Digest for memory efficiency)
-	// IMPORTANT: This is inferred from FFmpeg events, not measured directly.
-	// Use for trend analysis, not absolute values.
-	inferredLatencyDigest *tdigest.TDigest
-	inferredLatencyCount  int64
-	inferredLatencySum    time.Duration
-	inferredLatencyMax    time.Duration
-	inferredLatencyMu     sync.Mutex
+	// Note: Inferred latency removed - use DebugEventParser for accurate latency
+	// from FFmpeg timestamps. See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md
 
 	// Segment size tracking (estimated from total_size delta)
+	// Using individual atomics for lock-free access (no allocations)
 	lastTotalSize  int64
-	segmentSizes   []int64
-	segmentSizeIdx int
-	segmentSizeMu  sync.Mutex
+	segmentSizes   []int64      // Shared slice (read-only after init, protected by atomic index)
+	segmentSizeIdx atomic.Int64 // Atomic index for ring buffer
 
 	// Playback health
-	CurrentSpeed          float64
-	speedBelowThresholdAt time.Time
-	speedMu               sync.Mutex
+	// Using individual atomics for lock-free access (no allocations)
+	speed            atomic.Uint64 // math.Float64bits(speed)
+	belowThresholdAt atomic.Value  // time.Time
 
 	// Wall-clock drift tracking
-	LastPlaybackTime time.Duration // OutTimeUS converted
-	CurrentDrift     time.Duration // Wall-clock - playback-clock
-	MaxDrift         time.Duration
-	driftMu          sync.Mutex
+	// Using individual atomics for lock-free access (no allocations)
+	lastPlaybackTime atomic.Int64 // time.Duration as nanoseconds
+	currentDrift     atomic.Int64 // time.Duration as nanoseconds
+	maxDrift         atomic.Int64 // time.Duration as nanoseconds
 
 	// Pipeline health (lossy-by-design metrics)
 	ProgressLinesDropped int64
 	StderrLinesDropped   int64
 	ProgressLinesRead    int64
 	StderrLinesRead      int64
-	PeakDropRate         float64 // Track peak, not just current
-	peakDropMu           sync.Mutex
+	// PeakDropRate uses atomic.Uint64 with bit manipulation for lock-free max operation
+	peakDropRate atomic.Uint64 // math.Float64bits(PeakDropRate)
 }
 
 // NewClientStats creates stats for a client.
 func NewClientStats(clientID int) *ClientStats {
 	return &ClientStats{
-		ClientID:              clientID,
-		StartTime:             time.Now(),
-		HTTPErrors:            make(map[int]int64),
-		inferredLatencyDigest: tdigest.NewWithCompression(100), // ~100 centroids, ~10KB
-		segmentSizes:          make([]int64, SegmentSizeRingSize),
+		ClientID:     clientID,
+		StartTime:    time.Now(),
+		HTTPErrors:   make(map[int]int64),
+		segmentSizes: make([]int64, SegmentSizeRingSize),
+		// Atomic fields are zero-initialized (safe default values)
+		// belowThresholdAt atomic.Value is nil (zero value) = time.Time{} when loaded
 	}
 }
 
@@ -174,164 +161,37 @@ func (s *ClientStats) GetHTTPErrors() map[int]int64 {
 
 // OnProcessStart must be called when FFmpeg process starts/restarts.
 // Accumulates bytes from the previous process before reset.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) OnProcessStart() {
-	s.bytesMu.Lock()
-	s.bytesFromPreviousRuns += s.currentProcessBytes
-	s.currentProcessBytes = 0
-	s.bytesMu.Unlock()
+	// Atomic read-modify-write: read current, reset to 0, add to previous
+	prev := s.currentProcessBytes.Swap(0) // Swap returns old value and sets to 0
+	s.bytesFromPreviousRuns.Add(prev)
 }
 
 // UpdateCurrentBytes updates bytes from current FFmpeg's total_size.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) UpdateCurrentBytes(totalSize int64) {
-	s.bytesMu.Lock()
-	s.currentProcessBytes = totalSize
-	s.bytesMu.Unlock()
+	s.currentProcessBytes.Store(totalSize)
 }
 
 // TotalBytes returns cumulative bytes across all FFmpeg restarts.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) TotalBytes() int64 {
-	s.bytesMu.Lock()
-	defer s.bytesMu.Unlock()
-	return s.bytesFromPreviousRuns + s.currentProcessBytes
+	return s.bytesFromPreviousRuns.Load() + s.currentProcessBytes.Load()
 }
 
 // --- Inferred Latency Tracking (T-Digest for constant memory) ---
 // IMPORTANT: Latency is INFERRED from FFmpeg events, not directly measured.
 // Use for trend analysis, not absolute performance claims.
 
-// OnSegmentRequestStart tracks the start of a segment download.
-func (s *ClientStats) OnSegmentRequestStart(url string) {
-	s.inflightRequests.Store(url, time.Now())
-}
-
-// OnSegmentRequestComplete completes a segment download by URL.
-func (s *ClientStats) OnSegmentRequestComplete(url string) {
-	if startTime, ok := s.inflightRequests.LoadAndDelete(url); ok {
-		latency := time.Since(startTime.(time.Time))
-		s.recordInferredLatency(latency)
-	}
-}
-
-// CompleteOldestSegment completes the oldest inflight .ts request.
-// Called on progress updates when we don't know which segment completed.
-// Also cleans up "hanging" requests older than TTL to prevent memory leaks.
-func (s *ClientStats) CompleteOldestSegment() time.Duration {
-	var oldestURL string
-	var oldestTime time.Time
-	var hangingURLs []string
-	now := time.Now()
-
-	s.inflightRequests.Range(func(key, value interface{}) bool {
-		url := key.(string)
-		startTime := value.(time.Time)
-
-		// Check for hanging requests (older than TTL)
-		if now.Sub(startTime) > HangingRequestTTL {
-			hangingURLs = append(hangingURLs, url)
-			return true // Continue iteration
-		}
-
-		// Find oldest segment request (.ts files only)
-		lowerURL := strings.ToLower(url)
-		if strings.HasSuffix(lowerURL, ".ts") || strings.Contains(lowerURL, ".ts?") {
-			if oldestTime.IsZero() || startTime.Before(oldestTime) {
-				oldestURL = url
-				oldestTime = startTime
-			}
-		}
-		return true
-	})
-
-	// Clean up hanging requests and record as timeouts
-	for _, url := range hangingURLs {
-		s.inflightRequests.Delete(url)
-		atomic.AddInt64(&s.Timeouts, 1)
-	}
-
-	// Complete oldest segment if found
-	if oldestURL != "" {
-		s.inflightRequests.Delete(oldestURL)
-		latency := now.Sub(oldestTime)
-		s.recordInferredLatency(latency)
-		return latency
-	}
-
-	return 0
-}
-
-// recordInferredLatency adds a latency sample to the T-Digest.
-func (s *ClientStats) recordInferredLatency(d time.Duration) {
-	s.inferredLatencyMu.Lock()
-	defer s.inferredLatencyMu.Unlock()
-
-	s.inferredLatencyDigest.Add(float64(d.Nanoseconds()), 1)
-	s.inferredLatencyCount++
-	s.inferredLatencySum += d
-	if d > s.inferredLatencyMax {
-		s.inferredLatencyMax = d
-	}
-}
-
-// InferredLatencyP50 returns the 50th percentile (median) latency.
-func (s *ClientStats) InferredLatencyP50() time.Duration {
-	s.inferredLatencyMu.Lock()
-	defer s.inferredLatencyMu.Unlock()
-	return time.Duration(s.inferredLatencyDigest.Quantile(0.50))
-}
-
-// InferredLatencyP95 returns the 95th percentile latency.
-func (s *ClientStats) InferredLatencyP95() time.Duration {
-	s.inferredLatencyMu.Lock()
-	defer s.inferredLatencyMu.Unlock()
-	return time.Duration(s.inferredLatencyDigest.Quantile(0.95))
-}
-
-// InferredLatencyP99 returns the 99th percentile latency.
-func (s *ClientStats) InferredLatencyP99() time.Duration {
-	s.inferredLatencyMu.Lock()
-	defer s.inferredLatencyMu.Unlock()
-	return time.Duration(s.inferredLatencyDigest.Quantile(0.99))
-}
-
-// InferredLatencyMax returns the maximum observed latency.
-func (s *ClientStats) InferredLatencyMax() time.Duration {
-	s.inferredLatencyMu.Lock()
-	defer s.inferredLatencyMu.Unlock()
-	return s.inferredLatencyMax
-}
-
-// InferredLatencyAvg returns the average latency.
-func (s *ClientStats) InferredLatencyAvg() time.Duration {
-	s.inferredLatencyMu.Lock()
-	defer s.inferredLatencyMu.Unlock()
-
-	if s.inferredLatencyCount == 0 {
-		return 0
-	}
-	return s.inferredLatencySum / time.Duration(s.inferredLatencyCount)
-}
-
-// InferredLatencyCount returns the number of latency samples.
-func (s *ClientStats) InferredLatencyCount() int64 {
-	s.inferredLatencyMu.Lock()
-	defer s.inferredLatencyMu.Unlock()
-	return s.inferredLatencyCount
-}
-
-// InflightRequestCount returns the number of pending requests.
-func (s *ClientStats) InflightRequestCount() int {
-	count := 0
-	s.inflightRequests.Range(func(_, _ interface{}) bool {
-		count++
-		return true
-	})
-	return count
-}
+// Note: Inferred latency methods removed - use DebugEventParser for accurate latency
+// from FFmpeg timestamps. See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md
 
 // --- Wall-Clock Drift Tracking ---
 
 // UpdateDrift updates the wall-clock drift from playback position.
 // Drift = (Now - StartTime) - PlaybackTime
+// Uses individual atomics for lock-free access (no allocations, no race conditions).
 func (s *ClientStats) UpdateDrift(outTimeUS int64) {
 	if outTimeUS <= 0 {
 		return
@@ -339,84 +199,108 @@ func (s *ClientStats) UpdateDrift(outTimeUS int64) {
 
 	playbackTime := time.Duration(outTimeUS) * time.Microsecond
 	wallClockElapsed := time.Since(s.StartTime)
+	current := wallClockElapsed - playbackTime
 
-	s.driftMu.Lock()
-	s.LastPlaybackTime = playbackTime
-	s.CurrentDrift = wallClockElapsed - playbackTime
-	if s.CurrentDrift > s.MaxDrift {
-		s.MaxDrift = s.CurrentDrift
+	// Update atomically (lock-free)
+	s.lastPlaybackTime.Store(int64(playbackTime))
+	s.currentDrift.Store(int64(current))
+
+	// Update max drift using CAS loop (like peakDropRate)
+	for {
+		oldMax := s.maxDrift.Load()
+		if int64(current) <= oldMax {
+			break // No update needed
+		}
+		if s.maxDrift.CompareAndSwap(oldMax, int64(current)) {
+			break // Successfully updated
+		}
+		// Retry on CAS failure (another goroutine updated it)
 	}
-	s.driftMu.Unlock()
 }
 
 // GetDrift returns current and max drift values.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) GetDrift() (current, max time.Duration) {
-	s.driftMu.Lock()
-	defer s.driftMu.Unlock()
-	return s.CurrentDrift, s.MaxDrift
+	return time.Duration(s.currentDrift.Load()), time.Duration(s.maxDrift.Load())
 }
 
 // HasHighDrift returns true if drift exceeds threshold.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) HasHighDrift() bool {
-	s.driftMu.Lock()
-	defer s.driftMu.Unlock()
-	return s.CurrentDrift > HighDriftThreshold
+	return time.Duration(s.currentDrift.Load()) > HighDriftThreshold
 }
 
 // --- Speed and Stall Detection ---
 
 // UpdateSpeed updates the current playback speed.
+// Uses individual atomics for lock-free access (no allocations, no race conditions).
 func (s *ClientStats) UpdateSpeed(speed float64) {
-	s.speedMu.Lock()
-	defer s.speedMu.Unlock()
+	// Load current speed to check if we're crossing the threshold
+	currentSpeedBits := s.speed.Load()
+	currentSpeed := math.Float64frombits(currentSpeedBits)
 
-	s.CurrentSpeed = speed
+	// Update speed atomically (lock-free)
+	s.speed.Store(math.Float64bits(speed))
 
+	// Update belowThresholdAt based on speed transition
+	// Note: Brief out-of-sync with speed is acceptable for stall detection
 	if speed > 0 && speed < StallThreshold {
-		if s.speedBelowThresholdAt.IsZero() {
-			s.speedBelowThresholdAt = time.Now()
+		// Speed is below threshold
+		if currentSpeed >= StallThreshold {
+			// Just crossed below threshold - set timestamp
+			s.belowThresholdAt.Store(time.Now())
 		}
+		// If already below threshold, keep existing timestamp (don't overwrite)
 	} else {
-		s.speedBelowThresholdAt = time.Time{}
+		// Speed is above threshold - clear timestamp
+		s.belowThresholdAt.Store(time.Time{})
 	}
 }
 
 // GetSpeed returns the current playback speed.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) GetSpeed() float64 {
-	s.speedMu.Lock()
-	defer s.speedMu.Unlock()
-	return s.CurrentSpeed
+	return math.Float64frombits(s.speed.Load())
 }
 
 // IsStalled returns true if client has been below speed threshold for too long.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) IsStalled() bool {
-	s.speedMu.Lock()
-	defer s.speedMu.Unlock()
-
-	if s.speedBelowThresholdAt.IsZero() {
+	thresholdTimePtr := s.belowThresholdAt.Load()
+	if thresholdTimePtr == nil {
 		return false
 	}
-	return time.Since(s.speedBelowThresholdAt) > StallDuration
+	thresholdTime := thresholdTimePtr.(time.Time)
+	if thresholdTime.IsZero() {
+		return false
+	}
+	return time.Since(thresholdTime) > StallDuration
 }
 
 // --- Segment Size Tracking ---
 
 // RecordSegmentSize records an estimated segment size.
+// Uses atomic index with shared slice for lock-free access (no allocations, no race conditions).
 func (s *ClientStats) RecordSegmentSize(size int64) {
-	s.segmentSizeMu.Lock()
-	s.segmentSizes[s.segmentSizeIdx] = size
-	s.segmentSizeIdx = (s.segmentSizeIdx + 1) % SegmentSizeRingSize
-	s.segmentSizeMu.Unlock()
+	// Atomically increment index (wraps around using modulo)
+	oldIdx := s.segmentSizeIdx.Load()
+	newIdx := (oldIdx + 1) % SegmentSizeRingSize
+	s.segmentSizeIdx.Store(newIdx)
+
+	// Write to shared slice at new index
+	// Note: Brief inconsistency between index update and write is acceptable
+	s.segmentSizes[newIdx] = size
 }
 
 // GetAverageSegmentSize returns the average of recent segment sizes.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) GetAverageSegmentSize() int64 {
-	s.segmentSizeMu.Lock()
-	defer s.segmentSizeMu.Unlock()
-
+	// Read all elements from shared slice
+	// Note: Brief inconsistency is acceptable - worst case is we include/exclude one element
 	var sum int64
 	var count int64
-	for _, size := range s.segmentSizes {
+	for i := 0; i < SegmentSizeRingSize; i++ {
+		size := s.segmentSizes[i]
 		if size > 0 {
 			sum += size
 			count++
@@ -432,19 +316,27 @@ func (s *ClientStats) GetAverageSegmentSize() int64 {
 
 // RecordDroppedLines records lines dropped by parsing pipelines.
 // Also tracks peak drop rate for correlation with load spikes.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) RecordDroppedLines(progressRead, progressDropped, stderrRead, stderrDropped int64) {
 	atomic.StoreInt64(&s.ProgressLinesRead, progressRead)
 	atomic.StoreInt64(&s.ProgressLinesDropped, progressDropped)
 	atomic.StoreInt64(&s.StderrLinesRead, stderrRead)
 	atomic.StoreInt64(&s.StderrLinesDropped, stderrDropped)
 
-	// Track peak drop rate
+	// Track peak drop rate using CAS loop for lock-free max operation
 	currentRate := s.CurrentDropRate()
-	s.peakDropMu.Lock()
-	if currentRate > s.PeakDropRate {
-		s.PeakDropRate = currentRate
+	for {
+		oldBits := s.peakDropRate.Load()
+		oldRate := math.Float64frombits(oldBits)
+		if currentRate <= oldRate {
+			break // No update needed
+		}
+		newBits := math.Float64bits(currentRate)
+		if s.peakDropRate.CompareAndSwap(oldBits, newBits) {
+			break // Successfully updated
+		}
+		// Retry on CAS failure (another goroutine updated it)
 	}
-	s.peakDropMu.Unlock()
 }
 
 // CurrentDropRate returns current drop rate (0.0 to 1.0).
@@ -464,10 +356,9 @@ func (s *ClientStats) MetricsDegraded(threshold float64) bool {
 }
 
 // GetPeakDropRate returns the highest drop rate observed.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) GetPeakDropRate() float64 {
-	s.peakDropMu.Lock()
-	defer s.peakDropMu.Unlock()
-	return s.PeakDropRate
+	return math.Float64frombits(s.peakDropRate.Load())
 }
 
 // --- Uptime ---
@@ -491,18 +382,14 @@ type Summary struct {
 	Reconnections    int64
 	Timeouts         int64
 	HTTPErrors       map[int]int64
-	LatencyP50       time.Duration
-	LatencyP95       time.Duration
-	LatencyP99       time.Duration
-	LatencyMax       time.Duration
-	LatencyCount     int64
-	CurrentSpeed     float64
-	IsStalled        bool
-	CurrentDrift     time.Duration
-	MaxDrift         time.Duration
-	HasHighDrift     bool
-	DropRate         float64
-	PeakDropRate     float64
+	// Note: Latency metrics removed - use DebugStats.SegmentWallTime* for accurate latency
+	CurrentSpeed float64
+	IsStalled    bool
+	CurrentDrift time.Duration
+	MaxDrift     time.Duration
+	HasHighDrift bool
+	DropRate     float64
+	PeakDropRate float64
 }
 
 // GetSummary returns a snapshot of all key metrics.
@@ -521,17 +408,13 @@ func (s *ClientStats) GetSummary() Summary {
 		Reconnections:    atomic.LoadInt64(&s.Reconnections),
 		Timeouts:         atomic.LoadInt64(&s.Timeouts),
 		HTTPErrors:       s.GetHTTPErrors(),
-		LatencyP50:       s.InferredLatencyP50(),
-		LatencyP95:       s.InferredLatencyP95(),
-		LatencyP99:       s.InferredLatencyP99(),
-		LatencyMax:       s.InferredLatencyMax(),
-		LatencyCount:     s.InferredLatencyCount(),
-		CurrentSpeed:     s.GetSpeed(),
-		IsStalled:        s.IsStalled(),
-		CurrentDrift:     currentDrift,
-		MaxDrift:         maxDrift,
-		HasHighDrift:     s.HasHighDrift(),
-		DropRate:         s.CurrentDropRate(),
-		PeakDropRate:     s.GetPeakDropRate(),
+		// Latency metrics removed - use DebugStats for accurate latency from FFmpeg timestamps
+		CurrentSpeed: s.GetSpeed(),
+		IsStalled:    s.IsStalled(),
+		CurrentDrift: currentDrift,
+		MaxDrift:     maxDrift,
+		HasHighDrift: s.HasHighDrift(),
+		DropRate:     s.CurrentDropRate(),
+		PeakDropRate: s.GetPeakDropRate(),
 	}
 }

@@ -56,7 +56,7 @@ Orchestration Flags:
 		printFlagCategory([]string{"target-duration", "restart-on-stall"})
 
 		fmt.Fprintf(os.Stderr, "\nStats Collection:\n")
-		printFlagCategory([]string{"stats", "stats-loglevel", "stats-buffer"})
+		printFlagCategory([]string{"stats", "stats-loglevel", "stats-buffer", "progress-socket", "ffmpeg-debug"})
 
 		fmt.Fprintf(os.Stderr, "\nDashboard:\n")
 		printFlagCategory([]string{"tui", "prom-client-metrics"})
@@ -123,6 +123,12 @@ Examples:
 	flag.IntVar(&cfg.StatsBufferSize, "stats-buffer", cfg.StatsBufferSize, "Lines to buffer per client (increase if seeing drops)")
 	// Note: stats-drop-threshold is intentionally not documented (hidden advanced flag)
 	flag.Float64Var(&cfg.StatsDropThreshold, "stats-drop-threshold", cfg.StatsDropThreshold, "")
+
+	// Socket mode (experimental)
+	flag.BoolVar(&cfg.UseProgressSocket, "progress-socket", cfg.UseProgressSocket,
+		"Use Unix socket for FFmpeg progress (experimental, enables clean debug logging)")
+	flag.BoolVar(&cfg.DebugLogging, "ffmpeg-debug", cfg.DebugLogging,
+		"Enable FFmpeg -loglevel debug for detailed segment timing (requires -progress-socket)")
 
 	// TUI (Terminal User Interface)
 	flag.BoolVar(&cfg.TUIEnabled, "tui", cfg.TUIEnabled, "Enable live terminal dashboard")

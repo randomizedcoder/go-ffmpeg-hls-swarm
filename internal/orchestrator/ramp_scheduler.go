@@ -45,8 +45,15 @@ func (r *RampScheduler) Schedule(ctx context.Context, clientID int) error {
 		baseDelay = time.Second / time.Duration(r.rate)
 	}
 
-	// Add per-client jitter
-	jitter := r.jitter.ClientJitter(clientID, r.maxJitter)
+	// Add per-client jitter, but scale it to not dominate at high rates.
+	// For high ramp rates, cap jitter to 50% of baseDelay to maintain the target rate.
+	// For low ramp rates, use the full jitter to prevent synchronization.
+	effectiveJitter := r.maxJitter
+	if baseDelay > 0 && r.maxJitter > baseDelay/2 {
+		// Cap jitter to 50% of baseDelay for high rates
+		effectiveJitter = baseDelay / 2
+	}
+	jitter := r.jitter.ClientJitter(clientID, effectiveJitter)
 
 	// Total delay
 	totalDelay := baseDelay + jitter

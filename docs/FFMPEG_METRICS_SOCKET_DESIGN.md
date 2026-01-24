@@ -1,13 +1,14 @@
 # FFmpeg Metrics Socket Design
 
-> **Status**: PROPOSED
-> **Date**: 2026-01-22
+> **Status**: IMPLEMENTED (Phase 6.6 Complete)
+> **Date**: 2026-01-22 (Updated: 2026-01-23)
 > **Author**: AI Assistant
 > **Related Documents**:
 > - [METRICS_ENHANCEMENT_DESIGN.md](METRICS_ENHANCEMENT_DESIGN.md)
 > - [METRICS_IMPLEMENTATION_PLAN.md](METRICS_IMPLEMENTATION_PLAN.md)
 > - [TUI_DEFECTS.md](TUI_DEFECTS.md) - Defect E, G
-> - [FFMPEG_HLS_REFERENCE.md](FFMPEG_HLS_REFERENCE.md) - §13
+> - [FFMPEG_HLS_REFERENCE.md](FFMPEG_HLS_REFERENCE.md) - §13 (FFmpeg Source Code Log Events)
+> - [FFMPEG_METRICS_SOCKET_IMPLEMENTATION_LOG.md](FFMPEG_METRICS_SOCKET_IMPLEMENTATION_LOG.md)
 
 ---
 
@@ -27,6 +28,12 @@
 - [9. Rollback Plan](#9-rollback-plan)
 - [10. Success Criteria](#10-success-criteria)
 - [11. Debug Parser: High-Value Metrics](#11-debug-parser-high-value-metrics)
+  - [11.4 Combined Debug Event Types](#114-combined-debug-event-types)
+  - [11.4.1 Event Source Reference](#1141-event-source-reference-ffmpeg-source-code)
+  - [11.4.2 Critical Events for Load Testing](#1142-critical-events-for-load-testing)
+  - [11.5 Aggregated Debug Metrics](#115-aggregated-debug-metrics-in-debugstats)
+  - [11.6 TUI Dashboard](#116-tui-dashboard-debug-metrics-panel)
+  - [11.7 Early Warning Indicators](#117-early-warning-indicators)
 - [12. Quality of Experience (QoE) Metrics](#12-quality-of-experience-qoe-metrics)
 
 ---
@@ -40,8 +47,10 @@ This document proposes separating FFmpeg's `-progress` output from stderr using 
 3. **Any log level** - Can use `-loglevel debug` without corrupting progress parsing
 4. **Better TUI** - Raw debug logs won't break the TUI layout (Defect E)
 5. **Richer metrics** - Enable `-loglevel debug` for per-segment timing (Defect G)
+6. **Error tracking** - Parse HTTP errors, reconnects, segment failures for load test analysis
+7. **Accurate timing** - Use FFmpeg's native timestamps (`-loglevel repeat+level+datetime+...`) for sub-millisecond accuracy
 
-**Impact**: All 300+ client tests should see improved metrics accuracy and TUI stability.
+**Impact**: All 300+ client tests should see improved metrics accuracy, TUI stability, and comprehensive error tracking for origin stress testing.
 
 ---
 
@@ -1424,31 +1433,42 @@ func (s *TCPHealthState) RecentHealthRatio() float64 {
 
 ### 11.4 Combined Debug Event Types
 
+Based on FFmpeg source code analysis (`libavformat/hls.c`, `http.c`, `network.c`), we parse the following event categories:
+
 ```go
 // internal/parser/debug_events.go
 
 type DebugEventType int
 
 const (
-    // Segment fetch events
-    DebugEventHLSRequest DebugEventType = iota  // [hls @ ...] HLS request for url
-    DebugEventTCPStart                          // [tcp @ ...] Starting connection attempt
-    DebugEventTCPConnected                      // [tcp @ ...] Successfully connected
-    DebugEventTCPFailed                         // [tcp @ ...] Failed/refused/timeout
+    // === SEGMENT FETCH EVENTS (Primary Timing) ===
+    DebugEventHLSRequest    DebugEventType = iota  // [hls @ ...] HLS request for url
+    DebugEventHTTPOpen                              // [http @ ...] Opening '...' for reading
+    DebugEventTCPStart                              // [tcp @ ...] Starting connection attempt
+    DebugEventTCPConnected                          // [tcp @ ...] Successfully connected
+    DebugEventTCPFailed                             // [tcp @ ...] Connection failed/refused/timeout
 
-    // Playlist events
-    DebugEventPlaylistOpen                      // [hls @ ...] Opening '...m3u8' for reading
-    DebugEventSequenceChange                    // [hls @ ...] Media sequence change
+    // === PLAYLIST EVENTS (Jitter Tracking) ===
+    DebugEventPlaylistOpen                          // [hls @ ...] Opening '...m3u8' for reading
+    DebugEventSequenceChange                        // [hls @ ...] Media sequence change
 
-    // HTTP events (already in HLSEventParser)
-    DebugEventHTTPError                         // Server returned 5XX
+    // === ERROR EVENTS (Critical for Load Testing) ===
+    DebugEventHTTPError                             // [http @ ...] HTTP error 4xx/5xx
+    DebugEventReconnect                             // Will reconnect at... in N second(s)
+    DebugEventSegmentFailed                         // [hls @ ...] Failed to open segment
+    DebugEventSegmentSkipped                        // [hls @ ...] Segment failed too many times, skipping
+    DebugEventPlaylistFailed                        // [hls @ ...] Failed to reload playlist
+    DebugEventSegmentsExpired                       // [hls @ ...] skipping N segments ahead, expired
+
+    // === BANDWIDTH EVENTS ===
+    DebugEventBandwidth                             // BANDWIDTH=... from manifest
 )
 
 type DebugEvent struct {
     Type      DebugEventType
     Timestamp time.Time
 
-    // For HLS/TCP events
+    // For HLS/HTTP/TCP events
     URL       string
     IP        string
     Port      int
@@ -1458,66 +1478,329 @@ type DebugEvent struct {
     NewSeq    int
 
     // For TCP failures
-    FailureReason string  // "refused", "timeout", "error"
+    FailReason string  // "refused", "timeout", "error"
+
+    // For bandwidth
+    Bandwidth  int64   // bits per second
+
+    // For error events
+    HTTPCode   int     // HTTP status code (4xx, 5xx)
+    ErrorMsg   string  // Error message text
+    SkipCount  int     // Number of segments skipped (for SegmentsExpired)
+    PlaylistID int     // Playlist index
+    SegmentID  int64   // Segment sequence number
 }
 ```
 
-### 11.5 Aggregated Debug Metrics in ClientStats
+### 11.4.1 Event Source Reference (FFmpeg Source Code)
+
+| Event Type | FFmpeg Source | Line | Log Level | Pattern |
+|------------|---------------|------|-----------|---------|
+| `HLSRequest` | `hls.c` | L1392 | VERBOSE | `HLS request for url '%s'` |
+| `HTTPOpen` | `http.c` | L563 | INFO | `Opening '%s' for reading` |
+| `TCPStart` | `network.c` | L432 | VERBOSE | `Starting connection attempt to %s port %s` |
+| `TCPConnected` | `network.c` | L488 | VERBOSE | `Successfully connected to %s port %s` |
+| `TCPFailed` | `network.c` | L503, L519 | VERBOSE/ERROR | `Connection attempt to %s port %s failed` |
+| `PlaylistOpen` | `hls.c` | (via http) | INFO | `Opening '...m3u8' for reading` |
+| `SequenceChange` | `hls.c` | L1086 | DEBUG | `Media sequence change (%d -> %d)` |
+| `HTTPError` | `http.c` | L873 | WARNING | `HTTP error %d %s` |
+| `Reconnect` | `http.c` | L432, L1805 | WARNING | `Will reconnect at %d in %d second(s)` |
+| `SegmentFailed` | `hls.c` | L1677, L1711 | WARNING | `Failed to open segment %d of playlist %d` |
+| `SegmentSkipped` | `hls.c` | L1681 | WARNING | `Segment %d of playlist %d failed too many times, skipping` |
+| `PlaylistFailed` | `hls.c` | L1594 | WARNING | `Failed to reload playlist %d` |
+| `SegmentsExpired` | `hls.c` | L1604 | WARNING | `skipping %d segments ahead, expired from playlists` |
+
+### 11.4.2 Critical Events for Load Testing
+
+When stress-testing an origin server, these events indicate problems:
+
+| Severity | Event | Pattern | Meaning | Action |
+|----------|-------|---------|---------|--------|
+| 🔴 **Critical** | `HTTPError` (5xx) | `HTTP error 503` | Origin failure | Alert immediately |
+| 🔴 **Critical** | `SegmentSkipped` | `failed too many times, skipping` | Data loss | Track skip rate |
+| 🔴 **Critical** | `PlaylistFailed` | `Failed to reload playlist` | Live edge lost | Check origin health |
+| 🔴 **Critical** | `TCPFailed` (refused) | `Connection refused` | Origin overloaded | Reduce client count |
+| ⚠️ **Warning** | `HTTPError` (4xx) | `HTTP error 404` | Missing content | Check origin config |
+| ⚠️ **Warning** | `Reconnect` | `Will reconnect at` | Connection dropped | Monitor frequency |
+| ⚠️ **Warning** | `SegmentsExpired` | `skipping segments ahead` | Client too slow | Check client capacity |
+| ⚠️ **Warning** | `SegmentFailed` | `Failed to open segment` | Transient failure | Normal if recovers |
+| ℹ️ **Info** | Segment time > 100ms | (calculated) | Origin slowing | Monitor trend |
+| ℹ️ **Info** | New TCP connects | `Starting connection` | Keep-alive broke | Expected occasionally |
+
+### 11.5 Aggregated Debug Metrics in DebugStats
 
 ```go
-// internal/stats/client_stats.go additions
+// internal/parser/debug_events.go
 
-type ClientStats struct {
-    // ... existing fields ...
+type DebugStats struct {
+    // === PARSING METRICS ===
+    LinesProcessed int64
+    TimestampsUsed int64  // Lines using FFmpeg timestamps (more accurate)
 
-    // Segment TTFB (Phase 6 - Debug Parser)
-    ttfbSamples    *tdigest.TDigest  // Memory-efficient percentiles
-    ttfbCount      int64
-    ttfbSum        time.Duration
+    // === MANIFEST ===
+    ManifestBandwidth int64  // bits per second
 
-    // Playlist Jitter
-    playlistRefreshCount  int64
-    playlistJitterSum     time.Duration
-    playlistMaxJitter     time.Duration
-    playlistLateCount     int64
-    lastPlaylistRefresh   time.Time
+    // === SEGMENT TIMING (PRIMARY) ===
+    SegmentCount int64
+    SegmentAvgMs float64
+    SegmentMinMs float64
+    SegmentMaxMs float64
 
-    // TCP Health
-    tcpSuccessCount   int64
-    tcpFailureCount   int64
-    tcpTimeoutCount   int64
-    tcpRefusedCount   int64
-    tcpRecentHealth   []bool  // Ring buffer
+    // === TCP CONNECT TIMING (SECONDARY - only new connections) ===
+    TCPConnectCount int64
+    TCPConnectAvgMs float64
+    TCPConnectMinMs float64
+    TCPConnectMaxMs float64
+
+    // === TCP HEALTH RATIO ===
+    TCPSuccessCount int64
+    TCPFailureCount int64
+    TCPTimeoutCount int64
+    TCPRefusedCount int64
+    TCPHealthRatio  float64  // success / (success + failure)
+
+    // === PLAYLIST JITTER ===
+    PlaylistRefreshes   int64
+    PlaylistLateCount   int64
+    PlaylistAvgJitterMs float64
+    PlaylistMaxJitterMs float64
+
+    // === SEQUENCE TRACKING ===
+    SequenceSkips int64
+
+    // === ERROR EVENTS (CRITICAL FOR LOAD TESTING) ===
+    HTTPErrorCount      int64   // Total HTTP 4xx/5xx errors
+    HTTP4xxCount        int64   // Client errors (4xx)
+    HTTP5xxCount        int64   // Server errors (5xx)
+    ReconnectCount      int64   // Reconnection attempts
+    SegmentFailedCount  int64   // Segment open failures
+    SegmentSkippedCount int64   // Segments skipped after retries
+    PlaylistFailedCount int64   // Playlist reload failures
+    SegmentsExpiredSum  int64   // Total segments expired from playlist
+    ErrorRate           float64 // (errors / total requests)
+
+    // === SUCCESS COUNTERS (for TUI - should increment rapidly) ===
+    HTTPOpenCount       int64  // Total HTTP opens (segments + manifests + other)
+    SegmentCount        int64  // Segments downloaded (HLS requests for .ts files)
+    PlaylistRefreshes   int64  // Manifests refreshed (opens for .m3u8 files)
+    TCPConnectCount     int64  // New TCP connections (keep-alive means this stays low)
 }
+```
 
-// Methods
-func (s *ClientStats) RecordTTFB(ttfb time.Duration)
-func (s *ClientStats) RecordPlaylistRefresh()
-func (s *ClientStats) RecordTCPSuccess()
-func (s *ClientStats) RecordTCPFailure(reason string)
-func (s *ClientStats) TCPHealthRatio() float64
-func (s *ClientStats) PlaylistJitterAvg() time.Duration
+### 11.5.1 Error Rate Calculation
+
+```go
+// ErrorRate = (HTTP errors + segment failures) / total HTTP opens
+if stats.HTTPOpenCount > 0 {
+    totalErrors := stats.HTTPErrorCount + stats.SegmentFailedCount
+    stats.ErrorRate = float64(totalErrors) / float64(stats.HTTPOpenCount)
+}
+```
+
+### 11.5.2 Timestamp Accuracy Indicator
+
+```go
+// TimestampsUsed > 0 indicates FFmpeg timestamps are being used
+// for timing calculations. This is MORE ACCURATE than wall clock
+// because it's immune to Go channel processing delays.
+
+accuracyIndicator := "⚠️ Wall Clock"
+if stats.TimestampsUsed > 0 {
+    pct := float64(stats.TimestampsUsed) / float64(stats.LinesProcessed) * 100
+    accuracyIndicator = fmt.Sprintf("✅ FFmpeg Timestamps (%.1f%%)", pct)
+}
 ```
 
 ### 11.6 TUI Dashboard: Debug Metrics Panel
 
+Organized by protocol layer (HLS → HTTP → TCP) matching the FFmpeg source structure in [FFMPEG_HLS_REFERENCE.md §13](#13-ffmpeg-hls-source-code-log-events-reference).
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ Network Health (from -loglevel debug)                                       │
+│ Origin Load Test Dashboard          Timing: ✅ FFmpeg Timestamps (98.2%)    │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Segment TTFB                          │ TCP Connections                     │
-│   P50:    12ms                        │   Success:     14,523 (99.2%)       │
-│   P95:    45ms                        │   Refused:         48 (0.3%)        │
-│   P99:   120ms                        │   Timeout:         73 (0.5%)        │
-│   Max:   892ms                        │   Health:      ●●●●●●●●○○ 99.2%     │
+│ 📺 HLS LAYER (libavformat/hls.c)                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Segments                              │ Playlists                           │
+│   ✅ Downloaded:  45,892  (+127/s)    │   ✅ Refreshed:   8,234  (+4.2/s)   │
+│   ⚠️ Failed:          12  (0.03%)     │   ⚠️ Failed:          0  (0.00%)    │
+│   🔴 Skipped:          2  (data loss) │   ⏱️ Jitter:      45ms avg/312ms max│
+│   ⏩ Expired:         45  (fell behind)│   ⏰ Late:         12  (0.4%)       │
 │                                       │                                     │
-│ Playlist Refresh                      │ Origin Status                       │
-│   Interval:  2.0s (target)            │   Avg TTFB:    23ms                 │
-│   Avg Jitter:  45ms                   │   Error Rate:   0.8%                │
-│   Max Jitter: 312ms                   │   Status:      ● Healthy            │
-│   Late:       12 (0.4%)               │                                     │
+│ Segment Wall Time                     │ Sequence                            │
+│   Avg: 12ms  Min: 2ms  Max: 892ms     │   Current: 45892   Skips: 3         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 🌐 HTTP LAYER (libavformat/http.c)                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Requests                              │ Errors                              │
+│   ✅ Successful: 54,103  (+142/s)     │   4xx Client:       5  (0.01%)      │
+│   ⚠️ Failed:         23  (0.04%)      │   5xx Server:      18  (0.03%)      │
+│   🔄 Reconnects:      8               │   Error Rate:   0.04%               │
+│                                       │   Status:       ● Healthy           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 🔌 TCP LAYER (libavformat/network.c)                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Connections                           │ Connect Latency                     │
+│   ✅ Success:    14,523  (99.2%)      │   Avg:   0.8ms                      │
+│   🚫 Refused:        48  (0.3%)       │   Min:   0.2ms                      │
+│   ⏱️ Timeout:        73  (0.5%)       │   Max:   45ms                       │
+│   Health:    ●●●●●●●●○○  99.2%        │   (Note: Keep-alive = few connects) │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### 11.6.1 Layer Explanation
+
+| Layer | Source File | What It Measures | Key Metrics |
+|-------|-------------|------------------|-------------|
+| **HLS** | `hls.c` | Application-level streaming | Segments, playlists, sequence |
+| **HTTP** | `http.c` | Request/response cycle | Success, errors, reconnects |
+| **TCP** | `network.c` | Connection establishment | Connect time, success/failure |
+
+### 11.6.2 Understanding the Metrics Flow
+
+```
+User Request → HLS Layer → HTTP Layer → TCP Layer → Origin Server
+                  ↓            ↓            ↓
+              Segment      HTTP 200     TCP Connect
+              Request      or 5xx       or Refused
+```
+
+**Reading the dashboard top-to-bottom:**
+1. **HLS Layer** - Are we getting segments? Is the playlist updating?
+2. **HTTP Layer** - Are HTTP requests succeeding? Any 5xx errors?
+3. **TCP Layer** - Can we establish connections? Any network issues?
+
+### 11.6.3 Success Counter Expectations
+
+| Counter | Expected Rate | Warning If |
+|---------|---------------|------------|
+| **Segments Downloaded** | ~0.5/s per client (2s segments) | Stalled or < expected |
+| **Playlists Refreshed** | ~0.5/s per client (2s target) | Stalled |
+| **HTTP Requests** | Sum of above | Flat |
+| **TCP Connects** | Low (keep-alive reuses connections) | High = connection churn |
+
+**Example for 100 clients with 2s segments:**
+- Segments: ~50/s expected
+- Playlists: ~50/s expected
+- TCP Connects: ~100 initially, then near-zero (keep-alive)
+
+### 11.6.4 Rate Calculation
+
+```go
+type RateTracker struct {
+    lastCount     int64
+    lastTime      time.Time
+    currentRate   float64  // events per second
+}
+
+func (r *RateTracker) Update(newCount int64) float64 {
+    now := time.Now()
+    elapsed := now.Sub(r.lastTime).Seconds()
+    if elapsed > 0 {
+        r.currentRate = float64(newCount - r.lastCount) / elapsed
+    }
+    r.lastCount = newCount
+    r.lastTime = now
+    return r.currentRate
+}
+
+func formatRate(rate float64) string {
+    if rate >= 1000 {
+        return fmt.Sprintf("+%.1fK/s", rate/1000)
+    } else if rate >= 1 {
+        return fmt.Sprintf("+%.0f/s", rate)
+    } else if rate > 0 {
+        return fmt.Sprintf("+%.1f/s", rate)
+    }
+    return "(stalled)"
+}
+```
+
+### 11.6.1 Success Counter Calculations
+
+```go
+// Success counters from DebugStats
+type SuccessCounters struct {
+    // From HLS request events
+    SegmentsDownloaded int64  // Count of "HLS request for url '...ts'"
+
+    // From playlist open events
+    ManifestsRefreshed int64  // Count of "Opening '...m3u8' for reading"
+
+    // From HTTP open events
+    HTTPRequests       int64  // Total HTTP opens (segments + manifests + other)
+
+    // From TCP events
+    TCPConnects        int64  // New TCP connections established
+}
+
+// Rate calculation (per second)
+type RateTracker struct {
+    lastCount     int64
+    lastTime      time.Time
+    currentRate   float64  // events per second
+}
+
+func (r *RateTracker) Update(newCount int64) float64 {
+    now := time.Now()
+    elapsed := now.Sub(r.lastTime).Seconds()
+    if elapsed > 0 {
+        r.currentRate = float64(newCount - r.lastCount) / elapsed
+    }
+    r.lastCount = newCount
+    r.lastTime = now
+    return r.currentRate
+}
+```
+
+### 11.6.2 Visual Indicators for Success Counters
+
+| Counter | Good Sign | Warning Sign | What It Means |
+|---------|-----------|--------------|---------------|
+| **Segments Downloaded** | Incrementing rapidly | Stalled or slow | Active streaming |
+| **Manifests Refreshed** | ~1 per target duration per client | Much less frequent | Playlist refresh working |
+| **HTTP Requests** | Sum of above | Flat | Network activity |
+| **TCP Connects** | Low (keep-alive working) | High (new connections) | Connection reuse |
+
+**Rate display logic:**
+```go
+func formatRate(rate float64) string {
+    if rate >= 1000 {
+        return fmt.Sprintf("+%.1fK/s", rate/1000)
+    } else if rate >= 1 {
+        return fmt.Sprintf("+%.0f/s", rate)
+    } else if rate > 0 {
+        return fmt.Sprintf("+%.1f/s", rate)
+    }
+    return "(stalled)"
+}
+```
+
+### 11.6.5 Status Indicators by Layer
+
+#### HLS Layer Status
+| Indicator | Condition | Meaning |
+|-----------|-----------|---------|
+| ● **Healthy** | Skipped = 0, Failed < 1% | Streaming normally |
+| ● **Degraded** | Skipped = 0, Failed 1-5% | Some segment issues |
+| ● **Unhealthy** | Skipped > 0 OR Failed > 5% | Data loss occurring |
+| ● **Critical** | Playlist failures > 0 | Live edge lost |
+
+#### HTTP Layer Status
+| Indicator | Condition | Meaning |
+|-----------|-----------|---------|
+| ● **Healthy** | Error rate < 1%, 5xx = 0 | Origin responding well |
+| ● **Degraded** | Error rate 1-5% OR 5xx < 10 | Some errors, monitor |
+| ● **Unhealthy** | Error rate > 5% OR 5xx > 10 | Origin under stress |
+| ● **Critical** | Error rate > 20% | Origin failing |
+
+#### TCP Layer Status
+| Indicator | Condition | Meaning |
+|-----------|-----------|---------|
+| ● **Healthy** | Health ratio > 99% | Network stable |
+| ● **Degraded** | Health ratio 95-99% | Some connection issues |
+| ● **Unhealthy** | Health ratio < 95% | Network problems |
+| ● **Critical** | Refused > 10% | Origin rejecting connections |
 
 ### 11.7 Early Warning Indicators
 
@@ -1525,11 +1808,52 @@ The debug metrics enable proactive alerting:
 
 | Metric | Warning Threshold | Critical Threshold | Indicates |
 |--------|-------------------|-------------------|-----------|
-| TCP Health Ratio | <99% | <95% | Origin overload |
-| TTFB P99 | >500ms | >2s | Network congestion |
-| Playlist Max Jitter | >targetDuration | >2×targetDuration | Playlist delivery failing |
-| Late Refresh Rate | >5% | >20% | Imminent stream failure |
-| Sequence Skips | Any | >3 consecutive | Client fell behind live edge |
+| **TCP Health Ratio** | <99% | <95% | Origin overload |
+| **Segment Wall Time Avg** | >100ms | >500ms | Origin slowing down |
+| **Segment Wall Time Max** | >500ms | >2s | Worst-case latency |
+| **Playlist Max Jitter** | >targetDuration | >2×targetDuration | Playlist delivery failing |
+| **Late Refresh Rate** | >5% | >20% | Imminent stream failure |
+| **Sequence Skips** | Any | >3 consecutive | Client fell behind live edge |
+| **HTTP 5xx Errors** | Any | >10 | Server errors |
+| **Error Rate** | >1% | >5% | Overall failure rate |
+| **Segment Skipped** | Any | >3 | Data loss (retries exhausted) |
+| **Playlist Failed** | Any | >1 | Live edge lost |
+| **Reconnect Count** | >5/min | >20/min | Connection instability |
+| **Segments Expired** | Any | >10 total | Clients can't keep up |
+
+### 11.7.1 Aggregate Health Score
+
+```go
+// Calculate an overall health score (0-100%)
+func CalculateHealthScore(stats DebugStats) float64 {
+    score := 100.0
+
+    // TCP health penalty (max -30%)
+    if stats.TCPHealthRatio < 1.0 {
+        score -= (1.0 - stats.TCPHealthRatio) * 30
+    }
+
+    // Error rate penalty (max -40%)
+    if stats.ErrorRate > 0 {
+        score -= stats.ErrorRate * 4000 // 1% error = -40%
+    }
+
+    // Segment skip penalty (critical, max -30%)
+    if stats.SegmentSkippedCount > 0 {
+        score -= float64(stats.SegmentSkippedCount) * 10
+    }
+
+    // Playlist failure penalty (critical)
+    if stats.PlaylistFailedCount > 0 {
+        score -= float64(stats.PlaylistFailedCount) * 20
+    }
+
+    if score < 0 {
+        score = 0
+    }
+    return score
+}
+```
 
 ---
 

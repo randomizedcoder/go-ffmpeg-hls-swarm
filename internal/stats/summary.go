@@ -114,21 +114,8 @@ func FormatExitSummary(stats *AggregatedStats, cfg SummaryConfig) string {
 		FormatBytes(int64(stats.ThroughputBytesPerSec)),
 	)
 
-	// Inferred Latency (not directly measured)
-	if stats.InferredLatencyCount > 0 {
-		b.WriteString("───────────────────────────────────────────────────────────────────────────────\n")
-		b.WriteString("                          Inferred Segment Latency *\n")
-		b.WriteString("───────────────────────────────────────────────────────────────────────────────\n\n")
-
-		fmt.Fprintf(&b, "  %-12s %12s\n", "Percentile", "Latency")
-		b.WriteString("  " + strings.Repeat("─", 26) + "\n")
-		fmt.Fprintf(&b, "  %-12s %12s\n", "P50 (median)", FormatMs(stats.InferredLatencyP50))
-		fmt.Fprintf(&b, "  %-12s %12s\n", "P95", FormatMs(stats.InferredLatencyP95))
-		fmt.Fprintf(&b, "  %-12s %12s\n", "P99", FormatMs(stats.InferredLatencyP99))
-		fmt.Fprintf(&b, "  %-12s %12s\n", "Max", FormatMs(stats.InferredLatencyMax))
-		fmt.Fprintf(&b, "  %-12s %12d\n", "Samples", stats.InferredLatencyCount)
-		b.WriteString("\n  * Inferred from FFmpeg events; use for trends, not absolute values.\n\n")
-	}
+	// Note: Latency metrics removed - use DebugStats.SegmentWallTime* for accurate latency
+	// from FFmpeg timestamps. See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md
 
 	// Playback health
 	b.WriteString("───────────────────────────────────────────────────────────────────────────────\n")
@@ -273,11 +260,7 @@ func formatBasicSummary(cfg SummaryConfig) string {
 func renderFootnotes(stats *AggregatedStats) string {
 	var footnotes []string
 
-	// Always include latency disclaimer if we have latency data
-	if stats.InferredLatencyCount > 0 {
-		footnotes = append(footnotes,
-			"[1] Latency is inferred from FFmpeg events; use for trends, not absolute values.")
-	}
+	// Note: Latency footnote removed - use DebugStats for accurate latency from FFmpeg timestamps
 
 	// Only include unknown URLs if any were observed
 	if stats.TotalUnknownReqs > 0 {

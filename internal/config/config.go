@@ -57,6 +57,10 @@ type Config struct {
 	StatsBufferSize    int     `json:"stats_buffer_size"`    // Lines to buffer per client pipeline
 	StatsDropThreshold float64 `json:"stats_drop_threshold"` // Degradation threshold (0.01 = 1%)
 
+	// Socket mode (experimental)
+	UseProgressSocket bool `json:"use_progress_socket"` // Use Unix socket for FFmpeg progress output
+	DebugLogging      bool `json:"debug_logging"`       // Enable -loglevel debug (requires socket mode)
+
 	// TUI (Terminal User Interface)
 	TUIEnabled bool `json:"tui_enabled"` // Enable live terminal dashboard
 
@@ -103,9 +107,13 @@ func DefaultConfig() *Config {
 
 		// Stats collection
 		StatsEnabled:       true,
-		StatsLogLevel:      "verbose",
+		StatsLogLevel:      "debug", // Default to debug to capture manifest refreshes
 		StatsBufferSize:    1000,
 		StatsDropThreshold: 0.01, // 1% drop rate = degraded
+
+		// Socket mode
+		UseProgressSocket: false, // Disabled by default (experimental)
+		DebugLogging:      false, // Disabled by default (requires socket mode)
 
 		// TUI
 		TUIEnabled: false, // Disabled by default (use -tui to enable)

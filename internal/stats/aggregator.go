@@ -10,11 +10,10 @@
 package stats
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/influxdata/tdigest"
 )
 
 // AggregatedStats holds metrics across all clients.
@@ -52,13 +51,8 @@ type AggregatedStats struct {
 	TotalTimeouts      int64
 	ErrorRate          float64 // errors / total requests
 
-	// INFERRED Latency (T-Digest aggregated percentiles)
-	// Note: Inferred from FFmpeg events - use for trends, not absolutes
-	InferredLatencyP50   time.Duration
-	InferredLatencyP95   time.Duration
-	InferredLatencyP99   time.Duration
-	InferredLatencyMax   time.Duration
-	InferredLatencyCount int64
+	// Note: Inferred latency removed - use DebugStats.SegmentWallTime* for accurate latency
+	// from FFmpeg timestamps. See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md
 
 	// Health
 	ClientsAboveRealtime int
@@ -86,6 +80,60 @@ type AggregatedStats struct {
 	PerClientSummaries []Summary
 }
 
+// DebugStatsAggregate contains aggregated debug statistics across all clients.
+// Organized by protocol layer (HLS/HTTP/TCP) for the layered TUI dashboard.
+// All metrics come from DebugEventParser with accurate FFmpeg timestamps.
+type DebugStatsAggregate struct {
+	// HLS Layer (from DebugEventParser)
+	SegmentsDownloaded int64
+	SegmentsFailed     int64
+	SegmentsSkipped    int64
+	SegmentsExpired    int64
+	PlaylistsRefreshed int64
+	PlaylistsFailed    int64
+	SegmentWallTimeAvg float64
+	SegmentWallTimeMin float64
+	SegmentWallTimeMax float64
+	// Percentiles (from T-Digest, using accurate FFmpeg timestamps)
+	SegmentWallTimeP50 time.Duration // 50th percentile (median)
+	SegmentWallTimeP95 time.Duration // 95th percentile
+	SegmentWallTimeP99 time.Duration // 99th percentile
+	PlaylistJitterAvg  float64
+	PlaylistJitterMax  float64
+	PlaylistLateCount  int64  // Number of playlist refreshes that were late
+	SequenceSkips      int64
+
+	// HTTP Layer
+	HTTPOpenCount  int64
+	HTTP4xxCount   int64
+	HTTP5xxCount   int64
+	ReconnectCount int64
+	ErrorRate      float64
+
+	// TCP Layer
+	TCPConnectCount int64
+	TCPSuccessCount int64
+	TCPRefusedCount int64
+	TCPTimeoutCount int64
+	TCPHealthRatio  float64
+	TCPConnectAvgMs float64
+	TCPConnectMinMs float64
+	TCPConnectMaxMs float64
+
+	// Timing accuracy
+	TimestampsUsed int64
+	LinesProcessed int64
+
+	// Client count
+	ClientsWithDebugStats int
+
+	// Instantaneous rates (per second) - calculated from last snapshot (Phase 7.4)
+	InstantSegmentsRate   float64 // Segments downloaded per second
+	InstantPlaylistsRate  float64 // Playlists refreshed per second
+	InstantHTTPRequestsRate float64 // HTTP requests per second
+	InstantTCPConnectsRate float64 // TCP connections per second
+}
+
 // StatsAggregator aggregates stats from multiple clients.
 //
 // Thread-safe: all methods can be called concurrently.
@@ -94,13 +142,12 @@ type StatsAggregator struct {
 	clients   map[int]*ClientStats
 	startTime time.Time
 
-	// For rate calculations (protected by snapshotMu)
-	snapshotMu   sync.Mutex
-	prevSnapshot *rateSnapshot
+	// For rate calculations (using atomic.Value for lock-free access)
+	prevSnapshot atomic.Value // *rateSnapshot
 
-	dropThreshold  float64
-	peakDropRate   float64
-	peakDropRateMu sync.Mutex
+	dropThreshold float64
+	// peakDropRate uses atomic.Uint64 with bit manipulation for lock-free max operation
+	peakDropRate atomic.Uint64 // math.Float64bits(peakDropRate)
 }
 
 // rateSnapshot holds values for calculating instantaneous rates
@@ -117,14 +164,16 @@ func NewStatsAggregator(dropThreshold float64) *StatsAggregator {
 		dropThreshold = 0.01 // Default 1%
 	}
 
-	return &StatsAggregator{
+	agg := &StatsAggregator{
 		clients:       make(map[int]*ClientStats),
 		startTime:     time.Now(),
 		dropThreshold: dropThreshold,
-		prevSnapshot: &rateSnapshot{
-			timestamp: time.Now(),
-		},
 	}
+	// Initialize atomic.Value with initial snapshot
+	agg.prevSnapshot.Store(&rateSnapshot{
+		timestamp: time.Now(),
+	})
+	return agg
 }
 
 // AddClient registers a client for aggregation.
@@ -166,20 +215,18 @@ func (a *StatsAggregator) Aggregate() *AggregatedStats {
 	now := time.Now()
 	elapsed := now.Sub(a.startTime).Seconds()
 
-	// Get previous snapshot for rate calculations (with lock)
-	a.snapshotMu.Lock()
-	prevSnapshot := a.prevSnapshot
-	a.snapshotMu.Unlock()
+	// Get previous snapshot for rate calculations (lock-free)
+	prevSnapshotPtr := a.prevSnapshot.Load()
+	var prevSnapshot *rateSnapshot
+	if prevSnapshotPtr != nil {
+		prevSnapshot = prevSnapshotPtr.(*rateSnapshot)
+	}
 
 	result := &AggregatedStats{
 		Timestamp:       now,
 		TotalClients:    len(a.clients),
 		TotalHTTPErrors: make(map[int]int64),
 	}
-
-	// Merged T-Digest for global percentiles
-	mergedDigest := tdigest.NewWithCompression(100)
-	var totalLatencyCount int64
 
 	// Accumulators
 	var totalSpeed float64
@@ -205,25 +252,8 @@ func (a *StatsAggregator) Aggregate() *AggregatedStats {
 		result.TotalReconnections += atomic.LoadInt64(&c.Reconnections)
 		result.TotalTimeouts += atomic.LoadInt64(&c.Timeouts)
 
-		// Merge latency T-Digests
-		// Note: We can't directly merge T-Digests in this library,
-		// so we use the percentiles from each client to approximate
-		c.inferredLatencyMu.Lock()
-		if c.inferredLatencyCount > 0 {
-			// Add samples at key percentiles to approximate the distribution
-			// This is an approximation - true T-Digest merging would be better
-			mergedDigest.Add(float64(c.inferredLatencyDigest.Quantile(0.50)), float64(c.inferredLatencyCount)/4)
-			mergedDigest.Add(float64(c.inferredLatencyDigest.Quantile(0.75)), float64(c.inferredLatencyCount)/4)
-			mergedDigest.Add(float64(c.inferredLatencyDigest.Quantile(0.90)), float64(c.inferredLatencyCount)/4)
-			mergedDigest.Add(float64(c.inferredLatencyDigest.Quantile(0.99)), float64(c.inferredLatencyCount)/4)
-			totalLatencyCount += c.inferredLatencyCount
-
-			// Track max latency
-			if c.inferredLatencyMax > result.InferredLatencyMax {
-				result.InferredLatencyMax = c.inferredLatencyMax
-			}
-		}
-		c.inferredLatencyMu.Unlock()
+		// Note: Inferred latency removed - use DebugStats for accurate latency
+		// from FFmpeg timestamps. See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md
 
 		// Speed/health
 		speed := c.GetSpeed()
@@ -301,13 +331,8 @@ func (a *StatsAggregator) Aggregate() *AggregatedStats {
 		}
 	}
 
-	// Calculate latency percentiles from merged digest
-	result.InferredLatencyCount = totalLatencyCount
-	if totalLatencyCount > 0 {
-		result.InferredLatencyP50 = time.Duration(mergedDigest.Quantile(0.50))
-		result.InferredLatencyP95 = time.Duration(mergedDigest.Quantile(0.95))
-		result.InferredLatencyP99 = time.Duration(mergedDigest.Quantile(0.99))
-	}
+	// Note: Inferred latency percentiles removed - use DebugStats.SegmentWallTime*
+	// for accurate latency from FFmpeg timestamps
 
 	// Average speed
 	if speedCount > 0 {
@@ -342,31 +367,36 @@ func (a *StatsAggregator) Aggregate() *AggregatedStats {
 		result.MetricsDegraded = dropRate > a.dropThreshold
 	}
 
-	// Update peak drop rate
-	a.peakDropRateMu.Lock()
-	if result.PeakDropRate > a.peakDropRate {
-		a.peakDropRate = result.PeakDropRate
+	// Update peak drop rate using CAS loop for lock-free max operation
+	currentRate := result.PeakDropRate
+	for {
+		oldBits := a.peakDropRate.Load()
+		oldRate := math.Float64frombits(oldBits)
+		if currentRate <= oldRate {
+			break // No update needed
+		}
+		newBits := math.Float64bits(currentRate)
+		if a.peakDropRate.CompareAndSwap(oldBits, newBits) {
+			break // Successfully updated
+		}
+		// Retry on CAS failure (another goroutine updated it)
 	}
-	a.peakDropRateMu.Unlock()
 
-	// Update previous snapshot for next rate calculation (with lock)
-	a.snapshotMu.Lock()
-	a.prevSnapshot = &rateSnapshot{
+	// Update previous snapshot for next rate calculation (lock-free)
+	a.prevSnapshot.Store(&rateSnapshot{
 		timestamp:    now,
 		manifestReqs: result.TotalManifestReqs,
 		segmentReqs:  result.TotalSegmentReqs,
 		bytes:        result.TotalBytes,
-	}
-	a.snapshotMu.Unlock()
+	})
 
 	return result
 }
 
 // GetPeakDropRate returns the highest drop rate observed across all aggregations.
+// Uses atomic operations for lock-free access.
 func (a *StatsAggregator) GetPeakDropRate() float64 {
-	a.peakDropRateMu.Lock()
-	defer a.peakDropRateMu.Unlock()
-	return a.peakDropRate
+	return math.Float64frombits(a.peakDropRate.Load())
 }
 
 // StartTime returns when the aggregator was created.
@@ -386,13 +416,11 @@ func (a *StatsAggregator) Reset() {
 
 	a.clients = make(map[int]*ClientStats)
 	a.startTime = time.Now()
-	a.prevSnapshot = &rateSnapshot{
+	a.prevSnapshot.Store(&rateSnapshot{
 		timestamp: time.Now(),
-	}
+	})
 
-	a.peakDropRateMu.Lock()
-	a.peakDropRate = 0
-	a.peakDropRateMu.Unlock()
+	a.peakDropRate.Store(math.Float64bits(0))
 }
 
 // ForEachClient calls the provided function for each client.

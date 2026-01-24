@@ -176,25 +176,8 @@ func TestModel_Stats_EdgeCases(t *testing.T) {
 			},
 			description: "Infinite throughput should render safely",
 		},
-		{
-			name: "negative Inf latency",
-			stats: &stats.AggregatedStats{
-				ActiveClients:      10,
-				InferredLatencyP50: time.Duration(math.MinInt64),
-			},
-			description: "Negative infinite latency should render safely",
-		},
-		{
-			name: "zero latency with count",
-			stats: &stats.AggregatedStats{
-				ActiveClients:        100,
-				InferredLatencyP50:   0,
-				InferredLatencyP95:   0,
-				InferredLatencyP99:   0,
-				InferredLatencyCount: 1000,
-			},
-			description: "Zero latencies with count should still render",
-		},
+		// Note: Latency edge case tests removed - latency is now in DebugStats, not AggregatedStats
+		// See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md for details
 		{
 			name: "empty HTTP errors map",
 			stats: &stats.AggregatedStats{

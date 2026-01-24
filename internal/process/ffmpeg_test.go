@@ -105,35 +105,35 @@ func TestFFmpegRunner_buildArgs_StatsEnabled(t *testing.T) {
 		statsEnabled  bool
 		statsLogLevel string
 		wantProgress  bool
-		wantLogLevel  string
+		wantLogLevel  string // Expected level (with timestamped prefix when stats enabled)
 	}{
 		{
 			name:          "stats disabled",
 			statsEnabled:  false,
 			statsLogLevel: "",
 			wantProgress:  false,
-			wantLogLevel:  "info",
+			wantLogLevel:  "info", // No timestamp prefix when stats disabled
 		},
 		{
 			name:          "stats enabled default loglevel",
 			statsEnabled:  true,
 			statsLogLevel: "",
 			wantProgress:  true,
-			wantLogLevel:  "info", // Falls back to default
+			wantLogLevel:  "repeat+level+datetime+verbose", // Timestamped, defaults to verbose
 		},
 		{
 			name:          "stats enabled verbose",
 			statsEnabled:  true,
 			statsLogLevel: "verbose",
 			wantProgress:  true,
-			wantLogLevel:  "verbose",
+			wantLogLevel:  "repeat+level+datetime+verbose", // Timestamped
 		},
 		{
 			name:          "stats enabled debug",
 			statsEnabled:  true,
 			statsLogLevel: "debug",
 			wantProgress:  true,
-			wantLogLevel:  "debug",
+			wantLogLevel:  "repeat+level+datetime+debug", // Timestamped
 		},
 	}
 
@@ -538,6 +538,167 @@ func TestFFmpegRunner_CommandString(t *testing.T) {
 	if !strings.Contains(cmdStr, "http://example.com/stream.m3u8") {
 		t.Error("CommandString() should contain stream URL")
 	}
+}
+
+// =============================================================================
+// Socket Mode Tests
+// =============================================================================
+
+func TestFFmpegRunner_SetProgressSocket(t *testing.T) {
+	t.Run("socket_mode_uses_unix_protocol", func(t *testing.T) {
+		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
+		cfg.StatsEnabled = true
+		runner := NewFFmpegRunner(cfg)
+
+		// Before setting socket, should use pipe:1
+		args := runner.buildArgs()
+		cmdStr := strings.Join(args, " ")
+		if !strings.Contains(cmdStr, "-progress pipe:1") {
+			t.Errorf("Without socket, should use pipe:1, got: %s", cmdStr)
+		}
+
+		// Set socket path
+		runner.SetProgressSocket("/tmp/test.sock")
+
+		// After setting socket, should use unix://
+		args = runner.buildArgs()
+		cmdStr = strings.Join(args, " ")
+		if !strings.Contains(cmdStr, "-progress unix:///tmp/test.sock") {
+			t.Errorf("With socket, should use unix://, got: %s", cmdStr)
+		}
+		if strings.Contains(cmdStr, "pipe:1") {
+			t.Error("With socket, should not use pipe:1")
+		}
+	})
+
+	t.Run("socket_path_cleared_restores_pipe", func(t *testing.T) {
+		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
+		cfg.StatsEnabled = true
+		runner := NewFFmpegRunner(cfg)
+
+		runner.SetProgressSocket("/tmp/test.sock")
+		runner.SetProgressSocket("") // Clear socket
+
+		args := runner.buildArgs()
+		cmdStr := strings.Join(args, " ")
+		if !strings.Contains(cmdStr, "-progress pipe:1") {
+			t.Errorf("After clearing socket, should use pipe:1, got: %s", cmdStr)
+		}
+	})
+
+	t.Run("stats_disabled_no_progress_flag", func(t *testing.T) {
+		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
+		cfg.StatsEnabled = false
+		runner := NewFFmpegRunner(cfg)
+
+		runner.SetProgressSocket("/tmp/test.sock")
+
+		args := runner.buildArgs()
+		cmdStr := strings.Join(args, " ")
+		if strings.Contains(cmdStr, "-progress") {
+			t.Errorf("With stats disabled, should not have -progress flag, got: %s", cmdStr)
+		}
+	})
+}
+
+func TestFFmpegRunner_DebugLogging(t *testing.T) {
+	t.Run("debug_logging_only_with_socket", func(t *testing.T) {
+		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
+		cfg.StatsEnabled = true
+		cfg.DebugLogging = true
+		runner := NewFFmpegRunner(cfg)
+
+		// Without socket, debug logging should not be enabled
+		args := runner.buildArgs()
+		cmdStr := strings.Join(args, " ")
+		if strings.Contains(cmdStr, "datetime+debug") {
+			t.Error("Without socket, debug logging should not be enabled")
+		}
+
+		// With socket, debug logging should be enabled with timestamps
+		// Uses "repeat+level+datetime+debug" for accurate timing
+		runner.SetProgressSocket("/tmp/test.sock")
+		args = runner.buildArgs()
+		cmdStr = strings.Join(args, " ")
+		if !strings.Contains(cmdStr, "repeat+level+datetime+debug") {
+			t.Errorf("With socket + debug logging, should use -loglevel repeat+level+datetime+debug, got: %s", cmdStr)
+		}
+	})
+
+	t.Run("debug_logging_disabled_uses_normal_level", func(t *testing.T) {
+		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
+		cfg.StatsEnabled = true
+		cfg.DebugLogging = false
+		runner := NewFFmpegRunner(cfg)
+		runner.SetProgressSocket("/tmp/test.sock")
+
+		args := runner.buildArgs()
+		cmdStr := strings.Join(args, " ")
+		// Without debug logging, should use timestamped verbose (not debug)
+		if strings.Contains(cmdStr, "datetime+debug") {
+			t.Error("Without debug logging enabled, should not use debug level")
+		}
+		// Should still use timestamped logging when stats enabled
+		if !strings.Contains(cmdStr, "repeat+level+datetime+verbose") {
+			t.Errorf("Should use timestamped verbose level, got: %s", cmdStr)
+		}
+	})
+}
+
+func TestFFmpegRunner_PerClientUserAgent(t *testing.T) {
+	t.Run("user_agent_includes_client_id", func(t *testing.T) {
+		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
+		runner := NewFFmpegRunner(cfg)
+
+		// BuildCommand sets the clientID
+		_, err := runner.BuildCommand(context.Background(), 42)
+		if err != nil {
+			t.Fatalf("BuildCommand failed: %v", err)
+		}
+
+		args := runner.buildArgs()
+		cmdStr := strings.Join(args, " ")
+		if !strings.Contains(cmdStr, "go-ffmpeg-hls-swarm/1.0/client-42") {
+			t.Errorf("User-Agent should include client ID, got: %s", cmdStr)
+		}
+	})
+
+	t.Run("user_agent_zero_client_id", func(t *testing.T) {
+		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
+		runner := NewFFmpegRunner(cfg)
+
+		// Client ID 0 should use base user agent only
+		_, err := runner.BuildCommand(context.Background(), 0)
+		if err != nil {
+			t.Fatalf("BuildCommand failed: %v", err)
+		}
+
+		args := runner.buildArgs()
+		cmdStr := strings.Join(args, " ")
+		if strings.Contains(cmdStr, "/client-0") {
+			t.Error("Client ID 0 should not append /client-0")
+		}
+		if !strings.Contains(cmdStr, "-user_agent go-ffmpeg-hls-swarm/1.0") {
+			t.Errorf("Should use base user agent, got: %s", cmdStr)
+		}
+	})
+
+	t.Run("custom_user_agent_with_client_id", func(t *testing.T) {
+		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
+		cfg.UserAgent = "MyApp/2.0"
+		runner := NewFFmpegRunner(cfg)
+
+		_, err := runner.BuildCommand(context.Background(), 100)
+		if err != nil {
+			t.Fatalf("BuildCommand failed: %v", err)
+		}
+
+		args := runner.buildArgs()
+		cmdStr := strings.Join(args, " ")
+		if !strings.Contains(cmdStr, "MyApp/2.0/client-100") {
+			t.Errorf("Custom user agent should include client ID, got: %s", cmdStr)
+		}
+	})
 }
 
 // =============================================================================

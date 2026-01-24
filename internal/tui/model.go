@@ -18,7 +18,8 @@ type TickMsg time.Time
 
 // StatsMsg carries updated statistics.
 type StatsMsg struct {
-	Stats *stats.AggregatedStats
+	Stats      *stats.AggregatedStats
+	DebugStats *stats.DebugStatsAggregate
 }
 
 // QuitMsg signals the TUI should exit.
@@ -37,6 +38,7 @@ type Model struct {
 
 	// Current state
 	stats       *stats.AggregatedStats
+	debugStats  *stats.DebugStatsAggregate
 	startTime   time.Time
 	lastUpdate  time.Time
 	detailedView bool
@@ -48,6 +50,9 @@ type Model struct {
 	// Stats source (for fetching updates)
 	statsSource StatsSource
 
+	// Debug stats source (optional - for layered metrics)
+	debugStatsSource DebugStatsSource
+
 	// Quit flag
 	quitting bool
 }
@@ -57,25 +62,33 @@ type StatsSource interface {
 	GetAggregatedStats() *stats.AggregatedStats
 }
 
+// DebugStatsSource provides layered debug statistics (HLS/HTTP/TCP).
+// This is optional - if not provided, the layered dashboard won't be shown.
+type DebugStatsSource interface {
+	GetDebugStats() stats.DebugStatsAggregate
+}
+
 // Config holds TUI configuration.
 type Config struct {
-	TargetClients int
-	StreamURL     string
-	MetricsAddr   string
-	StatsSource   StatsSource
+	TargetClients    int
+	StreamURL        string
+	MetricsAddr      string
+	StatsSource      StatsSource
+	DebugStatsSource DebugStatsSource
 }
 
 // New creates a new TUI model.
 func New(cfg Config) Model {
 	return Model{
-		targetClients: cfg.TargetClients,
-		streamURL:     cfg.StreamURL,
-		metricsAddr:   cfg.MetricsAddr,
-		statsSource:   cfg.StatsSource,
-		startTime:     time.Now(),
-		lastUpdate:    time.Now(),
-		width:         80,
-		height:        24,
+		targetClients:    cfg.TargetClients,
+		streamURL:        cfg.StreamURL,
+		metricsAddr:      cfg.MetricsAddr,
+		statsSource:      cfg.StatsSource,
+		debugStatsSource: cfg.DebugStatsSource,
+		startTime:        time.Now(),
+		lastUpdate:       time.Now(),
+		width:            80,
+		height:           24,
 	}
 }
 
@@ -116,11 +129,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.statsSource != nil {
 			m.stats = m.statsSource.GetAggregatedStats()
 		}
+		// Fetch debug stats for layered dashboard
+		if m.debugStatsSource != nil {
+			ds := m.debugStatsSource.GetDebugStats()
+			m.debugStats = &ds
+		}
 		m.lastUpdate = time.Now()
 		return m, tickCmd()
 
 	case StatsMsg:
 		m.stats = msg.Stats
+		if msg.DebugStats != nil {
+			m.debugStats = msg.DebugStats
+		}
 		m.lastUpdate = time.Now()
 		return m, nil
 
@@ -266,6 +287,26 @@ func formatRate(rate float64) string {
 		return fmt.Sprintf("%.1f/s", rate)
 	}
 	return fmt.Sprintf("%.2f/s", rate)
+}
+
+// formatSuccessRate formats a success counter rate with + prefix and stalled indicator (Phase 7.4).
+// If rate is 0 but count > 0, shows "calculating..." instead of "(stalled)" to indicate
+// we have data but haven't calculated a rate yet (e.g., first TUI tick).
+func formatSuccessRate(rate float64, count int64) string {
+	if rate >= 1000 {
+		return fmt.Sprintf("+%.1fK/s", rate/1000)
+	}
+	if rate >= 1 {
+		return fmt.Sprintf("+%.0f/s", rate)
+	}
+	if rate > 0 {
+		return fmt.Sprintf("+%.1f/s", rate)
+	}
+	// If we have data but no rate yet, show "calculating..." instead of "(stalled)"
+	if count > 0 {
+		return "(calculating...)"
+	}
+	return "(stalled)"
 }
 
 // formatPercent formats a percentage.

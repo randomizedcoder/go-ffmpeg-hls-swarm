@@ -22,9 +22,10 @@ import (
 
 // mockBuilder implements ProcessBuilder for testing.
 type mockBuilder struct {
-	name       string
-	buildFn    func(ctx context.Context, clientID int) (*exec.Cmd, error)
-	buildError error
+	name           string
+	buildFn        func(ctx context.Context, clientID int) (*exec.Cmd, error)
+	buildError     error
+	progressSocket string // Captured for testing
 }
 
 func (m *mockBuilder) BuildCommand(ctx context.Context, clientID int) (*exec.Cmd, error) {
@@ -43,6 +44,10 @@ func (m *mockBuilder) Name() string {
 		return m.name
 	}
 	return "mock"
+}
+
+func (m *mockBuilder) SetProgressSocket(path string) {
+	m.progressSocket = path
 }
 
 // newEchoBuilder creates a builder that runs echo with given output.

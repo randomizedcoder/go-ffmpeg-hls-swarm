@@ -7,6 +7,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/config"
@@ -42,7 +44,14 @@ func run() int {
 	}
 
 	// Initialize logger
-	logger := logging.NewLogger(cfg.LogFormat, "info", cfg.Verbose)
+	// When TUI is enabled, suppress logs to avoid interfering with TUI rendering
+	var logger *slog.Logger
+	if cfg.TUIEnabled {
+		// Use a null logger that discards all output
+		logger = logging.NewLoggerWithWriter(io.Discard, "json", "info")
+	} else {
+		logger = logging.NewLogger(cfg.LogFormat, "info", cfg.Verbose)
+	}
 	logging.SetDefault(logger)
 
 	// Validate configuration

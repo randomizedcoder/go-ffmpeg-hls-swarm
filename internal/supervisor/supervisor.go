@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,6 +25,11 @@ type ProcessBuilder interface {
 
 	// Name returns a human-readable name for this process type.
 	Name() string
+
+	// SetProgressSocket sets the Unix socket path for progress output.
+	// Called by supervisor before BuildCommand() when socket mode is enabled.
+	// The builder should use "-progress unix://<path>" instead of "pipe:1".
+	SetProgressSocket(path string)
 }
 
 // Callbacks contains optional callback functions for supervisor events.
@@ -66,6 +74,13 @@ type Supervisor struct {
 	statsBufferSize    int
 	statsDropThreshold float64
 
+	// Socket-based progress (alternative to stdout pipe)
+	// When enabled, uses Unix socket for progress output instead of stdout.
+	// This provides cleaner separation from stderr debug output.
+	useProgressSocket  bool
+	progressSocketPath string
+	socketModeFailed   atomic.Bool // If true, fall back to pipe on next restart
+
 	// Parsing pipelines (created per runOnce)
 	progressPipeline *parser.Pipeline
 	stderrPipeline   *parser.Pipeline
@@ -88,6 +103,11 @@ type Config struct {
 	StatsEnabled       bool
 	StatsBufferSize    int
 	StatsDropThreshold float64
+
+	// UseProgressSocket enables Unix socket for progress instead of stdout pipe.
+	// This provides cleaner separation from stderr debug output.
+	// Requires ProcessBuilder to implement SetProgressSocket().
+	UseProgressSocket bool
 
 	// Parsers (optional - defaults to NoopParser)
 	ProgressParser parser.LineParser
@@ -129,6 +149,7 @@ func New(cfg Config) *Supervisor {
 		statsEnabled:       cfg.StatsEnabled,
 		statsBufferSize:    bufferSize,
 		statsDropThreshold: threshold,
+		useProgressSocket:  cfg.UseProgressSocket,
 		progressParser:     progressParser,
 		stderrParser:       stderrParser,
 	}
@@ -207,34 +228,115 @@ func (s *Supervisor) Run(ctx context.Context) error {
 func (s *Supervisor) runOnce(ctx context.Context) (exitCode int, uptime time.Duration, err error) {
 	s.setState(StateStarting)
 
-	// Build the command
+	// Determine if we should use socket mode
+	// Fall back to pipe if socket mode previously failed
+	useSocket := s.useProgressSocket && s.statsEnabled && !s.socketModeFailed.Load()
+
+	// Create socket path (supervisor owns the socket lifecycle)
+	var socketPath string
+	if useSocket {
+		socketPath = filepath.Join(os.TempDir(),
+			fmt.Sprintf("hls_%d_%d.sock", os.Getpid(), s.clientID))
+		s.progressSocketPath = socketPath
+	}
+
+	// Belt-and-suspenders cleanup for socket file
+	defer func() {
+		if socketPath != "" {
+			os.Remove(socketPath) // Idempotent - ok if already removed
+		}
+	}()
+
+	// Create pipelines for this run
+	if s.statsEnabled {
+		s.progressPipeline = parser.NewPipeline(
+			s.clientID, "progress",
+			s.statsBufferSize, s.statsDropThreshold,
+		)
+		s.stderrPipeline = parser.NewPipeline(
+			s.clientID, "stderr",
+			s.statsBufferSize, s.statsDropThreshold,
+		)
+	}
+
+	// Create progress source (socket or pipe)
+	var progressSource parser.LineSource
+	var socketReader *parser.SocketReader
+
+	if useSocket {
+		var socketErr error
+		socketReader, socketErr = parser.NewSocketReader(
+			socketPath,
+			s.progressPipeline,
+			s.logger,
+		)
+		if socketErr != nil {
+			s.logger.Warn("socket_creation_failed",
+				"client_id", s.clientID,
+				"path", socketPath,
+				"error", socketErr,
+				"fallback", "pipe",
+			)
+			// Fall back to pipe mode for this run
+			useSocket = false
+			socketPath = ""
+		} else {
+			progressSource = socketReader
+
+			// Start socket reader goroutine (non-blocking)
+			go socketReader.Run()
+
+			// INVARIANT I3: Wait for socket to be ready before starting FFmpeg
+			<-socketReader.Ready()
+
+			// Tell the builder to use socket instead of pipe:1
+			s.builder.SetProgressSocket(socketPath)
+		}
+	}
+
+	// Build the command (after setting socket path if applicable)
 	cmd, err := s.builder.BuildCommand(ctx, s.clientID)
 	if err != nil {
 		s.logger.Error("failed_to_build_command",
 			"client_id", s.clientID,
 			"error", err,
 		)
+		// Clean up socket if created
+		if socketReader != nil {
+			socketReader.Close()
+		}
 		return 1, 0, err
 	}
 
-	// Set up stdout/stderr pipes if stats collection is enabled
-	var stdout, stderr io.ReadCloser
-	if s.statsEnabled {
+	// Set up stdout pipe for progress if not using socket
+	var stdout io.ReadCloser
+	if s.statsEnabled && !useSocket {
 		stdout, err = cmd.StdoutPipe()
 		if err != nil {
 			s.logger.Error("failed_to_create_stdout_pipe",
 				"client_id", s.clientID,
 				"error", err,
 			)
+			if socketReader != nil {
+				socketReader.Close()
+			}
 			return 1, 0, fmt.Errorf("stdout pipe: %w", err)
 		}
+		progressSource = parser.NewPipeReader(stdout, s.progressPipeline)
+	}
 
+	// stderr is always a pipe
+	var stderr io.ReadCloser
+	if s.statsEnabled {
 		stderr, err = cmd.StderrPipe()
 		if err != nil {
 			s.logger.Error("failed_to_create_stderr_pipe",
 				"client_id", s.clientID,
 				"error", err,
 			)
+			if socketReader != nil {
+				socketReader.Close()
+			}
 			return 1, 0, fmt.Errorf("stderr pipe: %w", err)
 		}
 	}
@@ -256,6 +358,9 @@ func (s *Supervisor) runOnce(ctx context.Context) (exitCode int, uptime time.Dur
 			"client_id", s.clientID,
 			"error", err,
 		)
+		if socketReader != nil {
+			socketReader.Close()
+		}
 		return 1, 0, err
 	}
 
@@ -266,24 +371,20 @@ func (s *Supervisor) runOnce(ctx context.Context) (exitCode int, uptime time.Dur
 		"client_id", s.clientID,
 		"pid", pid,
 		"stats_enabled", s.statsEnabled,
+		"socket_mode", useSocket,
 	)
 
 	// Start parsing pipelines if stats enabled
 	var parseWg sync.WaitGroup
 	if s.statsEnabled {
-		// Create fresh pipelines for this run
-		s.progressPipeline = parser.NewPipeline(
-			s.clientID, "progress",
-			s.statsBufferSize, s.statsDropThreshold,
-		)
-		s.stderrPipeline = parser.NewPipeline(
-			s.clientID, "stderr",
-			s.statsBufferSize, s.statsDropThreshold,
-		)
+		// Start progress reader (pipe mode only - socket mode already started above)
+		if !useSocket && progressSource != nil {
+			go progressSource.Run()
+		}
 
-		// Start Layer 1 (readers) - these never block
-		go s.progressPipeline.RunReader(stdout)
-		go s.stderrPipeline.RunReader(stderr)
+		// Start stderr reader (always pipe)
+		stderrSource := parser.NewPipeReader(stderr, s.stderrPipeline)
+		go stderrSource.Run()
 
 		// Start Layer 2 (parsers)
 		parseWg.Add(2)
@@ -307,6 +408,21 @@ func (s *Supervisor) runOnce(ctx context.Context) (exitCode int, uptime time.Dur
 	uptime = time.Since(s.startTime)
 	exitCode = extractExitCode(waitErr)
 
+	// Close socket reader (if used) - this will close the pipeline channel
+	if socketReader != nil {
+		socketReader.Close()
+
+		// Check if socket connection failed (for future fallback)
+		if socketReader.FailedToConnect() {
+			s.logger.Warn("socket_mode_failed",
+				"client_id", s.clientID,
+				"path", socketPath,
+				"action", "will_use_pipe_on_next_restart",
+			)
+			s.socketModeFailed.Store(true)
+		}
+	}
+
 	// Wait for parsers to drain remaining data (with timeout)
 	if s.statsEnabled {
 		s.drainParsers(&parseWg)
@@ -317,6 +433,7 @@ func (s *Supervisor) runOnce(ctx context.Context) (exitCode int, uptime time.Dur
 		"pid", pid,
 		"exit_code", exitCode,
 		"uptime", uptime.String(),
+		"socket_mode", useSocket,
 	)
 
 	// Clear command reference
@@ -505,6 +622,22 @@ func (s *Supervisor) IsMetricsDegraded() bool {
 // StatsEnabled returns whether stats collection is enabled.
 func (s *Supervisor) StatsEnabled() bool {
 	return s.statsEnabled
+}
+
+// UseProgressSocket returns whether socket mode is enabled.
+func (s *Supervisor) UseProgressSocket() bool {
+	return s.useProgressSocket
+}
+
+// ProgressSocketPath returns the path to the progress socket.
+// Returns empty string if socket mode is not enabled or not yet created.
+func (s *Supervisor) ProgressSocketPath() string {
+	return s.progressSocketPath
+}
+
+// SocketModeFailed returns true if socket mode failed and will fall back to pipe.
+func (s *Supervisor) SocketModeFailed() bool {
+	return s.socketModeFailed.Load()
 }
 
 // extractExitCode extracts the exit code from a Wait() error.

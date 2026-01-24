@@ -234,13 +234,10 @@ func TestFormatExitSummary_BasicStats(t *testing.T) {
 }
 
 func TestFormatExitSummary_WithLatency(t *testing.T) {
+	// Note: InferredLatency fields removed - use DebugStats for accurate latency
+	// This test verifies that latency sections are no longer in the summary
 	stats := &AggregatedStats{
-		TotalClients:         10,
-		InferredLatencyP50:   50 * time.Millisecond,
-		InferredLatencyP95:   150 * time.Millisecond,
-		InferredLatencyP99:   300 * time.Millisecond,
-		InferredLatencyMax:   500 * time.Millisecond,
-		InferredLatencyCount: 1000,
+		TotalClients: 10,
 	}
 
 	cfg := SummaryConfig{
@@ -250,17 +247,12 @@ func TestFormatExitSummary_WithLatency(t *testing.T) {
 
 	result := FormatExitSummary(stats, cfg)
 
-	if !strings.Contains(result, "Inferred Segment Latency") {
-		t.Error("missing latency section")
+	// Verify latency section was removed (latency is now in DebugStats)
+	if strings.Contains(result, "Inferred Segment Latency") {
+		t.Error("latency section should not be present (moved to DebugStats)")
 	}
-	if !strings.Contains(result, "P50 (median)") {
-		t.Error("missing P50")
-	}
-	if !strings.Contains(result, "50 ms") {
-		t.Error("missing P50 value")
-	}
-	if !strings.Contains(result, "Inferred from FFmpeg events") {
-		t.Error("missing latency disclaimer")
+	if strings.Contains(result, "Inferred from FFmpeg events") {
+		t.Error("latency disclaimer should not be present")
 	}
 }
 
@@ -491,36 +483,45 @@ func TestRenderFootnotes_Empty(t *testing.T) {
 }
 
 func TestRenderFootnotes_WithLatency(t *testing.T) {
+	// Note: Latency footnote removed - use DebugStats for accurate latency
+	// This test verifies that latency footnote is no longer present
 	stats := &AggregatedStats{
-		TotalClients:         10,
-		InferredLatencyCount: 100,
+		TotalClients: 10,
 	}
 
 	result := renderFootnotes(stats)
 
-	if !strings.Contains(result, "[1] Latency is inferred") {
-		t.Error("missing latency footnote")
+	// Verify latency footnote was removed
+	if strings.Contains(result, "Latency is inferred") {
+		t.Error("latency footnote should not be present (moved to DebugStats)")
+	}
+	if strings.Contains(result, "[1]") {
+		t.Error("footnote [1] should not be present (was latency)")
 	}
 }
 
 func TestRenderFootnotes_AllFootnotes(t *testing.T) {
+	// Note: Footnote [1] (latency) removed - use DebugStats for accurate latency
+	// Now [2] is unknown URLs and [3] is peak drop rate
 	stats := &AggregatedStats{
-		TotalClients:         10,
-		InferredLatencyCount: 100,
-		TotalUnknownReqs:     50,
-		PeakDropRate:         0.05,
+		TotalClients:     10,
+		TotalUnknownReqs: 50,
+		PeakDropRate:     0.05,
 	}
 
 	result := renderFootnotes(stats)
 
-	if !strings.Contains(result, "[1]") {
-		t.Error("missing footnote 1")
+	// Verify [1] (latency) is not present
+	if strings.Contains(result, "[1]") {
+		t.Error("footnote [1] should not be present (was latency, now removed)")
 	}
+	// Verify [2] (unknown URLs) is present
 	if !strings.Contains(result, "[2]") {
-		t.Error("missing footnote 2")
+		t.Error("missing footnote [2] (unknown URLs)")
 	}
+	// Verify [3] (peak drop rate) is present
 	if !strings.Contains(result, "[3]") {
-		t.Error("missing footnote 3")
+		t.Error("missing footnote [3] (peak drop rate)")
 	}
 }
 
@@ -540,11 +541,7 @@ func BenchmarkFormatExitSummary(b *testing.B) {
 		AverageSpeed:      1.05,
 		ClientsAboveRealtime: 90,
 		ClientsBelowRealtime: 10,
-		InferredLatencyP50:   50 * time.Millisecond,
-		InferredLatencyP95:   150 * time.Millisecond,
-		InferredLatencyP99:   300 * time.Millisecond,
-		InferredLatencyMax:   500 * time.Millisecond,
-		InferredLatencyCount: 10000,
+		// Note: InferredLatency fields removed - use DebugStats for accurate latency
 		TotalHTTPErrors: map[int]int64{
 			503: 10,
 			404: 5,

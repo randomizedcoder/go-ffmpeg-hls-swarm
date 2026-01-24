@@ -54,6 +54,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 		// Stats collection
 		StatsEnabled:  cfg.StatsEnabled,
 		StatsLogLevel: cfg.StatsLogLevel,
+		DebugLogging:  cfg.DebugLogging,
 	}
 	runner := process.NewFFmpegRunner(ffmpegConfig)
 
@@ -94,6 +95,8 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 		StatsEnabled:       cfg.StatsEnabled,
 		StatsBufferSize:    cfg.StatsBufferSize,
 		StatsDropThreshold: cfg.StatsDropThreshold,
+		// Socket mode (experimental)
+		UseProgressSocket: cfg.UseProgressSocket,
 		Callbacks: ManagerCallbacks{
 			OnClientStateChange: orch.onStateChange,
 			OnClientStart:       orch.onStart,
@@ -335,14 +338,21 @@ func (o *Orchestrator) GetStatsAggregator() *stats.StatsAggregator {
 	return o.clientManager.GetStatsAggregator()
 }
 
+// GetDebugStats returns aggregated debug statistics (HLS/HTTP/TCP layers).
+// This is the primary method for the layered TUI dashboard (Phase 7).
+func (o *Orchestrator) GetDebugStats() stats.DebugStatsAggregate {
+	return o.clientManager.GetDebugStats()
+}
+
 // runWithTUI runs the orchestrator with the TUI dashboard.
 func (o *Orchestrator) runWithTUI(ctx context.Context, cancel context.CancelFunc, sigCh <-chan os.Signal, durationTimer <-chan time.Time) {
 	// Create TUI model
 	tuiModel := tui.New(tui.Config{
-		TargetClients: o.config.Clients,
-		StreamURL:     o.config.StreamURL,
-		MetricsAddr:   o.config.MetricsAddr,
-		StatsSource:   o,
+		TargetClients:    o.config.Clients,
+		StreamURL:        o.config.StreamURL,
+		MetricsAddr:      o.config.MetricsAddr,
+		StatsSource:      o,
+		DebugStatsSource: o,
 	})
 
 	// Create Bubble Tea program
@@ -424,11 +434,12 @@ func (o *Orchestrator) convertToMetricsUpdate(aggStats *stats.AggregatedStats) *
 		TotalTimeouts:      aggStats.TotalTimeouts,
 		ErrorRate:          aggStats.ErrorRate,
 
-		// Latency (inferred)
-		InferredLatencyP50: aggStats.InferredLatencyP50,
-		InferredLatencyP95: aggStats.InferredLatencyP95,
-		InferredLatencyP99: aggStats.InferredLatencyP99,
-		InferredLatencyMax: aggStats.InferredLatencyMax,
+		// Latency (inferred) - removed, use DebugStats for accurate latency
+		// Setting to zero for backward compatibility with metrics package
+		InferredLatencyP50: 0,
+		InferredLatencyP95: 0,
+		InferredLatencyP99: 0,
+		InferredLatencyMax: 0,
 
 		// Health
 		ClientsAboveRealtime: aggStats.ClientsAboveRealtime,

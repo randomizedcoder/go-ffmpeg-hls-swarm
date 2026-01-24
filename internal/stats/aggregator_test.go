@@ -175,26 +175,35 @@ func TestStatsAggregator_AggregateDrift(t *testing.T) {
 	agg := NewStatsAggregator(0.01)
 
 	stats1 := NewClientStats(1)
-	stats1.driftMu.Lock()
-	stats1.CurrentDrift = 2 * time.Second
-	stats1.MaxDrift = 3 * time.Second
-	stats1.driftMu.Unlock()
+	// Wait enough to create drift values
+	// Drift = (Now - StartTime) - PlaybackTime
+	// For drift of ~3s: wait 4s, then set playbackTime to 1s (drift = 4s - 1s = 3s)
+	time.Sleep(4 * time.Second)
+	elapsed1 := time.Since(stats1.StartTime)
+	// PlaybackTime = elapsed - 3s, so drift ≈ 3s
+	stats1.UpdateDrift(int64((elapsed1 - 3*time.Second).Microseconds()))
 
 	stats2 := NewClientStats(2)
-	stats2.driftMu.Lock()
-	stats2.CurrentDrift = 6 * time.Second // High drift
-	stats2.MaxDrift = 8 * time.Second
-	stats2.driftMu.Unlock()
+	// Set high drift (6s current, 8s max)
+	// First set to 8s to establish max, then to 6s for current
+	time.Sleep(9 * time.Second)
+	elapsed2 := time.Since(stats2.StartTime)
+	// First update: playbackTime = elapsed - 8s, so drift = 8s (establishes max)
+	stats2.UpdateDrift(int64((elapsed2 - 8*time.Second).Microseconds()))
+	// Second update: playbackTime = elapsed - 6s, so drift = 6s (current), max stays 8s
+	stats2.UpdateDrift(int64((elapsed2 - 6*time.Second).Microseconds()))
 
 	agg.AddClient(stats1)
 	agg.AddClient(stats2)
 
 	result := agg.Aggregate()
 
-	if result.MaxDrift != 8*time.Second {
-		t.Errorf("MaxDrift = %v, want 8s", result.MaxDrift)
+	// Verify max drift is approximately 8s (allow some timing variance)
+	if result.MaxDrift < 7*time.Second || result.MaxDrift > 9*time.Second {
+		t.Errorf("MaxDrift = %v, want ~8s (7-9s range)", result.MaxDrift)
 	}
-	if result.ClientsWithHighDrift != 1 { // Only stats2 has high drift
+	// Verify that stats2 (with high drift) is counted
+	if result.ClientsWithHighDrift != 1 { // Only stats2 has high drift (>5s)
 		t.Errorf("ClientsWithHighDrift = %d, want 1", result.ClientsWithHighDrift)
 	}
 }
@@ -317,40 +326,9 @@ func TestStatsAggregator_InstantaneousRates(t *testing.T) {
 	}
 }
 
-func TestStatsAggregator_AggregateLatency(t *testing.T) {
-	agg := NewStatsAggregator(0.01)
-
-	// Create clients with latency samples
-	stats1 := NewClientStats(1)
-	for i := 1; i <= 50; i++ {
-		stats1.recordInferredLatency(time.Duration(i) * time.Millisecond)
-	}
-
-	stats2 := NewClientStats(2)
-	for i := 51; i <= 100; i++ {
-		stats2.recordInferredLatency(time.Duration(i) * time.Millisecond)
-	}
-
-	agg.AddClient(stats1)
-	agg.AddClient(stats2)
-
-	result := agg.Aggregate()
-
-	// Should have combined latency count
-	if result.InferredLatencyCount != 100 {
-		t.Errorf("InferredLatencyCount = %d, want 100", result.InferredLatencyCount)
-	}
-
-	// P50 should be around 50ms (middle of 1-100)
-	if result.InferredLatencyP50 < 30*time.Millisecond || result.InferredLatencyP50 > 70*time.Millisecond {
-		t.Errorf("InferredLatencyP50 = %v, expected ~50ms", result.InferredLatencyP50)
-	}
-
-	// Max should be 100ms
-	if result.InferredLatencyMax != 100*time.Millisecond {
-		t.Errorf("InferredLatencyMax = %v, want 100ms", result.InferredLatencyMax)
-	}
-}
+// TestStatsAggregator_AggregateLatency removed - inferred latency is no longer tracked.
+// Latency metrics are now provided by DebugEventParser using accurate FFmpeg timestamps.
+// See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md for details.
 
 func TestStatsAggregator_Reset(t *testing.T) {
 	agg := NewStatsAggregator(0.01)
@@ -485,7 +463,7 @@ func BenchmarkStatsAggregator_Aggregate(b *testing.B) {
 		for j := 0; j < 100; j++ {
 			stats.IncrementManifestRequests()
 			stats.IncrementSegmentRequests()
-			stats.recordInferredLatency(time.Duration(j) * time.Millisecond)
+			// Note: Latency tracking removed - use DebugEventParser for accurate latency
 		}
 		stats.UpdateCurrentBytes(int64(i * 1000))
 		stats.UpdateSpeed(1.0)

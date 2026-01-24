@@ -23,7 +23,8 @@ This document provides a technical deep dive into FFmpeg's HLS implementation, b
 - [10. Progress Protocol for Metrics](#10-progress-protocol-for-metrics)
 - [11. Command Construction for go-ffmpeg-hls-swarm](#11-command-construction-for-go-ffmpeg-hls-swarm)
 - [12. Debug Output for Detailed Metrics](#12-debug-output-for-detailed-metrics)
-- [13. Clean Output Separation Strategies](#13-clean-output-separation-strategies)
+- [13. FFmpeg HLS Source Code Log Events Reference](#13-ffmpeg-hls-source-code-log-events-reference)
+- [14. Clean Output Separation Strategies](#14-clean-output-separation-strategies)
 
 ---
 
@@ -852,9 +853,186 @@ progress=continue
 
 **Recommendation**: Use `-loglevel verbose` for standard load testing. Only use `-loglevel debug` for detailed analysis with fewer clients.
 
+### Timestamped Debug Logging (Recommended for Metrics)
+
+FFmpeg supports adding timestamps to every log line using the `datetime` flag:
+
+```bash
+ffmpeg -hide_banner -nostdin \
+  -loglevel repeat+level+datetime+debug \
+  -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 \
+  -rw_timeout 15000000 \
+  -i http://origin/stream.m3u8 \
+  -map 0 -c copy -f null -
+```
+
+**Output format**:
+```
+2026-01-23 08:12:52.614 [tcp @ 0x5647feb5e100] [verbose] Starting connection attempt to 10.177.0.10 port 17080
+2026-01-23 08:12:52.615 [tcp @ 0x5647feb5e100] [verbose] Successfully connected to 10.177.0.10 port 17080
+2026-01-23 08:12:52.615 [hls @ 0x5647feb5a900] [verbose] HLS request for url 'http://10.177.0.10:17080/seg38024.ts', offset 0, playlist 0
+```
+
+**Benefits**:
+- Millisecond-precision timestamps directly from FFmpeg
+- Accurate timing even if logs back up in channels
+- Level tags (`[verbose]`, `[debug]`, `[info]`) for filtering
+- Component tags (`[tcp @...]`, `[hls @...]`) for grouping
+
+**Log Level Flags**:
+| Flag | Description |
+|------|-------------|
+| `repeat` | Show repeated messages (don't collapse) |
+| `level` | Add level tag (`[debug]`, `[verbose]`, etc.) |
+| `datetime` | Add timestamp prefix (`YYYY-MM-DD HH:MM:SS.mmm`) |
+| `debug` | Log level (can be `error`, `warning`, `info`, `verbose`, `debug`) |
+
+**Combined**: `-loglevel repeat+level+datetime+debug` enables all features.
+
 ---
 
-## 13. Clean Output Separation Strategies
+## 13. FFmpeg HLS Source Code Log Events Reference
+
+This section documents ALL log events from FFmpeg's HLS, HTTP, and network components based on source code analysis of `libavformat/hls.c`, `libavformat/http.c`, and `libavformat/network.c`.
+
+### 13.1 Log Event Categories
+
+#### HLS Demuxer Events (`libavformat/hls.c`)
+
+| Level | Message Pattern | Source Line | Use Case |
+|-------|-----------------|-------------|----------|
+| **VERBOSE** | `HLS request for url '%s', offset %d, playlist %d` | L1392 | **PRIMARY** - Segment start timing |
+| **VERBOSE** | `Skip ('%s')` | L985 | M3U8 line skipped |
+| **DEBUG** | `Media sequence change (%d -> %d)` | L1086 | Sequence tracking |
+| **DEBUG** | `MEDIA-SEQUENCE higher than...` | L904 | Sequence discontinuity |
+| **DEBUG** | `Downloading an initialization section of size %d` | L1480 | fMP4 init section |
+| **DEBUG** | `Before/After avformat_find_stream_info()` | L1480 | Stream probe info |
+| **INFO** | `Now receiving playlist %d, segment %d` | L2456 | Playlist switch |
+| **INFO** | `No longer receiving playlist %d ('%s')` | L1577 | Playlist stop |
+| **INFO** | `Opening '%s' for reading` (via http) | http.c | **PRIMARY** - HTTP open timing |
+| **WARNING** | `Failed to reload playlist %d` | L1594 | **CRITICAL** - Playlist fetch failed |
+| **WARNING** | `skipping %d segments ahead, expired from playlists` | L1604 | **CRITICAL** - Client too slow |
+| **WARNING** | `The m3u8 list sequence may have been wrapped` | L1618 | Sequence wrap |
+| **WARNING** | `Failed to open segment %d of playlist %d` | L1677, L1711 | **CRITICAL** - Segment fetch failed |
+| **WARNING** | `Segment %d of playlist %d failed too many times, skipping` | L1681 | **CRITICAL** - Segment skip |
+| **WARNING** | `Failed to open an initialization section in playlist %d` | L1467 | Init section failed |
+| **WARNING** | `Empty playlist` | L2154 | Empty M3U8 |
+| **WARNING** | `parse_playlist error %s [%s]` | L2164 | M3U8 parse error |
+| **WARNING** | `Empty segment [%s]` | L2175 | Zero-byte segment |
+| **WARNING** | `Cannot get correct #EXTINF value` | L1055 | Duration parse error |
+| **WARNING** | `Media sequence changed unexpectedly` | L1091 | Unexpected sequence |
+| **ERROR** | `Unable to seek to offset %d of HLS segment '%s'` | L1437 | Seek failure |
+| **ERROR** | `Unable to open/read key file %s` | L1351-1363 | Encryption key error |
+| **ERROR** | `Error when loading first segment '%s'` | L2332 | Initial segment failed |
+| **ERROR** | `Too large HLS ID3 tag (%d > %d bytes)` | L1286 | ID3 tag overflow |
+| **ERROR** | `URL %s is not in allowed_segment_extensions` | L752 | Extension blocked |
+
+#### HTTP Protocol Events (`libavformat/http.c`)
+
+| Level | Message Pattern | Source Line | Use Case |
+|-------|-----------------|-------------|----------|
+| **INFO** | `Opening '%s' for reading` | L563 | **PRIMARY** - HTTP request start |
+| **DEBUG** | `request: GET %s HTTP/1.1...` | L1599 | HTTP request details |
+| **TRACE** | `header='%s'` | L1425 | Response headers |
+| **WARNING** | `HTTP error %d %s` | L873 | **CRITICAL** - 4xx/5xx errors |
+| **WARNING** | `Will reconnect at %d in %d second(s)` | L432, L1805 | **CRITICAL** - Reconnect attempt |
+| **WARNING** | `Cannot reuse HTTP connection for different host` | L529 | Connection reuse blocked |
+| **WARNING** | `inflate return value: %d, %s` | L1751 | Decompression error |
+| **ERROR** | `Failed to reconnect at %d` | L1814 | **CRITICAL** - Reconnect failed |
+| **ERROR** | `URL read error: %s` | L1966 | **CRITICAL** - Read failure |
+| **ERROR** | `overlong headers` | L1602 | Response too large |
+| **ERROR** | `Invalid chunk size %d` | L1686 | Chunked encoding error |
+
+#### Network/TCP Events (`libavformat/network.c`)
+
+| Level | Message Pattern | Source Line | Use Case |
+|-------|-----------------|-------------|----------|
+| **VERBOSE** | `Starting connection attempt to %s port %s` | L432 | **PRIMARY** - TCP connect start |
+| **VERBOSE** | `Successfully connected to %s port %s` | L488 | **PRIMARY** - TCP connect complete |
+| **VERBOSE** | `Connection attempt to %s port %s failed: %s` | L503 | TCP connect failure |
+| **ERROR** | `Connection to %s failed: %s` | L519 | **CRITICAL** - All attempts failed |
+
+### 13.2 Timing Calculations from Log Events
+
+Looking at the user's sample output:
+
+```
+2026-01-23 08:44:23.117 [hls @ ...] [verbose] HLS request for url '.../seg38968.ts', offset 0, playlist 0
+2026-01-23 08:44:23.117 [http @ ...] [info] Opening '.../seg38968.ts' for reading
+2026-01-23 08:44:23.117 [http @ ...] [debug] request: GET /seg38968.ts HTTP/1.1
+...
+2026-01-23 08:44:23.119 [hls @ ...] [verbose] HLS request for url '.../seg38969.ts', offset 0, playlist 0
+```
+
+#### Segment Download Wall Time
+
+**Definition**: Time from HLS request to next HLS request (for same playlist).
+
+```
+Segment N Start: "HLS request for url 'segN.ts'" timestamp
+Segment N End:   "HLS request for url 'segN+1.ts'" timestamp
+Wall Time = End - Start
+```
+
+**Example**:
+- seg38968.ts: 08:44:23.117 → 08:44:23.119 = **2ms**
+- seg38969.ts: 08:44:23.119 → 08:44:23.120 = **1ms**
+
+**Why so fast?** Keep-alive connections. TCP is already established, so only HTTP request/response overhead.
+
+#### TCP Connect Latency
+
+**Definition**: Time from TCP "Starting connection" to "Successfully connected".
+
+```
+TCP Start:     "Starting connection attempt to 10.177.0.10 port 17080" timestamp
+TCP Connected: "Successfully connected to 10.177.0.10 port 17080" timestamp
+Latency = Connected - Start
+```
+
+**Note**: Only occurs for NEW connections. With keep-alive, most segments reuse existing connections, so TCP events are rare after initial setup.
+
+#### Playlist Refresh Jitter
+
+**Definition**: Deviation from expected refresh interval.
+
+```
+Expected: HLS target duration (e.g., 2.0s)
+Actual:   Time between consecutive "Opening '...m3u8' for reading"
+Jitter = Actual - Expected
+```
+
+### 13.3 Critical Events for Load Testing
+
+When stress testing an origin server, watch for these events:
+
+| Event | Log Pattern | Meaning | Severity |
+|-------|-------------|---------|----------|
+| **Segment Slowdown** | Wall time > 100ms | Origin under load | ⚠️ Warning |
+| **HTTP 5xx Error** | `HTTP error 5xx` | Origin failure | 🔴 Critical |
+| **HTTP 503** | `HTTP error 503` | Service unavailable | 🔴 Critical |
+| **Reconnect** | `Will reconnect at` | Connection lost | ⚠️ Warning |
+| **Segment Skip** | `failed too many times, skipping` | Data loss | 🔴 Critical |
+| **Playlist Fail** | `Failed to reload playlist` | Live edge lost | 🔴 Critical |
+| **Segment Expired** | `skipping %d segments ahead` | Client too slow | ⚠️ Warning |
+| **Connection Refused** | `Connection refused` | Origin overloaded | 🔴 Critical |
+
+### 13.4 Events NOT Currently Parsed (Enhancement Candidates)
+
+Our current `DebugEventParser` handles the primary timing events. These additional events could provide more insight:
+
+| Event | Log Pattern | Potential Use |
+|-------|-------------|---------------|
+| `HTTP error %d %s` | HTTP 4xx/5xx tracking | Error rate metrics |
+| `Will reconnect at` | Reconnection count | Connection stability |
+| `Failed to open segment` | Per-segment failure rate | Reliability metrics |
+| `skipping %d segments ahead` | Segment skip count | Client capacity |
+| `failed too many times, skipping` | Retry exhaustion | Retry policy tuning |
+| `Opening '%s' for reading` (http) | HTTP open timing | Request latency vs download time |
+
+---
+
+## 14. Clean Output Separation Strategies
 
 FFmpeg outputs can be complex to parse when mixed together. Here are strategies for clean separation.
 

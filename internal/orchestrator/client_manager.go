@@ -12,6 +12,15 @@ import (
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/supervisor"
 )
 
+// debugRateSnapshot holds values for calculating instantaneous rates for debug stats.
+type debugRateSnapshot struct {
+	timestamp    time.Time
+	segments     int64
+	playlists    int64
+	httpRequests int64
+	tcpConnects  int64
+}
+
 // ClientManager coordinates multiple client supervisors.
 // It handles starting clients, tracking their state, and coordinating shutdown.
 type ClientManager struct {
@@ -30,15 +39,21 @@ type ClientManager struct {
 	statsBufferSize    int
 	statsDropThreshold float64
 
+	// Socket mode (experimental)
+	useProgressSocket bool
+
 	// Per-client progress tracking (Phase 2)
 	// Maps clientID -> latest ProgressUpdate
 	latestProgress map[int]*parser.ProgressUpdate
 	progressMu     sync.RWMutex
 
-	// Per-client HLS event tracking (Phase 3)
-	// Maps clientID -> HLSEventParser
-	hlsParsers map[int]*parser.HLSEventParser
-	hlsMu      sync.RWMutex
+	// Per-client debug event tracking (Phase 7 - replaces HLSEventParser)
+	// Maps clientID -> DebugEventParser (for layered metrics: HLS/HTTP/TCP)
+	debugParsers map[int]*parser.DebugEventParser
+	debugMu      sync.RWMutex
+
+	// Rate tracking for debug stats (Phase 7.4) - Lock-free using atomic.Value
+	prevDebugSnapshot atomic.Value // *debugRateSnapshot
 
 	// Per-client stats (Phase 4/5)
 	// Maps clientID -> ClientStats
@@ -51,14 +66,6 @@ type ClientManager struct {
 	// Aggregated stats (legacy - kept for backward compatibility)
 	totalBytesDownloaded atomic.Int64
 	totalProgressUpdates atomic.Int64
-
-	// HLS aggregated stats (Phase 3)
-	totalManifestRequests atomic.Int64
-	totalSegmentRequests  atomic.Int64
-	totalUnknownRequests  atomic.Int64
-	totalHTTPErrors       atomic.Int64
-	totalReconnections    atomic.Int64
-	totalTimeouts         atomic.Int64
 
 	// Supervisors indexed by client ID
 	supervisors map[int]*supervisor.Supervisor
@@ -103,6 +110,9 @@ type ManagerConfig struct {
 	StatsEnabled       bool
 	StatsBufferSize    int
 	StatsDropThreshold float64
+
+	// Socket mode (experimental)
+	UseProgressSocket bool
 }
 
 // NewClientManager creates a new ClientManager.
@@ -119,7 +129,7 @@ func NewClientManager(cfg ManagerConfig) *ClientManager {
 		threshold = 0.01
 	}
 
-	return &ClientManager{
+	cm := &ClientManager{
 		builder:            cfg.Builder,
 		logger:             cfg.Logger,
 		backoffConfig:      cfg.BackoffConfig,
@@ -127,14 +137,18 @@ func NewClientManager(cfg ManagerConfig) *ClientManager {
 		statsEnabled:       cfg.StatsEnabled,
 		statsBufferSize:    bufferSize,
 		statsDropThreshold: threshold,
+		useProgressSocket:  cfg.UseProgressSocket,
 		callbacks:          cfg.Callbacks,
 		supervisors:        make(map[int]*supervisor.Supervisor),
 		latestProgress:     make(map[int]*parser.ProgressUpdate),
-		hlsParsers:         make(map[int]*parser.HLSEventParser),
+		debugParsers:       make(map[int]*parser.DebugEventParser),
 		clientStats:        make(map[int]*stats.ClientStats),
 		aggregator:         stats.NewStatsAggregator(threshold),
 		configSeed:         time.Now().UnixNano(),
 	}
+	// Initialize atomic.Value with first snapshot (lock-free)
+	cm.prevDebugSnapshot.Store(&debugRateSnapshot{timestamp: time.Now()})
+	return cm
 }
 
 // StartClient creates and starts a new supervised client.
@@ -163,17 +177,24 @@ func (m *ClientManager) StartClient(ctx context.Context, clientID int) {
 		progressParser = parser.NewProgressParser(m.createProgressCallback(clientID, clientStats))
 	}
 
-	// Create HLS event parser for this client (Phase 3)
+	// Create debug event parser for this client (Phase 7 - layered metrics)
+	// Replaces HLSEventParser with comprehensive HLS/HTTP/TCP tracking
 	var stderrParser parser.LineParser
-	var hlsParser *parser.HLSEventParser
+	var debugParser *parser.DebugEventParser
 	if m.statsEnabled {
-		hlsParser = parser.NewHLSEventParser(clientID, m.createHLSEventCallback(clientID, clientStats))
-		stderrParser = hlsParser
+		// Target duration for jitter calculation (2s is HLS default)
+		targetDuration := 2 * time.Second
+		debugParser = parser.NewDebugEventParser(
+			clientID,
+			targetDuration,
+			m.createDebugEventCallback(clientID, clientStats),
+		)
+		stderrParser = debugParser
 
 		// Store reference for stats aggregation
-		m.hlsMu.Lock()
-		m.hlsParsers[clientID] = hlsParser
-		m.hlsMu.Unlock()
+		m.debugMu.Lock()
+		m.debugParsers[clientID] = debugParser
+		m.debugMu.Unlock()
 	}
 
 	// Create supervisor with callbacks
@@ -187,7 +208,9 @@ func (m *ClientManager) StartClient(ctx context.Context, clientID int) {
 		StatsEnabled:       m.statsEnabled,
 		StatsBufferSize:    m.statsBufferSize,
 		StatsDropThreshold: m.statsDropThreshold,
-		// Parsers (Phase 2 - ProgressParser, Phase 3 - HLSEventParser)
+		// Socket mode (experimental)
+		UseProgressSocket: m.useProgressSocket,
+		// Parsers (Phase 2 - ProgressParser, Phase 7 - DebugEventParser)
 		ProgressParser: progressParser,
 		StderrParser:   stderrParser,
 		Callbacks: supervisor.Callbacks{
@@ -357,14 +380,9 @@ func (m *ClientManager) createProgressCallback(clientID int, clientStats *stats.
 			clientStats.UpdateSpeed(update.Speed)
 			clientStats.UpdateDrift(update.OutTimeUS)
 
-			// Complete oldest in-flight segment for latency tracking
-			// Progress updates indicate that a segment download likely completed.
-			// This is "inferred latency" - see METRICS_ENHANCEMENT_DESIGN.md
-			clientStats.CompleteOldestSegment()
+			// Note: Segment completion is now handled automatically by DebugEventParser
+			// when it sees a new HLS request. No need for inferred latency tracking.
 		}
-
-		// Also complete via HLS parser (legacy - for backward compatibility)
-		m.CompleteSegmentForClient(clientID)
 
 		// Log stalling detection at debug level
 		if update.IsStalling() {
@@ -432,107 +450,254 @@ func (m *ClientManager) GetClientProgress(clientID int) *parser.ProgressUpdate {
 	return nil
 }
 
-// createHLSEventCallback creates a callback for the HLSEventParser.
-// This callback is called for each HLS event (request, error, reconnect, timeout).
-func (m *ClientManager) createHLSEventCallback(clientID int, clientStats *stats.ClientStats) parser.HLSEventCallback {
-	return func(event *parser.HLSEvent) {
-		// Update legacy counters
+// createDebugEventCallback creates a callback for the DebugEventParser.
+// This callback handles all debug events from the HLS/HTTP/TCP layers.
+func (m *ClientManager) createDebugEventCallback(clientID int, clientStats *stats.ClientStats) parser.DebugEventCallback {
+	return func(event *parser.DebugEvent) {
+		// Track bytes from Content-Length headers (for live streams where total_size=N/A)
+		// Note: Content-Length headers are logged at TRACE level, so may not be available
+		// For now, we'll track bytes when available, and estimate from segments as fallback
+		if event.Bytes > 0 && clientStats != nil {
+			// Add bytes to current process total
+			// Note: This accumulates bytes from Content-Length headers
+			currentBytes := clientStats.TotalBytes()
+			clientStats.UpdateCurrentBytes(currentBytes + event.Bytes)
+		}
+
+		// Update ClientStats based on event type (accurate metrics from DebugEventParser)
 		switch event.Type {
-		case parser.EventRequest:
-			switch event.URLType {
-			case parser.URLTypeManifest:
-				m.totalManifestRequests.Add(1)
-			case parser.URLTypeSegment:
-				m.totalSegmentRequests.Add(1)
-			case parser.URLTypeUnknown:
-				m.totalUnknownRequests.Add(1)
+		// HLS Layer events
+		case parser.DebugEventHLSRequest:
+			// Segment request
+			if clientStats != nil {
+				clientStats.IncrementSegmentRequests()
+				// Note: Segment tracking is handled by DebugEventParser automatically
+				// No need for OnSegmentRequestStart() - DebugEventParser tracks start/end
 			}
-		case parser.EventHTTPError:
-			m.totalHTTPErrors.Add(1)
-		case parser.EventReconnect:
-			m.totalReconnections.Add(1)
-		case parser.EventTimeout:
-			m.totalTimeouts.Add(1)
-		}
 
-		// Update ClientStats (Phase 4/5)
-		if clientStats != nil {
-			switch event.Type {
-			case parser.EventRequest:
-				switch event.URLType {
-				case parser.URLTypeManifest:
-					clientStats.IncrementManifestRequests()
-				case parser.URLTypeSegment:
-					clientStats.IncrementSegmentRequests()
-					// Track segment request start for latency
-					clientStats.OnSegmentRequestStart(event.URL)
-				case parser.URLTypeInit:
-					clientStats.IncrementInitRequests()
-				case parser.URLTypeUnknown:
-					clientStats.IncrementUnknownRequests()
+		case parser.DebugEventPlaylistOpen:
+			// Manifest refresh
+			if clientStats != nil {
+				clientStats.IncrementManifestRequests()
+			}
+			// Debug: Log first few playlist opens to verify they're being detected
+			// Use DebugStats to get accurate count instead of legacy counter
+			m.debugMu.RLock()
+			if debugParser, ok := m.debugParsers[clientID]; ok {
+				stats := debugParser.Stats()
+				if stats.PlaylistRefreshes <= 3 {
+					m.logger.Debug("playlist_open_detected",
+						"client_id", clientID,
+						"url", event.URL,
+						"playlist_refreshes", stats.PlaylistRefreshes,
+					)
 				}
-			case parser.EventHTTPError:
-				clientStats.RecordHTTPError(event.HTTPCode)
-			case parser.EventReconnect:
-				clientStats.RecordReconnection()
-			case parser.EventTimeout:
-				clientStats.RecordTimeout()
 			}
+			m.debugMu.RUnlock()
+
+		// HTTP Layer events
+		case parser.DebugEventHTTPError:
+			if clientStats != nil {
+				clientStats.RecordHTTPError(event.HTTPCode)
+			}
+
+		case parser.DebugEventReconnect:
+			if clientStats != nil {
+				clientStats.RecordReconnection()
+			}
+
+		// TCP Layer events
+		case parser.DebugEventTCPFailed:
+			if event.FailReason == "timeout" {
+				if clientStats != nil {
+					clientStats.RecordTimeout()
+				}
+			}
+
+		// Error events (critical for load testing)
+		case parser.DebugEventSegmentFailed:
+			// Segment open failures tracked via DebugStats
+			m.logger.Debug("segment_failed",
+				"client_id", clientID,
+				"segment_id", event.SegmentID,
+				"playlist_id", event.PlaylistID,
+			)
+
+		case parser.DebugEventSegmentSkipped:
+			// Data loss! Segment skipped after retries
+			m.logger.Warn("segment_skipped",
+				"client_id", clientID,
+				"segment_id", event.SegmentID,
+				"playlist_id", event.PlaylistID,
+			)
+
+		case parser.DebugEventPlaylistFailed:
+			// Live edge lost!
+			m.logger.Warn("playlist_failed",
+				"client_id", clientID,
+				"playlist_id", event.PlaylistID,
+			)
+
+		case parser.DebugEventSegmentsExpired:
+			// Client fell behind
+			m.logger.Warn("segments_expired",
+				"client_id", clientID,
+				"skip_count", event.SkipCount,
+			)
 		}
 	}
 }
 
-// HLSStats returns aggregated HLS event statistics.
-type HLSStats struct {
-	TotalManifestRequests int64
-	TotalSegmentRequests  int64
-	TotalUnknownRequests  int64 // Fallback bucket for unrecognized URL patterns
-	TotalHTTPErrors       int64
-	TotalReconnections    int64
-	TotalTimeouts         int64
-	ClientsWithHLSStats   int
-}
+// GetDebugStats returns aggregated debug statistics across all clients.
+// This is the primary method for the layered TUI dashboard (Phase 7).
+func (m *ClientManager) GetDebugStats() stats.DebugStatsAggregate {
+	m.debugMu.RLock()
+	defer m.debugMu.RUnlock()
 
-// GetHLSStats returns current HLS event statistics across all clients.
-func (m *ClientManager) GetHLSStats() HLSStats {
-	m.hlsMu.RLock()
-	defer m.hlsMu.RUnlock()
-
-	return HLSStats{
-		TotalManifestRequests: m.totalManifestRequests.Load(),
-		TotalSegmentRequests:  m.totalSegmentRequests.Load(),
-		TotalUnknownRequests:  m.totalUnknownRequests.Load(),
-		TotalHTTPErrors:       m.totalHTTPErrors.Load(),
-		TotalReconnections:    m.totalReconnections.Load(),
-		TotalTimeouts:         m.totalTimeouts.Load(),
-		ClientsWithHLSStats:   len(m.hlsParsers),
+	agg := stats.DebugStatsAggregate{
+		ClientsWithDebugStats: len(m.debugParsers),
 	}
+
+	// Aggregate stats from all debug parsers
+	var totalSegWallTime, totalTCPConnect float64
+	var segWallTimeCount, tcpConnectCount int64
+
+	for _, dp := range m.debugParsers {
+		stats := dp.Stats()
+
+		// HLS Layer
+		agg.SegmentsDownloaded += stats.SegmentCount
+		agg.SegmentsFailed += stats.SegmentFailedCount
+		agg.SegmentsSkipped += stats.SegmentSkippedCount
+		agg.SegmentsExpired += stats.SegmentsExpiredSum
+		agg.PlaylistsRefreshed += stats.PlaylistRefreshes
+		agg.PlaylistsFailed += stats.PlaylistFailedCount
+		agg.PlaylistLateCount += stats.PlaylistLateCount
+		agg.SequenceSkips += stats.SequenceSkips
+
+		// Debug: Log parser stats for diagnostics (only when TUI is not enabled to avoid log spam)
+		// This helps identify if events are being parsed but not counted
+
+		// Aggregate wall time (weighted average)
+		if stats.SegmentCount > 0 {
+			totalSegWallTime += stats.SegmentAvgMs * float64(stats.SegmentCount)
+			segWallTimeCount += stats.SegmentCount
+			if stats.SegmentMaxMs > agg.SegmentWallTimeMax {
+				agg.SegmentWallTimeMax = stats.SegmentMaxMs
+			}
+			if agg.SegmentWallTimeMin == 0 || stats.SegmentMinMs < agg.SegmentWallTimeMin {
+				agg.SegmentWallTimeMin = stats.SegmentMinMs
+			}
+
+			// Aggregate percentiles (take max across clients - worst-case is useful for load testing)
+			if stats.SegmentWallTimeP50 > agg.SegmentWallTimeP50 {
+				agg.SegmentWallTimeP50 = stats.SegmentWallTimeP50
+			}
+			if stats.SegmentWallTimeP95 > agg.SegmentWallTimeP95 {
+				agg.SegmentWallTimeP95 = stats.SegmentWallTimeP95
+			}
+			if stats.SegmentWallTimeP99 > agg.SegmentWallTimeP99 {
+				agg.SegmentWallTimeP99 = stats.SegmentWallTimeP99
+			}
+		}
+
+		// Aggregate jitter
+		if stats.PlaylistMaxJitterMs > agg.PlaylistJitterMax {
+			agg.PlaylistJitterMax = stats.PlaylistMaxJitterMs
+		}
+
+		// HTTP Layer
+		agg.HTTPOpenCount += stats.HTTPOpenCount
+		agg.HTTP4xxCount += stats.HTTP4xxCount
+		agg.HTTP5xxCount += stats.HTTP5xxCount
+		agg.ReconnectCount += stats.ReconnectCount
+
+		// TCP Layer
+		agg.TCPConnectCount += stats.TCPConnectCount
+		agg.TCPSuccessCount += stats.TCPSuccessCount
+		agg.TCPRefusedCount += stats.TCPRefusedCount
+		agg.TCPTimeoutCount += stats.TCPTimeoutCount
+
+		// Aggregate TCP connect time (weighted average)
+		if stats.TCPConnectCount > 0 {
+			totalTCPConnect += stats.TCPConnectAvgMs * float64(stats.TCPConnectCount)
+			tcpConnectCount += stats.TCPConnectCount
+			if stats.TCPConnectMaxMs > agg.TCPConnectMaxMs {
+				agg.TCPConnectMaxMs = stats.TCPConnectMaxMs
+			}
+			if agg.TCPConnectMinMs == 0 || stats.TCPConnectMinMs < agg.TCPConnectMinMs {
+				agg.TCPConnectMinMs = stats.TCPConnectMinMs
+			}
+		}
+
+		// Timing accuracy
+		agg.TimestampsUsed += stats.TimestampsUsed
+		agg.LinesProcessed += stats.LinesProcessed
+	}
+
+	// Calculate averages
+	if segWallTimeCount > 0 {
+		agg.SegmentWallTimeAvg = totalSegWallTime / float64(segWallTimeCount)
+	}
+	if tcpConnectCount > 0 {
+		agg.TCPConnectAvgMs = totalTCPConnect / float64(tcpConnectCount)
+	}
+
+	// Calculate TCP health ratio
+	totalTCP := agg.TCPSuccessCount + agg.TCPRefusedCount + agg.TCPTimeoutCount
+	if totalTCP > 0 {
+		agg.TCPHealthRatio = float64(agg.TCPSuccessCount) / float64(totalTCP)
+	} else {
+		agg.TCPHealthRatio = 1.0 // No connections = healthy
+	}
+
+	// Calculate error rate
+	if agg.HTTPOpenCount > 0 {
+		totalErrors := agg.HTTP4xxCount + agg.HTTP5xxCount + agg.SegmentsFailed
+		agg.ErrorRate = float64(totalErrors) / float64(agg.HTTPOpenCount)
+	}
+
+	// Calculate instantaneous rates (Phase 7.4) - Lock-free using atomic.Value
+	now := time.Now()
+	// Lock-free read
+	prevSnapshotPtr := m.prevDebugSnapshot.Load()
+	if prevSnapshotPtr != nil {
+		prevSnapshot := prevSnapshotPtr.(*debugRateSnapshot)
+		elapsed := now.Sub(prevSnapshot.timestamp).Seconds()
+		if elapsed > 0 {
+			agg.InstantSegmentsRate = float64(agg.SegmentsDownloaded-prevSnapshot.segments) / elapsed
+			agg.InstantPlaylistsRate = float64(agg.PlaylistsRefreshed-prevSnapshot.playlists) / elapsed
+			agg.InstantHTTPRequestsRate = float64(agg.HTTPOpenCount-prevSnapshot.httpRequests) / elapsed
+			agg.InstantTCPConnectsRate = float64(agg.TCPConnectCount-prevSnapshot.tcpConnects) / elapsed
+		}
+	}
+	// Lock-free write - atomically swap snapshot pointer
+	newSnapshot := &debugRateSnapshot{
+		timestamp:    now,
+		segments:     agg.SegmentsDownloaded,
+		playlists:    agg.PlaylistsRefreshed,
+		httpRequests: agg.HTTPOpenCount,
+		tcpConnects:  agg.TCPConnectCount,
+	}
+	m.prevDebugSnapshot.Store(newSnapshot)
+
+	return agg
 }
 
-// GetClientHLSStats returns HLS statistics for a specific client.
-// Returns nil if no HLS parser exists for this client.
-func (m *ClientManager) GetClientHLSStats(clientID int) *parser.HLSStats {
-	m.hlsMu.RLock()
-	defer m.hlsMu.RUnlock()
+// GetClientDebugStats returns debug statistics for a specific client.
+// Returns nil if no debug parser exists for this client.
+func (m *ClientManager) GetClientDebugStats(clientID int) *parser.DebugStats {
+	m.debugMu.RLock()
+	defer m.debugMu.RUnlock()
 
-	if hlsParser, ok := m.hlsParsers[clientID]; ok {
-		stats := hlsParser.Stats()
+	if debugParser, ok := m.debugParsers[clientID]; ok {
+		stats := debugParser.Stats()
 		return &stats
 	}
 	return nil
 }
 
-// GetClientLatencies returns latency samples for a specific client.
-// Returns nil if no HLS parser exists for this client.
-func (m *ClientManager) GetClientLatencies(clientID int) []time.Duration {
-	m.hlsMu.RLock()
-	defer m.hlsMu.RUnlock()
-
-	if hlsParser, ok := m.hlsParsers[clientID]; ok {
-		return hlsParser.Latencies()
-	}
-	return nil
-}
+// Legacy methods removed - use GetDebugStats() for accurate metrics from DebugEventParser
 
 // GetAggregatedStats returns aggregated statistics across all clients.
 // This is the primary method for getting comprehensive stats (Phase 5).
@@ -554,18 +719,4 @@ func (m *ClientManager) GetClientStats(clientID int) *stats.ClientStats {
 	m.clientStatsMu.RLock()
 	defer m.clientStatsMu.RUnlock()
 	return m.clientStats[clientID]
-}
-
-// CompleteSegmentForClient completes the oldest in-flight segment for a client.
-// This should be called when a progress update is received, indicating a segment
-// download likely completed. Returns the inferred latency.
-func (m *ClientManager) CompleteSegmentForClient(clientID int) time.Duration {
-	m.hlsMu.RLock()
-	hlsParser := m.hlsParsers[clientID]
-	m.hlsMu.RUnlock()
-
-	if hlsParser != nil {
-		return hlsParser.CompleteOldestSegment()
-	}
-	return 0
 }

@@ -42,7 +42,8 @@ type FFmpegConfig struct {
 	// Variant specifies which quality level(s) to download.
 	Variant VariantSelection
 
-	// UserAgent is the HTTP User-Agent header.
+	// UserAgent is the HTTP User-Agent header base.
+	// Client ID will be appended for per-client identification.
 	UserAgent string
 
 	// Timeout is the network read/write timeout.
@@ -78,8 +79,13 @@ type FFmpegConfig struct {
 	ProgramID int
 
 	// Stats collection
-	StatsEnabled  bool   // Enable -progress pipe:1 output
+	StatsEnabled  bool   // Enable -progress output
 	StatsLogLevel string // Override LogLevel when stats enabled ("verbose" or "debug")
+
+	// DebugLogging enables -loglevel debug for detailed segment timing.
+	// Only safe when socket mode is enabled (otherwise debug output
+	// would corrupt progress parsing on stdout).
+	DebugLogging bool
 }
 
 // DefaultFFmpegConfig returns an FFmpegConfig with sensible defaults.
@@ -101,6 +107,15 @@ func DefaultFFmpegConfig(streamURL string) *FFmpegConfig {
 // FFmpegRunner implements Runner for FFmpeg processes.
 type FFmpegRunner struct {
 	config *FFmpegConfig
+
+	// progressSocket is the Unix socket path for progress output.
+	// Set by SetProgressSocket() when socket mode is enabled.
+	// When set, uses "-progress unix://<path>" instead of "pipe:1".
+	progressSocket string
+
+	// clientID is set during BuildCommand for per-client User-Agent.
+	// This enables correlation with origin logs and packet captures.
+	clientID int
 }
 
 // NewFFmpegRunner creates a new FFmpeg runner with the given configuration.
@@ -115,8 +130,18 @@ func (r *FFmpegRunner) Name() string {
 	return "ffmpeg"
 }
 
+// SetProgressSocket sets the Unix socket path for progress output.
+// When set, FFmpeg will use "-progress unix://<path>" instead of "pipe:1".
+// This provides cleaner separation from stderr when using -loglevel debug.
+//
+// Called by Supervisor before BuildCommand() when socket mode is enabled.
+func (r *FFmpegRunner) SetProgressSocket(path string) {
+	r.progressSocket = path
+}
+
 // BuildCommand creates an exec.Cmd for FFmpeg with all configured options.
 func (r *FFmpegRunner) BuildCommand(ctx context.Context, clientID int) (*exec.Cmd, error) {
+	r.clientID = clientID // Capture for per-client User-Agent
 	args := r.buildArgs()
 	cmd := exec.CommandContext(ctx, r.config.BinaryPath, args...)
 	return cmd, nil
@@ -124,10 +149,36 @@ func (r *FFmpegRunner) BuildCommand(ctx context.Context, clientID int) (*exec.Cm
 
 // buildArgs constructs the FFmpeg command-line arguments.
 func (r *FFmpegRunner) buildArgs() []string {
-	// Determine log level - use StatsLogLevel when stats enabled
+	// Determine log level
 	logLevel := r.config.LogLevel
+
+	// Use StatsLogLevel when stats enabled
 	if r.config.StatsEnabled && r.config.StatsLogLevel != "" {
 		logLevel = r.config.StatsLogLevel
+	}
+
+	// When stats are enabled, ALWAYS use timestamped logging for accurate metrics.
+	// Format: "repeat+level+datetime+<level>" provides:
+	//   - repeat: Don't collapse repeated messages
+	//   - level: Add [debug]/[verbose]/[info] tags for filtering
+	//   - datetime: Millisecond-precision timestamps (YYYY-MM-DD HH:MM:SS.mmm)
+	//
+	// This is critical because timestamps come directly from FFmpeg, not from
+	// when Go processes the lines. Even if logs back up in channels, we get
+	// accurate timing for TCP connects, segment downloads, and playlist refreshes.
+	if r.config.StatsEnabled {
+		// Determine base level for timestamped logging
+		// Default to "debug" to capture manifest refreshes ([hls @ ...] Opening '...m3u8')
+		// which are logged at DEBUG level. Verbose only captures segment requests.
+		baseLevel := "debug" // Default to debug for stats (required for manifest tracking)
+		if r.config.DebugLogging && r.progressSocket != "" {
+			// Full debug when socket mode enabled (safe - progress is separated)
+			baseLevel = "debug"
+		} else if r.config.StatsLogLevel != "" {
+			// Use configured stats level (allows override to verbose if needed)
+			baseLevel = r.config.StatsLogLevel
+		}
+		logLevel = "repeat+level+datetime+" + baseLevel
 	}
 
 	args := []string{
@@ -136,9 +187,15 @@ func (r *FFmpegRunner) buildArgs() []string {
 		"-loglevel", logLevel,
 	}
 
-	// Progress output to stdout (key=value format) for stats parsing
+	// Progress output for stats parsing
 	if r.config.StatsEnabled {
-		args = append(args, "-progress", "pipe:1")
+		if r.progressSocket != "" {
+			// Socket mode: use Unix socket for cleaner separation from stderr
+			args = append(args, "-progress", "unix://"+r.progressSocket)
+		} else {
+			// Pipe mode: output key=value format to stdout
+			args = append(args, "-progress", "pipe:1")
+		}
 		// Also add -stats_period for more frequent updates (every 1 second)
 		args = append(args, "-stats_period", "1")
 	}
@@ -161,8 +218,17 @@ func (r *FFmpegRunner) buildArgs() []string {
 	// Network timeout (in microseconds)
 	args = append(args, "-rw_timeout", strconv.FormatInt(r.config.Timeout.Microseconds(), 10))
 
-	// User agent
-	args = append(args, "-user_agent", r.config.UserAgent)
+	// User agent with per-client identification
+	// Format: "go-ffmpeg-hls-swarm/1.0/client-42"
+	// Enables correlation with origin logs and packet captures:
+	// - tcpdump: tcpdump -A | grep "client-42"
+	// - Wireshark: http.user_agent contains "client-42"
+	// - Nginx: grep "client-42" access.log
+	userAgent := r.config.UserAgent
+	if r.clientID > 0 {
+		userAgent = fmt.Sprintf("%s/client-%d", r.config.UserAgent, r.clientID)
+	}
+	args = append(args, "-user_agent", userAgent)
 
 	// HTTP headers
 	headers := r.buildHeaders()

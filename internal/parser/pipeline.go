@@ -14,12 +14,45 @@ package parser
 import (
 	"bufio"
 	"io"
+	"sync"
 	"sync/atomic"
 )
 
 // LineParser is implemented by ProgressParser and HLSEventParser.
 type LineParser interface {
 	ParseLine(line string)
+}
+
+// LineSource abstracts the source of lines for a Pipeline.
+// Both PipeReader (stdout) and SocketReader (Unix socket) implement this.
+//
+// Lifecycle (MUST be followed by Supervisor):
+//
+//  1. source := NewXxxReader(...)
+//  2. go source.Run()        // Start reading in goroutine
+//  3. defer source.Close()   // Cleanup on exit
+//  4. <-source.Ready()       // Wait for source to be accepting/reading
+//  5. // ... start FFmpeg ...
+//
+// The source is responsible for calling pipeline.CloseChannel() on exit.
+type LineSource interface {
+	// Run starts reading lines and feeding them to the pipeline.
+	// MUST call pipeline.CloseChannel() on exit (via defer).
+	// Blocks until source is exhausted or closed.
+	Run()
+
+	// Ready returns a channel that is closed when the source is ready.
+	// For PipeReader: closed immediately (pipe is always ready).
+	// For SocketReader: closed when Accept() is about to block.
+	Ready() <-chan struct{}
+
+	// Close stops the source and releases resources.
+	// Safe to call multiple times (idempotent).
+	Close() error
+
+	// Stats returns (bytesRead, linesRead, healthy).
+	// healthy = true if source is working normally.
+	Stats() (bytesRead int64, linesRead int64, healthy bool)
 }
 
 // Pipeline implements three-layer lossy-by-design parsing.
@@ -31,7 +64,8 @@ type Pipeline struct {
 	streamType string // "progress" or "stderr"
 	bufferSize int
 
-	lineChan chan string
+	lineChan  chan string
+	closeOnce sync.Once // Ensures CloseChannel() is idempotent
 
 	// Pipeline health metrics (atomic for concurrent access)
 	linesRead    int64
@@ -70,7 +104,13 @@ func NewPipeline(clientID int, streamType string, bufferSize int, dropThreshold 
 //
 // MUST run in dedicated goroutine. Never blocks on channel send.
 // Closes lineChan when reader reaches EOF.
+//
+// Note: For pipe mode, this is the standard reader. For socket mode,
+// use SocketReader.Run() instead which calls FeedLine().
 func (p *Pipeline) RunReader(r io.Reader) {
+	// I4: Use CloseChannel() for symmetry with socket mode
+	defer p.CloseChannel()
+
 	scanner := bufio.NewScanner(r)
 
 	// Use a larger buffer for long FFmpeg output lines
@@ -90,9 +130,40 @@ func (p *Pipeline) RunReader(r io.Reader) {
 			atomic.AddInt64(&p.linesDropped, 1)
 		}
 	}
+}
 
-	// Close channel to signal parser to stop
-	close(p.lineChan)
+// FeedLine adds a line to the pipeline from an external source (e.g., socket).
+// Returns true if queued, false if dropped (channel full).
+//
+// This is the socket-mode equivalent of the read loop in RunReader().
+// Instead of reading from an io.Reader, lines are fed directly from SocketReader.
+func (p *Pipeline) FeedLine(line string) bool {
+	atomic.AddInt64(&p.linesRead, 1)
+
+	select {
+	case p.lineChan <- line:
+		return true
+	default:
+		atomic.AddInt64(&p.linesDropped, 1)
+		return false
+	}
+}
+
+// CloseChannel closes the line channel, signaling parser to stop.
+// Must be called when the source (pipe or socket) is done.
+//
+// CRITICAL (I1): This MUST be called exactly once by the data source:
+//   - Pipe mode: RunReader() calls CloseChannel() at EOF (via defer)
+//   - Socket mode: SocketReader.Run() calls CloseChannel() on exit (via defer)
+//
+// This is the sole mechanism for parser goroutine termination.
+// Failure to call this results in goroutine leaks.
+//
+// Safe to call multiple times (idempotent via sync.Once).
+func (p *Pipeline) CloseChannel() {
+	p.closeOnce.Do(func() {
+		close(p.lineChan)
+	})
 }
 
 // RunParser is Layer 2: consumes lines at own pace.

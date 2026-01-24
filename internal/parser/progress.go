@@ -128,7 +128,12 @@ func (p *ProgressParser) parseLine(line string) {
 		p.current.Bitrate = value
 
 	case "total_size":
-		p.current.TotalSize, _ = strconv.ParseInt(value, 10, 64)
+		// For live HLS streams, FFmpeg reports "N/A" instead of a number.
+		// We'll track bytes from HTTP Content-Length headers instead.
+		if value != "N/A" && value != "" {
+			p.current.TotalSize, _ = strconv.ParseInt(value, 10, 64)
+		}
+		// If value is "N/A" or empty, TotalSize remains 0 (will be tracked via HTTP headers)
 
 	case "out_time_us":
 		p.current.OutTimeUS, _ = strconv.ParseInt(value, 10, 64)
