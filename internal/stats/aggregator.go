@@ -95,9 +95,22 @@ type DebugStatsAggregate struct {
 	SegmentWallTimeMin float64
 	SegmentWallTimeMax float64
 	// Percentiles (from T-Digest, using accurate FFmpeg timestamps)
+	SegmentWallTimeP25 time.Duration // 25th percentile
 	SegmentWallTimeP50 time.Duration // 50th percentile (median)
+	SegmentWallTimeP75 time.Duration // 75th percentile
 	SegmentWallTimeP95 time.Duration // 95th percentile
 	SegmentWallTimeP99 time.Duration // 99th percentile
+	// Manifest wall time (using accurate FFmpeg timestamps)
+	ManifestCount int64
+	ManifestWallTimeAvg float64
+	ManifestWallTimeMin float64
+	ManifestWallTimeMax float64
+	// Percentiles (from T-Digest, using accurate FFmpeg timestamps)
+	ManifestWallTimeP25 time.Duration // 25th percentile
+	ManifestWallTimeP50 time.Duration // 50th percentile (median)
+	ManifestWallTimeP75 time.Duration // 75th percentile
+	ManifestWallTimeP95 time.Duration // 95th percentile
+	ManifestWallTimeP99 time.Duration // 99th percentile
 	PlaylistJitterAvg  float64
 	PlaylistJitterMax  float64
 	PlaylistLateCount  int64  // Number of playlist refreshes that were late
@@ -137,9 +150,9 @@ type DebugStatsAggregate struct {
 // StatsAggregator aggregates stats from multiple clients.
 //
 // Thread-safe: all methods can be called concurrently.
+// Uses sync.Map for lock-free client management.
 type StatsAggregator struct {
-	mu        sync.RWMutex
-	clients   map[int]*ClientStats
+	clients sync.Map // map[int]*ClientStats (lock-free)
 	startTime time.Time
 
 	// For rate calculations (using atomic.Value for lock-free access)
@@ -165,9 +178,9 @@ func NewStatsAggregator(dropThreshold float64) *StatsAggregator {
 	}
 
 	agg := &StatsAggregator{
-		clients:       make(map[int]*ClientStats),
 		startTime:     time.Now(),
 		dropThreshold: dropThreshold,
+		// clients sync.Map is zero-initialized (ready to use)
 	}
 	// Initialize atomic.Value with initial snapshot
 	agg.prevSnapshot.Store(&rateSnapshot{
@@ -177,41 +190,44 @@ func NewStatsAggregator(dropThreshold float64) *StatsAggregator {
 }
 
 // AddClient registers a client for aggregation.
+// Uses sync.Map for lock-free access.
 func (a *StatsAggregator) AddClient(stats *ClientStats) {
-	a.mu.Lock()
-	a.clients[stats.ClientID] = stats
-	a.mu.Unlock()
+	a.clients.Store(stats.ClientID, stats)
 }
 
 // RemoveClient unregisters a client.
+// Uses sync.Map for lock-free access.
 func (a *StatsAggregator) RemoveClient(clientID int) {
-	a.mu.Lock()
-	delete(a.clients, clientID)
-	a.mu.Unlock()
+	a.clients.Delete(clientID)
 }
 
 // GetClient returns the ClientStats for a specific client.
+// Uses sync.Map for lock-free access.
 func (a *StatsAggregator) GetClient(clientID int) *ClientStats {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.clients[clientID]
+	val, ok := a.clients.Load(clientID)
+	if !ok {
+		return nil
+	}
+	return val.(*ClientStats)
 }
 
 // ClientCount returns the number of registered clients.
+// Uses sync.Map for lock-free access.
 func (a *StatsAggregator) ClientCount() int {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return len(a.clients)
+	count := 0
+	a.clients.Range(func(_, _ interface{}) bool {
+		count++
+		return true
+	})
+	return count
 }
 
 // Aggregate computes aggregated statistics across all clients.
 //
 // This creates a snapshot of current metrics. The returned struct is
 // safe to use after the call returns.
+// Uses sync.Map for lock-free client iteration.
 func (a *StatsAggregator) Aggregate() *AggregatedStats {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
 	now := time.Now()
 	elapsed := now.Sub(a.startTime).Seconds()
 
@@ -222,9 +238,18 @@ func (a *StatsAggregator) Aggregate() *AggregatedStats {
 		prevSnapshot = prevSnapshotPtr.(*rateSnapshot)
 	}
 
+	// Snapshot clients into regular map for fast iteration
+	clients := make(map[int]*ClientStats)
+	clientCount := 0
+	a.clients.Range(func(key, value interface{}) bool {
+		clients[key.(int)] = value.(*ClientStats)
+		clientCount++
+		return true
+	})
+
 	result := &AggregatedStats{
 		Timestamp:       now,
-		TotalClients:    len(a.clients),
+		TotalClients:    clientCount,
 		TotalHTTPErrors: make(map[int]int64),
 	}
 
@@ -235,22 +260,22 @@ func (a *StatsAggregator) Aggregate() *AggregatedStats {
 	var driftCount int
 	var totalUptime time.Duration
 
-	for _, c := range a.clients {
+	for _, c := range clients {
 		result.ActiveClients++
 
-		// Sum request counts
-		result.TotalManifestReqs += atomic.LoadInt64(&c.ManifestRequests)
-		result.TotalSegmentReqs += atomic.LoadInt64(&c.SegmentRequests)
-		result.TotalInitReqs += atomic.LoadInt64(&c.InitRequests)
-		result.TotalUnknownReqs += atomic.LoadInt64(&c.UnknownRequests)
+		// Sum request counts (lock-free atomic reads)
+		result.TotalManifestReqs += c.ManifestRequests.Load()
+		result.TotalSegmentReqs += c.SegmentRequests.Load()
+		result.TotalInitReqs += c.InitRequests.Load()
+		result.TotalUnknownReqs += c.UnknownRequests.Load()
 		result.TotalBytes += c.TotalBytes()
 
 		// Sum errors
 		for code, count := range c.GetHTTPErrors() {
 			result.TotalHTTPErrors[code] += count
 		}
-		result.TotalReconnections += atomic.LoadInt64(&c.Reconnections)
-		result.TotalTimeouts += atomic.LoadInt64(&c.Timeouts)
+		result.TotalReconnections += c.Reconnections.Load()
+		result.TotalTimeouts += c.Timeouts.Load()
 
 		// Note: Inferred latency removed - use DebugStats for accurate latency
 		// from FFmpeg timestamps. See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md
@@ -284,11 +309,11 @@ func (a *StatsAggregator) Aggregate() *AggregatedStats {
 			result.ClientsWithHighDrift++
 		}
 
-		// Pipeline health
-		progressRead := atomic.LoadInt64(&c.ProgressLinesRead)
-		progressDropped := atomic.LoadInt64(&c.ProgressLinesDropped)
-		stderrRead := atomic.LoadInt64(&c.StderrLinesRead)
-		stderrDropped := atomic.LoadInt64(&c.StderrLinesDropped)
+		// Pipeline health (lock-free atomic reads)
+		progressRead := c.ProgressLinesRead.Load()
+		progressDropped := c.ProgressLinesDropped.Load()
+		stderrRead := c.StderrLinesRead.Load()
+		stderrDropped := c.StderrLinesDropped.Load()
 
 		result.TotalLinesRead += progressRead + stderrRead
 		result.TotalLinesDropped += progressDropped + stderrDropped
@@ -410,11 +435,13 @@ func (a *StatsAggregator) Elapsed() time.Duration {
 }
 
 // Reset clears all clients and resets the start time.
+// Uses sync.Map for lock-free access.
 func (a *StatsAggregator) Reset() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	a.clients = make(map[int]*ClientStats)
+	// Clear all clients from sync.Map
+	a.clients.Range(func(key, _ interface{}) bool {
+		a.clients.Delete(key)
+		return true
+	})
 	a.startTime = time.Now()
 	a.prevSnapshot.Store(&rateSnapshot{
 		timestamp: time.Now(),
@@ -424,24 +451,22 @@ func (a *StatsAggregator) Reset() {
 }
 
 // ForEachClient calls the provided function for each client.
-// The function is called while holding the read lock.
+// Uses sync.Map for lock-free iteration.
 func (a *StatsAggregator) ForEachClient(fn func(clientID int, stats *ClientStats)) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	for id, stats := range a.clients {
-		fn(id, stats)
-	}
+	a.clients.Range(func(key, value interface{}) bool {
+		fn(key.(int), value.(*ClientStats))
+		return true
+	})
 }
 
 // GetAllClientSummaries returns summaries for all clients.
+// Uses sync.Map for lock-free iteration.
 func (a *StatsAggregator) GetAllClientSummaries() []Summary {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	summaries := make([]Summary, 0, len(a.clients))
-	for _, stats := range a.clients {
+	summaries := make([]Summary, 0)
+	a.clients.Range(func(_, value interface{}) bool {
+		stats := value.(*ClientStats)
 		summaries = append(summaries, stats.GetSummary())
-	}
+		return true
+	})
 	return summaries
 }

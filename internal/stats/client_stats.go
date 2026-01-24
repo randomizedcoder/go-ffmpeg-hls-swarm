@@ -14,7 +14,6 @@ package stats
 
 import (
 	"math"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -44,11 +43,11 @@ type ClientStats struct {
 	ClientID  int
 	StartTime time.Time
 
-	// Request counts (atomic)
-	ManifestRequests int64
-	SegmentRequests  int64
-	InitRequests     int64
-	UnknownRequests  int64 // Fallback for unrecognized URL patterns
+	// Request counts (atomic, lock-free)
+	ManifestRequests atomic.Int64
+	SegmentRequests  atomic.Int64
+	InitRequests     atomic.Int64
+	UnknownRequests  atomic.Int64 // Fallback for unrecognized URL patterns
 
 	// Bytes tracking - CRITICAL: handles FFmpeg restart resets
 	// When FFmpeg restarts, total_size resets to 0. We must track
@@ -58,17 +57,18 @@ type ClientStats struct {
 	currentProcessBytes   atomic.Int64 // Current FFmpeg's total_size
 
 	// Error counts
-	HTTPErrors    map[int]int64
-	httpErrorsMu  sync.Mutex
-	Reconnections int64
-	Timeouts      int64
+	// HTTP error counters (atomic, lock-free)
+	// Array indexed by status code: 0-199 = 400-599, 200 = "other"
+	httpErrorCounts [201]atomic.Int64
+	Reconnections   atomic.Int64
+	Timeouts        atomic.Int64
 
 	// Note: Inferred latency removed - use DebugEventParser for accurate latency
 	// from FFmpeg timestamps. See docs/REMOVE_INFERRED_LATENCY_ANALYSIS.md
 
 	// Segment size tracking (estimated from total_size delta)
 	// Using individual atomics for lock-free access (no allocations)
-	lastTotalSize  int64
+	lastTotalSize  atomic.Int64 // Last total_size value (for delta calculation)
 	segmentSizes   []int64      // Shared slice (read-only after init, protected by atomic index)
 	segmentSizeIdx atomic.Int64 // Atomic index for ring buffer
 
@@ -83,11 +83,11 @@ type ClientStats struct {
 	currentDrift     atomic.Int64 // time.Duration as nanoseconds
 	maxDrift         atomic.Int64 // time.Duration as nanoseconds
 
-	// Pipeline health (lossy-by-design metrics)
-	ProgressLinesDropped int64
-	StderrLinesDropped   int64
-	ProgressLinesRead    int64
-	StderrLinesRead      int64
+	// Pipeline health (lossy-by-design metrics, atomic, lock-free)
+	ProgressLinesDropped atomic.Int64
+	StderrLinesDropped   atomic.Int64
+	ProgressLinesRead    atomic.Int64
+	StderrLinesRead      atomic.Int64
 	// PeakDropRate uses atomic.Uint64 with bit manipulation for lock-free max operation
 	peakDropRate atomic.Uint64 // math.Float64bits(PeakDropRate)
 }
@@ -97,63 +97,83 @@ func NewClientStats(clientID int) *ClientStats {
 	return &ClientStats{
 		ClientID:     clientID,
 		StartTime:    time.Now(),
-		HTTPErrors:   make(map[int]int64),
 		segmentSizes: make([]int64, SegmentSizeRingSize),
 		// Atomic fields are zero-initialized (safe default values)
 		// belowThresholdAt atomic.Value is nil (zero value) = time.Time{} when loaded
+		// httpErrorCounts array is zero-initialized (all counters start at 0)
 	}
 }
 
 // --- Request Counting ---
 
 // IncrementManifestRequests increments the manifest request counter.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) IncrementManifestRequests() {
-	atomic.AddInt64(&s.ManifestRequests, 1)
+	s.ManifestRequests.Add(1)
 }
 
 // IncrementSegmentRequests increments the segment request counter.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) IncrementSegmentRequests() {
-	atomic.AddInt64(&s.SegmentRequests, 1)
+	s.SegmentRequests.Add(1)
 }
 
 // IncrementInitRequests increments the init segment request counter.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) IncrementInitRequests() {
-	atomic.AddInt64(&s.InitRequests, 1)
+	s.InitRequests.Add(1)
 }
 
 // IncrementUnknownRequests increments the unknown URL request counter.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) IncrementUnknownRequests() {
-	atomic.AddInt64(&s.UnknownRequests, 1)
+	s.UnknownRequests.Add(1)
 }
 
 // --- Error Recording ---
 
 // RecordHTTPError records an HTTP error by status code.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) RecordHTTPError(code int) {
-	s.httpErrorsMu.Lock()
-	s.HTTPErrors[code]++
-	s.httpErrorsMu.Unlock()
+	if code >= 400 && code <= 599 {
+		// Standard HTTP error codes (4xx, 5xx)
+		s.httpErrorCounts[code-400].Add(1)
+	} else {
+		// Non-standard codes go to "other" bucket (index 200)
+		s.httpErrorCounts[200].Add(1)
+	}
 }
 
 // RecordReconnection records a reconnection attempt.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) RecordReconnection() {
-	atomic.AddInt64(&s.Reconnections, 1)
+	s.Reconnections.Add(1)
 }
 
 // RecordTimeout records a timeout event.
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) RecordTimeout() {
-	atomic.AddInt64(&s.Timeouts, 1)
+	s.Timeouts.Add(1)
 }
 
-// GetHTTPErrors returns a copy of the HTTP errors map.
+// GetHTTPErrors returns a map of HTTP error counts.
+// Uses atomic operations for lock-free access.
+// Only includes codes with non-zero counts.
 func (s *ClientStats) GetHTTPErrors() map[int]int64 {
-	s.httpErrorsMu.Lock()
-	defer s.httpErrorsMu.Unlock()
+	result := make(map[int]int64)
 
-	result := make(map[int]int64, len(s.HTTPErrors))
-	for k, v := range s.HTTPErrors {
-		result[k] = v
+	// Iterate over all standard error codes (400-599)
+	for code := 400; code <= 599; code++ {
+		if count := s.httpErrorCounts[code-400].Load(); count > 0 {
+			result[code] = count
+		}
 	}
+
+	// Include "other" errors if any (use 0 as sentinel)
+	if otherCount := s.httpErrorCounts[200].Load(); otherCount > 0 {
+		result[0] = otherCount
+	}
+
 	return result
 }
 
@@ -318,10 +338,10 @@ func (s *ClientStats) GetAverageSegmentSize() int64 {
 // Also tracks peak drop rate for correlation with load spikes.
 // Uses atomic operations for lock-free access.
 func (s *ClientStats) RecordDroppedLines(progressRead, progressDropped, stderrRead, stderrDropped int64) {
-	atomic.StoreInt64(&s.ProgressLinesRead, progressRead)
-	atomic.StoreInt64(&s.ProgressLinesDropped, progressDropped)
-	atomic.StoreInt64(&s.StderrLinesRead, stderrRead)
-	atomic.StoreInt64(&s.StderrLinesDropped, stderrDropped)
+	s.ProgressLinesRead.Store(progressRead)
+	s.ProgressLinesDropped.Store(progressDropped)
+	s.StderrLinesRead.Store(stderrRead)
+	s.StderrLinesDropped.Store(stderrDropped)
 
 	// Track peak drop rate using CAS loop for lock-free max operation
 	currentRate := s.CurrentDropRate()
@@ -340,9 +360,10 @@ func (s *ClientStats) RecordDroppedLines(progressRead, progressDropped, stderrRe
 }
 
 // CurrentDropRate returns current drop rate (0.0 to 1.0).
+// Uses atomic operations for lock-free access.
 func (s *ClientStats) CurrentDropRate() float64 {
-	totalRead := atomic.LoadInt64(&s.ProgressLinesRead) + atomic.LoadInt64(&s.StderrLinesRead)
-	totalDropped := atomic.LoadInt64(&s.ProgressLinesDropped) + atomic.LoadInt64(&s.StderrLinesDropped)
+	totalRead := s.ProgressLinesRead.Load() + s.StderrLinesRead.Load()
+	totalDropped := s.ProgressLinesDropped.Load() + s.StderrLinesDropped.Load()
 	if totalRead == 0 {
 		return 0
 	}
@@ -401,12 +422,12 @@ func (s *ClientStats) GetSummary() Summary {
 		ClientID:         s.ClientID,
 		Uptime:           s.Uptime(),
 		TotalBytes:       s.TotalBytes(),
-		ManifestRequests: atomic.LoadInt64(&s.ManifestRequests),
-		SegmentRequests:  atomic.LoadInt64(&s.SegmentRequests),
-		InitRequests:     atomic.LoadInt64(&s.InitRequests),
-		UnknownRequests:  atomic.LoadInt64(&s.UnknownRequests),
-		Reconnections:    atomic.LoadInt64(&s.Reconnections),
-		Timeouts:         atomic.LoadInt64(&s.Timeouts),
+		ManifestRequests: s.ManifestRequests.Load(),
+		SegmentRequests:  s.SegmentRequests.Load(),
+		InitRequests:     s.InitRequests.Load(),
+		UnknownRequests:  s.UnknownRequests.Load(),
+		Reconnections:    s.Reconnections.Load(),
+		Timeouts:         s.Timeouts.Load(),
 		HTTPErrors:       s.GetHTTPErrors(),
 		// Latency metrics removed - use DebugStats for accurate latency from FFmpeg timestamps
 		CurrentSpeed: s.GetSpeed(),

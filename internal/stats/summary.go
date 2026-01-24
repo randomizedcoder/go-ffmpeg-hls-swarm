@@ -185,7 +185,12 @@ func FormatExitSummary(stats *AggregatedStats, cfg SummaryConfig) string {
 
 		for _, code := range codes {
 			count := stats.TotalHTTPErrors[code]
-			fmt.Fprintf(&b, "  HTTP %d:               %d\n", code, count)
+			if code == 0 {
+				// Code 0 is the sentinel for "other" (non-standard HTTP error codes)
+				fmt.Fprintf(&b, "  HTTP Other:            %d\n", count)
+			} else {
+				fmt.Fprintf(&b, "  HTTP %d:               %d\n", code, count)
+			}
 		}
 		if stats.TotalTimeouts > 0 {
 			fmt.Fprintf(&b, "  Timeouts:             %d\n", stats.TotalTimeouts)

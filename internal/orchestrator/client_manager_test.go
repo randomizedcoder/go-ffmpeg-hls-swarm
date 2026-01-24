@@ -21,7 +21,7 @@ func (m *mockProcessBuilder) Name() string {
 	return "mock"
 }
 
-func (m *mockProcessBuilder) SetProgressSocket(path string) {
+func (m *mockProcessBuilder) SetProgressFD(fd int) {
 	// No-op for testing
 }
 

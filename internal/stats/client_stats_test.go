@@ -15,8 +15,14 @@ func TestNewClientStats(t *testing.T) {
 	if stats.StartTime.IsZero() {
 		t.Error("StartTime should not be zero")
 	}
-	if stats.HTTPErrors == nil {
-		t.Error("HTTPErrors should be initialized")
+	// HTTPErrors is now an array-based atomic counter, no initialization needed
+	// Verify it's accessible by checking GetHTTPErrors returns empty map
+	errors := stats.GetHTTPErrors()
+	if errors == nil {
+		t.Error("GetHTTPErrors should not return nil")
+	}
+	if len(errors) != 0 {
+		t.Errorf("New client should have no errors, got %d", len(errors))
 	}
 	// Note: inferredLatencyDigest removed - use DebugEventParser for accurate latency
 	// Check segmentSizes is properly initialized
@@ -41,17 +47,17 @@ func TestClientStats_RequestCounts(t *testing.T) {
 	stats.IncrementUnknownRequests()
 	stats.IncrementUnknownRequests()
 
-	if stats.ManifestRequests != 2 {
-		t.Errorf("ManifestRequests = %d, want 2", stats.ManifestRequests)
+	if stats.ManifestRequests.Load() != 2 {
+		t.Errorf("ManifestRequests = %d, want 2", stats.ManifestRequests.Load())
 	}
-	if stats.SegmentRequests != 3 {
-		t.Errorf("SegmentRequests = %d, want 3", stats.SegmentRequests)
+	if stats.SegmentRequests.Load() != 3 {
+		t.Errorf("SegmentRequests = %d, want 3", stats.SegmentRequests.Load())
 	}
-	if stats.InitRequests != 1 {
-		t.Errorf("InitRequests = %d, want 1", stats.InitRequests)
+	if stats.InitRequests.Load() != 1 {
+		t.Errorf("InitRequests = %d, want 1", stats.InitRequests.Load())
 	}
-	if stats.UnknownRequests != 2 {
-		t.Errorf("UnknownRequests = %d, want 2", stats.UnknownRequests)
+	if stats.UnknownRequests.Load() != 2 {
+		t.Errorf("UnknownRequests = %d, want 2", stats.UnknownRequests.Load())
 	}
 }
 
@@ -71,21 +77,139 @@ func TestClientStats_ConcurrentIncrements(t *testing.T) {
 	}
 	wg.Wait()
 
-	if stats.ManifestRequests != 100 {
-		t.Errorf("ManifestRequests = %d, want 100", stats.ManifestRequests)
+	if stats.ManifestRequests.Load() != 100 {
+		t.Errorf("ManifestRequests = %d, want 100", stats.ManifestRequests.Load())
 	}
-	if stats.SegmentRequests != 100 {
-		t.Errorf("SegmentRequests = %d, want 100", stats.SegmentRequests)
+	if stats.SegmentRequests.Load() != 100 {
+		t.Errorf("SegmentRequests = %d, want 100", stats.SegmentRequests.Load())
 	}
-	if stats.InitRequests != 100 {
-		t.Errorf("InitRequests = %d, want 100", stats.InitRequests)
+	if stats.InitRequests.Load() != 100 {
+		t.Errorf("InitRequests = %d, want 100", stats.InitRequests.Load())
 	}
-	if stats.UnknownRequests != 100 {
-		t.Errorf("UnknownRequests = %d, want 100", stats.UnknownRequests)
+	if stats.UnknownRequests.Load() != 100 {
+		t.Errorf("UnknownRequests = %d, want 100", stats.UnknownRequests.Load())
+	}
+}
+
+func TestClientStats_RecordHTTPError(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     int
+		wantCode int // Expected code in result (0 = "other")
+		wantCount int64
+	}{
+		// 4xx Client Errors
+		{"400 Bad Request", 400, 400, 1},
+		{"401 Unauthorized", 401, 401, 1},
+		{"403 Forbidden", 403, 403, 1},
+		{"404 Not Found", 404, 404, 1},
+		{"405 Method Not Allowed", 405, 405, 1},
+		{"408 Request Timeout", 408, 408, 1},
+		{"409 Conflict", 409, 409, 1},
+		{"413 Payload Too Large", 413, 413, 1},
+		{"414 URI Too Long", 414, 414, 1},
+		{"415 Unsupported Media Type", 415, 415, 1},
+		{"429 Too Many Requests", 429, 429, 1},
+		{"499 Client Closed Request", 499, 499, 1},
+
+		// 5xx Server Errors
+		{"500 Internal Server Error", 500, 500, 1},
+		{"501 Not Implemented", 501, 501, 1},
+		{"502 Bad Gateway", 502, 502, 1},
+		{"503 Service Unavailable", 503, 503, 1},
+		{"504 Gateway Timeout", 504, 504, 1},
+		{"599 Network Connect Timeout", 599, 599, 1},
+
+		// Edge cases - should go to "other" (code 0)
+		{"399 (not error)", 399, 0, 1},
+		{"600 (invalid)", 600, 0, 1},
+		{"0 (invalid)", 0, 0, 1},
+		{"-1 (invalid)", -1, 0, 1},
+		{"300 (redirect, not error)", 300, 0, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewClientStats(0)
+			s.RecordHTTPError(tt.code)
+
+			errors := s.GetHTTPErrors()
+			if tt.wantCode == 0 {
+				// Should be in "other"
+				if errors[0] != tt.wantCount {
+					t.Errorf("expected other[0]=%d, got %v", tt.wantCount, errors)
+				}
+			} else {
+				if errors[tt.wantCode] != tt.wantCount {
+					t.Errorf("expected errors[%d]=%d, got %v", tt.wantCode, tt.wantCount, errors)
+				}
+			}
+		})
+	}
+}
+
+func TestClientStats_RecordHTTPError_Concurrent(t *testing.T) {
+	s := NewClientStats(0)
+	var wg sync.WaitGroup
+
+	// Record same code from multiple goroutines
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.RecordHTTPError(404)
+		}()
+	}
+
+	wg.Wait()
+
+	errors := s.GetHTTPErrors()
+	if errors[404] != 100 {
+		t.Errorf("expected 100 errors, got %d", errors[404])
+	}
+}
+
+func TestClientStats_GetHTTPErrors_AllCodes(t *testing.T) {
+	s := NewClientStats(0)
+
+	// Record one of each standard code
+	for code := 400; code <= 599; code++ {
+		s.RecordHTTPError(code)
+	}
+
+	errors := s.GetHTTPErrors()
+	if len(errors) != 200 {
+		t.Errorf("expected 200 error codes, got %d", len(errors))
+	}
+
+	for code := 400; code <= 599; code++ {
+		if errors[code] != 1 {
+			t.Errorf("expected errors[%d]=1, got %d", code, errors[code])
+		}
+	}
+}
+
+func TestClientStats_GetHTTPErrors_ZeroCountsExcluded(t *testing.T) {
+	s := NewClientStats(0)
+
+	// Record only one error
+	s.RecordHTTPError(404)
+
+	errors := s.GetHTTPErrors()
+
+	// Should only have one entry
+	if len(errors) != 1 {
+		t.Errorf("expected 1 error code, got %d: %v", len(errors), errors)
+	}
+
+	// Should have 404
+	if errors[404] != 1 {
+		t.Errorf("expected errors[404]=1, got %d", errors[404])
 	}
 }
 
 func TestClientStats_HTTPErrors(t *testing.T) {
+	// Legacy test - keep for backward compatibility
 	stats := NewClientStats(0)
 
 	stats.RecordHTTPError(503)
@@ -331,11 +455,11 @@ func TestClientStats_ThreadSafety(t *testing.T) {
 	wg.Wait()
 
 	// Just verify no panics and counts are reasonable
-	if stats.ManifestRequests != 1000 {
-		t.Errorf("ManifestRequests = %d, want 1000", stats.ManifestRequests)
+	if stats.ManifestRequests.Load() != 1000 {
+		t.Errorf("ManifestRequests = %d, want 1000", stats.ManifestRequests.Load())
 	}
-	if stats.SegmentRequests != 1000 {
-		t.Errorf("SegmentRequests = %d, want 1000", stats.SegmentRequests)
+	if stats.SegmentRequests.Load() != 1000 {
+		t.Errorf("SegmentRequests = %d, want 1000", stats.SegmentRequests.Load())
 	}
 }
 

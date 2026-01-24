@@ -57,15 +57,20 @@ type Config struct {
 	StatsBufferSize    int     `json:"stats_buffer_size"`    // Lines to buffer per client pipeline
 	StatsDropThreshold float64 `json:"stats_drop_threshold"` // Degradation threshold (0.01 = 1%)
 
-	// Socket mode (experimental)
-	UseProgressSocket bool `json:"use_progress_socket"` // Use Unix socket for FFmpeg progress output
-	DebugLogging      bool `json:"debug_logging"`       // Enable -loglevel debug (requires socket mode)
+	// FD mode (file descriptor for progress, no filesystem files)
+	// Always enabled when stats are enabled - provides clean separation from stderr
+	DebugLogging bool `json:"debug_logging"` // Enable -loglevel debug (safe with FD mode)
 
 	// TUI (Terminal User Interface)
 	TUIEnabled bool `json:"tui_enabled"` // Enable live terminal dashboard
 
 	// Prometheus
 	PromClientMetrics bool `json:"prom_client_metrics"` // Enable per-client Prometheus metrics (high cardinality)
+
+	// Origin Metrics (Defect F: TUI_DEFECTS.md)
+	OriginMetricsURL      string        `json:"origin_metrics_url"`       // node_exporter URL (e.g., http://10.177.0.10:9100/metrics)
+	NginxMetricsURL       string        `json:"nginx_metrics_url"`        // nginx_exporter URL (e.g., http://10.177.0.10:9113/metrics)
+	OriginMetricsInterval time.Duration `json:"origin_metrics_interval"` // Scrape interval
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -111,14 +116,18 @@ func DefaultConfig() *Config {
 		StatsBufferSize:    1000,
 		StatsDropThreshold: 0.01, // 1% drop rate = degraded
 
-		// Socket mode
-		UseProgressSocket: false, // Disabled by default (experimental)
-		DebugLogging:      false, // Disabled by default (requires socket mode)
+		// FD mode (always enabled when stats are enabled)
+		DebugLogging: false, // Disabled by default
 
 		// TUI
 		TUIEnabled: false, // Disabled by default (use -tui to enable)
 
 		// Prometheus
 		PromClientMetrics: false, // Disabled by default (high cardinality)
+
+		// Origin Metrics
+		OriginMetricsURL:      "",                    // Disabled by default
+		NginxMetricsURL:       "",                    // Disabled by default
+		OriginMetricsInterval: 2 * time.Second,       // Scrape every 2 seconds
 	}
 }

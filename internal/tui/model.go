@@ -313,3 +313,71 @@ func formatSuccessRate(rate float64, count int64) string {
 func formatPercent(value float64) string {
 	return fmt.Sprintf("%.1f%%", value*100)
 }
+
+// =============================================================================
+// Fixed-Width Formatting Functions (Phase 1)
+// =============================================================================
+
+// formatNumberWithCommas formats a number with thousand separators (no K/M suffixes).
+// Used for fixed-width display to match design spec.
+func formatNumberWithCommas(n int64) string {
+	if n < 0 {
+		return "0" // Handle negative as 0 for display
+	}
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+
+	// Add commas every 3 digits from right to left
+	str := fmt.Sprintf("%d", n)
+	result := ""
+	for i, c := range str {
+		if i > 0 && (len(str)-i)%3 == 0 {
+			result += ","
+		}
+		result += string(c)
+	}
+	return result
+}
+
+// formatNumberFixed formats a number with commas in a fixed-width field (right-aligned).
+// width: total field width (including commas and padding)
+func formatNumberFixed(n int64, width int) string {
+	formatted := formatNumberWithCommas(n)
+	return fmt.Sprintf("%*s", width, formatted)
+}
+
+// formatRateFixed formats a rate in a fixed-width field (right-aligned).
+func formatRateFixed(rate float64, width int) string {
+	var formatted string
+	if rate >= 1000 {
+		formatted = fmt.Sprintf("+%.1fK/s", rate/1000)
+	} else if rate >= 1 {
+		formatted = fmt.Sprintf("+%.0f/s", rate)
+	} else if rate > 0 {
+		formatted = fmt.Sprintf("+%.1f/s", rate)
+	} else {
+		formatted = "(stalled)"
+	}
+
+	// Right-align in field
+	return fmt.Sprintf("%*s", width, formatted)
+}
+
+// formatPercentFixed formats a percentage in a fixed-width field (right-aligned).
+// Always shows 2 decimal places to match design spec.
+func formatPercentFixed(value float64, width int) string {
+	formatted := fmt.Sprintf("%.2f%%", value*100)
+	return fmt.Sprintf("%*s", width, formatted)
+}
+
+// formatMsFixed formats milliseconds in a fixed-width field (right-aligned).
+func formatMsFixed(ms float64, width int) string {
+	var formatted string
+	if ms < 1.0 {
+		formatted = fmt.Sprintf("%.1fms", ms)
+	} else {
+		formatted = fmt.Sprintf("%.0fms", ms)
+	}
+	return fmt.Sprintf("%*s", width, formatted)
+}

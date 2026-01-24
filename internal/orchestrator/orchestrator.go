@@ -29,6 +29,7 @@ type Orchestrator struct {
 	rampScheduler *RampScheduler
 	metrics       *metrics.Collector
 	metricsServer *metrics.Server
+	originScraper *metrics.OriginScraper
 
 	startTime time.Time
 }
@@ -71,6 +72,17 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 	})
 	metricsServer := metrics.NewServer(cfg.MetricsAddr, logger)
 
+	// Initialize origin scraper if URLs are configured
+	var originScraper *metrics.OriginScraper
+	if cfg.OriginMetricsURL != "" || cfg.NginxMetricsURL != "" {
+		originScraper = metrics.NewOriginScraper(
+			cfg.OriginMetricsURL,
+			cfg.NginxMetricsURL,
+			cfg.OriginMetricsInterval,
+			logger,
+		)
+	}
+
 	orch := &Orchestrator{
 		config:        cfg,
 		logger:        logger,
@@ -78,6 +90,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 		rampScheduler: rampScheduler,
 		metrics:       collector,
 		metricsServer: metricsServer,
+		originScraper: originScraper,
 	}
 
 	// Create client manager with callbacks
@@ -95,8 +108,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 		StatsEnabled:       cfg.StatsEnabled,
 		StatsBufferSize:    cfg.StatsBufferSize,
 		StatsDropThreshold: cfg.StatsDropThreshold,
-		// Socket mode (experimental)
-		UseProgressSocket: cfg.UseProgressSocket,
+		// FD mode is always enabled when stats are enabled
 		Callbacks: ManagerCallbacks{
 			OnClientStateChange: orch.onStateChange,
 			OnClientStart:       orch.onStart,
@@ -163,6 +175,17 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Start stats update loop for Prometheus
 	if o.config.StatsEnabled {
 		go o.statsUpdateLoop(ctx)
+	}
+
+	// Start origin metrics scraper if configured
+	if o.originScraper != nil {
+		go func() {
+			o.originScraper.Run(ctx)
+		}()
+		o.logger.Info("origin_metrics_scraper_started",
+			"node_exporter", o.config.OriginMetricsURL != "",
+			"nginx_exporter", o.config.NginxMetricsURL != "",
+		)
 	}
 
 	// Setup duration timer if configured

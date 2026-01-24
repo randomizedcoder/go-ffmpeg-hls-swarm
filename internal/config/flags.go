@@ -61,6 +61,9 @@ Orchestration Flags:
 		fmt.Fprintf(os.Stderr, "\nDashboard:\n")
 		printFlagCategory([]string{"tui", "prom-client-metrics"})
 
+		fmt.Fprintf(os.Stderr, "\nOrigin Metrics:\n")
+		printFlagCategory([]string{"origin-metrics", "nginx-metrics", "origin-metrics-interval"})
+
 		fmt.Fprintf(os.Stderr, `
 Flag Convention:
   Single-dash flags (-clients, -resolve) are normal options.
@@ -124,11 +127,9 @@ Examples:
 	// Note: stats-drop-threshold is intentionally not documented (hidden advanced flag)
 	flag.Float64Var(&cfg.StatsDropThreshold, "stats-drop-threshold", cfg.StatsDropThreshold, "")
 
-	// Socket mode (experimental)
-	flag.BoolVar(&cfg.UseProgressSocket, "progress-socket", cfg.UseProgressSocket,
-		"Use Unix socket for FFmpeg progress (experimental, enables clean debug logging)")
+	// Debug logging (FD mode is always enabled when stats are enabled)
 	flag.BoolVar(&cfg.DebugLogging, "ffmpeg-debug", cfg.DebugLogging,
-		"Enable FFmpeg -loglevel debug for detailed segment timing (requires -progress-socket)")
+		"Enable FFmpeg -loglevel debug for detailed segment timing (safe with FD-based progress)")
 
 	// TUI (Terminal User Interface)
 	flag.BoolVar(&cfg.TUIEnabled, "tui", cfg.TUIEnabled, "Enable live terminal dashboard")
@@ -136,6 +137,14 @@ Examples:
 	// Prometheus
 	flag.BoolVar(&cfg.PromClientMetrics, "prom-client-metrics", cfg.PromClientMetrics,
 		"Enable per-client Prometheus metrics (WARNING: high cardinality, use with <200 clients)")
+
+	// Origin Metrics
+	flag.StringVar(&cfg.OriginMetricsURL, "origin-metrics", cfg.OriginMetricsURL,
+		"Origin node_exporter URL (e.g., http://10.177.0.10:9100/metrics)")
+	flag.StringVar(&cfg.NginxMetricsURL, "nginx-metrics", cfg.NginxMetricsURL,
+		"Origin nginx_exporter URL (e.g., http://10.177.0.10:9113/metrics)")
+	flag.DurationVar(&cfg.OriginMetricsInterval, "origin-metrics-interval", cfg.OriginMetricsInterval,
+		"Interval for scraping origin metrics")
 
 	// Parse
 	flag.Parse()

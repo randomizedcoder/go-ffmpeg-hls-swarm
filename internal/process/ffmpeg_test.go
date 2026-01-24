@@ -544,45 +544,45 @@ func TestFFmpegRunner_CommandString(t *testing.T) {
 // Socket Mode Tests
 // =============================================================================
 
-func TestFFmpegRunner_SetProgressSocket(t *testing.T) {
-	t.Run("socket_mode_uses_unix_protocol", func(t *testing.T) {
+func TestFFmpegRunner_SetProgressFD(t *testing.T) {
+	t.Run("fd_mode_uses_pipe_fd", func(t *testing.T) {
 		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
 		cfg.StatsEnabled = true
 		runner := NewFFmpegRunner(cfg)
 
-		// Before setting socket, should use pipe:1
+		// Before setting FD, should fallback to pipe:1
 		args := runner.buildArgs()
 		cmdStr := strings.Join(args, " ")
 		if !strings.Contains(cmdStr, "-progress pipe:1") {
-			t.Errorf("Without socket, should use pipe:1, got: %s", cmdStr)
+			t.Errorf("Without FD set, should use pipe:1, got: %s", cmdStr)
 		}
 
-		// Set socket path
-		runner.SetProgressSocket("/tmp/test.sock")
+		// Set FD 3
+		runner.SetProgressFD(3)
 
-		// After setting socket, should use unix://
+		// After setting FD, should use pipe:3
 		args = runner.buildArgs()
 		cmdStr = strings.Join(args, " ")
-		if !strings.Contains(cmdStr, "-progress unix:///tmp/test.sock") {
-			t.Errorf("With socket, should use unix://, got: %s", cmdStr)
+		if !strings.Contains(cmdStr, "-progress pipe:3") {
+			t.Errorf("With FD 3, should use pipe:3, got: %s", cmdStr)
 		}
 		if strings.Contains(cmdStr, "pipe:1") {
-			t.Error("With socket, should not use pipe:1")
+			t.Error("With FD set, should not use pipe:1")
 		}
 	})
 
-	t.Run("socket_path_cleared_restores_pipe", func(t *testing.T) {
+	t.Run("fd_cleared_falls_back_to_pipe1", func(t *testing.T) {
 		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
 		cfg.StatsEnabled = true
 		runner := NewFFmpegRunner(cfg)
 
-		runner.SetProgressSocket("/tmp/test.sock")
-		runner.SetProgressSocket("") // Clear socket
+		runner.SetProgressFD(3)
+		runner.SetProgressFD(0) // Clear FD
 
 		args := runner.buildArgs()
 		cmdStr := strings.Join(args, " ")
 		if !strings.Contains(cmdStr, "-progress pipe:1") {
-			t.Errorf("After clearing socket, should use pipe:1, got: %s", cmdStr)
+			t.Errorf("After clearing FD, should use pipe:1, got: %s", cmdStr)
 		}
 	})
 
@@ -591,7 +591,7 @@ func TestFFmpegRunner_SetProgressSocket(t *testing.T) {
 		cfg.StatsEnabled = false
 		runner := NewFFmpegRunner(cfg)
 
-		runner.SetProgressSocket("/tmp/test.sock")
+		runner.SetProgressFD(3)
 
 		args := runner.buildArgs()
 		cmdStr := strings.Join(args, " ")
@@ -602,26 +602,19 @@ func TestFFmpegRunner_SetProgressSocket(t *testing.T) {
 }
 
 func TestFFmpegRunner_DebugLogging(t *testing.T) {
-	t.Run("debug_logging_only_with_socket", func(t *testing.T) {
+	t.Run("debug_logging_with_fd_mode", func(t *testing.T) {
 		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
 		cfg.StatsEnabled = true
 		cfg.DebugLogging = true
 		runner := NewFFmpegRunner(cfg)
+		runner.SetProgressFD(3) // FD mode always used when stats enabled
 
-		// Without socket, debug logging should not be enabled
+		// With debug logging, should use timestamped debug
+		// Uses "repeat+level+datetime+debug" for accurate timing
 		args := runner.buildArgs()
 		cmdStr := strings.Join(args, " ")
-		if strings.Contains(cmdStr, "datetime+debug") {
-			t.Error("Without socket, debug logging should not be enabled")
-		}
-
-		// With socket, debug logging should be enabled with timestamps
-		// Uses "repeat+level+datetime+debug" for accurate timing
-		runner.SetProgressSocket("/tmp/test.sock")
-		args = runner.buildArgs()
-		cmdStr = strings.Join(args, " ")
 		if !strings.Contains(cmdStr, "repeat+level+datetime+debug") {
-			t.Errorf("With socket + debug logging, should use -loglevel repeat+level+datetime+debug, got: %s", cmdStr)
+			t.Errorf("With debug logging, should use -loglevel repeat+level+datetime+debug, got: %s", cmdStr)
 		}
 	})
 
@@ -630,13 +623,13 @@ func TestFFmpegRunner_DebugLogging(t *testing.T) {
 		cfg.StatsEnabled = true
 		cfg.DebugLogging = false
 		runner := NewFFmpegRunner(cfg)
-		runner.SetProgressSocket("/tmp/test.sock")
+		runner.SetProgressFD(3) // FD mode always used when stats enabled
 
 		args := runner.buildArgs()
 		cmdStr := strings.Join(args, " ")
-		// Without debug logging, should use timestamped verbose (not debug)
-		if strings.Contains(cmdStr, "datetime+debug") {
-			t.Error("Without debug logging enabled, should not use debug level")
+		// Without debug logging, should use timestamped debug (default for stats)
+		if !strings.Contains(cmdStr, "datetime+debug") {
+			t.Error("With stats enabled, should use debug level by default for manifest tracking")
 		}
 		// Should still use timestamped logging when stats enabled
 		if !strings.Contains(cmdStr, "repeat+level+datetime+verbose") {

@@ -10,6 +10,96 @@ import (
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats"
 )
 
+// Fixed-width column widths for 3-column layout within each section
+// Column 1: Label (left-aligned)
+// Column 2: Value (right-aligned)
+// Column 3: Bracket field (right-aligned)
+const (
+	labelColWidth   = 18 // Longest label is "  ✅ Downloaded:" (17 chars) + 1 padding
+	valueColWidth   = 12 // For "999,999,999" (11 chars) + 1 padding
+	bracketColWidth = 12 // For "(+12.3K/s)" or "(stalled)" - sufficient
+)
+
+// renderMetricRow renders a 3-column metric row: label | value | bracket
+// All width and alignment is applied here for consistency.
+// Inputs should be raw strings (not pre-rendered with lipgloss styles).
+// valueStyle and bracketStyle are optional lipgloss.Style objects to apply styling - if nil, default styles are used.
+func renderMetricRow(labelText, valueText, bracketText string, valueStyle, bracketStyle *lipgloss.Style) string {
+	// Label: left-aligned, fixed width (no styling applied to labels)
+	labelStyle := lipgloss.NewStyle().Width(labelColWidth)
+	renderedLabel := labelStyle.Render(labelText)
+
+	// Value: chain width/alignment with styling so lipgloss handles ANSI codes correctly
+	var valueStyleChain lipgloss.Style
+	if valueStyle != nil {
+		valueStyleChain = valueStyle.Copy().Width(valueColWidth).Align(lipgloss.Right)
+	} else {
+		valueStyleChain = lipgloss.NewStyle().Width(valueColWidth).Align(lipgloss.Right)
+	}
+	renderedValue := valueStyleChain.Render(valueText)
+
+	// Bracket: chain width/alignment with styling so lipgloss handles ANSI codes correctly
+	var bracketStyleChain lipgloss.Style
+	if bracketStyle != nil {
+		bracketStyleChain = bracketStyle.Copy().Width(bracketColWidth).Align(lipgloss.Right)
+	} else {
+		bracketStyleChain = lipgloss.NewStyle().Width(bracketColWidth).Align(lipgloss.Right)
+	}
+	renderedBracket := bracketStyleChain.Render(bracketText)
+
+	return lipgloss.JoinHorizontal(lipgloss.Left,
+		renderedLabel,
+		renderedValue,
+		renderedBracket,
+	)
+}
+
+// formatBracketRate formats a rate for the bracket column (includes parentheses).
+// Returns raw string - width/alignment will be applied by renderMetricRow.
+func formatBracketRate(rate float64) string {
+	if rate >= 1000 {
+		return fmt.Sprintf("+%.1fK/s", rate/1000)
+	} else if rate >= 1 {
+		return fmt.Sprintf("+%.0f/s", rate)
+	} else if rate > 0 {
+		return fmt.Sprintf("+%.1f/s", rate)
+	}
+	return "(stalled)"
+}
+
+// formatBracketPercent formats a percentage for the bracket column (includes parentheses).
+// Returns raw string - width/alignment will be applied by renderMetricRow.
+func formatBracketPercent(percent float64) string {
+	return fmt.Sprintf("(%.2f%%)", percent*100)
+}
+
+// formatNumberRaw formats a number with commas but without width/alignment.
+// Width/alignment will be applied by renderMetricRow.
+func formatNumberRaw(n int64) string {
+	return formatNumberWithCommas(n)
+}
+
+// formatMsRaw formats milliseconds without width/alignment.
+// Width/alignment will be applied by renderMetricRow.
+func formatMsRaw(ms float64) string {
+	if ms == 0 {
+		return "0.0ms"
+	}
+	if ms < 1 {
+		return fmt.Sprintf("%.1fms", ms)
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%.0fms", ms)
+	}
+	return fmt.Sprintf("%.0fms", ms)
+}
+
+// formatPercentRaw formats a percentage without width/alignment.
+// Width/alignment will be applied by renderMetricRow.
+func formatPercentRaw(value float64) string {
+	return fmt.Sprintf("%.2f%%", value*100)
+}
+
 // =============================================================================
 // Main View Rendering
 // =============================================================================
@@ -100,7 +190,7 @@ func (m Model) renderProgress() string {
 	// Status text
 	var status string
 	if progress >= 1.0 {
-		status = statusOK.Render("✓ All clients running")
+		status = statusOK.Render(fmt.Sprintf("✓ All clients running (%d / %d)", m.ActiveClients(), m.targetClients))
 	} else {
 		status = statusInfo.Render(fmt.Sprintf("Ramping up... %d/%d", m.ActiveClients(), m.targetClients))
 	}
@@ -155,24 +245,52 @@ func renderStatRow(label, value, rate string) string {
 
 func (m Model) renderLatencyStats() string {
 	// Use DebugStats percentiles (accurate timestamps from FFmpeg)
-	if m.debugStats == nil || m.debugStats.SegmentWallTimeP50 == 0 {
+	if m.debugStats == nil || (m.debugStats.SegmentWallTimeP50 == 0 && m.debugStats.ManifestWallTimeP50 == 0) {
 		return ""
 	}
 
-	rows := []string{
-		renderLatencyRow("P50 (median)", m.debugStats.SegmentWallTimeP50),
-		renderLatencyRow("P95", m.debugStats.SegmentWallTimeP95),
-		renderLatencyRow("P99", m.debugStats.SegmentWallTimeP99),
-		renderLatencyRow("Max", time.Duration(m.debugStats.SegmentWallTimeMax*float64(time.Millisecond))), // Convert ms to duration
+	var leftCol, rightCol []string
+
+	// === LEFT COLUMN: Manifest Latency ===
+	if m.debugStats.ManifestWallTimeP50 > 0 {
+		leftCol = append(leftCol, sectionHeaderStyle.Render("Manifest Latency *"))
+		leftCol = append(leftCol,
+			renderLatencyRow("P25", m.debugStats.ManifestWallTimeP25),
+			renderLatencyRow("P50 (median)", m.debugStats.ManifestWallTimeP50),
+			renderLatencyRow("P75", m.debugStats.ManifestWallTimeP75),
+			renderLatencyRow("P95", m.debugStats.ManifestWallTimeP95),
+			renderLatencyRow("P99", m.debugStats.ManifestWallTimeP99),
+			renderLatencyRow("Max", time.Duration(m.debugStats.ManifestWallTimeMax*float64(time.Millisecond))),
+		)
+	} else {
+		leftCol = append(leftCol, sectionHeaderStyle.Render("Manifest Latency *"))
+		leftCol = append(leftCol, dimStyle.Render("  (no data)"))
 	}
+
+	// === RIGHT COLUMN: Segment Latency ===
+	if m.debugStats.SegmentWallTimeP50 > 0 {
+		rightCol = append(rightCol, sectionHeaderStyle.Render("Segment Latency *"))
+		rightCol = append(rightCol,
+			renderLatencyRow("P25", m.debugStats.SegmentWallTimeP25),
+			renderLatencyRow("P50 (median)", m.debugStats.SegmentWallTimeP50),
+			renderLatencyRow("P75", m.debugStats.SegmentWallTimeP75),
+			renderLatencyRow("P95", m.debugStats.SegmentWallTimeP95),
+			renderLatencyRow("P99", m.debugStats.SegmentWallTimeP99),
+			renderLatencyRow("Max", time.Duration(m.debugStats.SegmentWallTimeMax*float64(time.Millisecond))),
+		)
+	} else {
+		rightCol = append(rightCol, sectionHeaderStyle.Render("Segment Latency *"))
+		rightCol = append(rightCol, dimStyle.Render("  (no data)"))
+	}
+
+	// Render two columns side-by-side
+	// Available width: m.width - 2 (borders) - 2 (padding) = m.width - 4
+	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-4)
 
 	// Note about accurate timestamps
 	note := dimStyle.Render("* Using accurate FFmpeg timestamps")
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		append([]string{sectionHeaderStyle.Render("Segment Latency *")}, rows...)...,
-	)
-	content = lipgloss.JoinVertical(lipgloss.Left, content, note)
+	content := lipgloss.JoinVertical(lipgloss.Left, twoColContent, note)
 
 	return boxStyle.Width(m.width - 2).Render(content)
 }
@@ -481,27 +599,32 @@ func (m Model) renderHLSLayer(ds *stats.DebugStatsAggregate) string {
 	if ds.SegmentsDownloaded > 0 {
 		segStyle = valueGoodStyle
 	}
-	segRate := formatSuccessRate(ds.InstantSegmentsRate, ds.SegmentsDownloaded)
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ✅ Downloaded:"),
-			segStyle.Render(fmt.Sprintf("  %s  (%s)", formatNumber(ds.SegmentsDownloaded), segRate)),
+		renderMetricRow(
+			"  ✅ Downloaded:",
+			formatNumberRaw(ds.SegmentsDownloaded),
+			formatBracketRate(ds.InstantSegmentsRate),
+			&segStyle,
+			&segStyle,
 		),
 	)
 
 	// Segments Failed (always show, per design spec)
 	percent := 0.0
 	if ds.SegmentsDownloaded > 0 {
-		percent = float64(ds.SegmentsFailed) / float64(ds.SegmentsDownloaded) * 100
+		percent = float64(ds.SegmentsFailed) / float64(ds.SegmentsDownloaded)
 	}
 	failedStyle := valueStyle
 	if ds.SegmentsFailed > 0 {
 		failedStyle = valueBadStyle
 	}
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ⚠️ Failed:"),
-			failedStyle.Render(fmt.Sprintf("  %s  (%.2f%%)", formatNumber(ds.SegmentsFailed), percent)),
+		renderMetricRow(
+			"  ⚠️ Failed:",
+			formatNumberRaw(ds.SegmentsFailed),
+			formatBracketPercent(percent),
+			&failedStyle,
+			&failedStyle,
 		),
 	)
 
@@ -511,9 +634,12 @@ func (m Model) renderHLSLayer(ds *stats.DebugStatsAggregate) string {
 		skippedStyle = valueBadStyle
 	}
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  🔴 Skipped:"),
-			skippedStyle.Render(fmt.Sprintf("  %s  (data loss)", formatNumber(ds.SegmentsSkipped))),
+		renderMetricRow(
+			"  🔴 Skipped:",
+			formatNumberRaw(ds.SegmentsSkipped),
+			"(data loss)",
+			&skippedStyle,
+			&mutedStyle,
 		),
 	)
 
@@ -523,21 +649,46 @@ func (m Model) renderHLSLayer(ds *stats.DebugStatsAggregate) string {
 		expiredStyle = valueWarnStyle
 	}
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ⏩ Expired:"),
-			expiredStyle.Render(fmt.Sprintf("  %s  (fell behind)", formatNumber(ds.SegmentsExpired))),
+		renderMetricRow(
+			"  ⏩ Expired:",
+			formatNumberRaw(ds.SegmentsExpired),
+			"(fell behind)",
+			&expiredStyle,
+			&mutedStyle,
 		),
 	)
 
 	// Segment Wall Time (always show, per design spec)
 	leftCol = append(leftCol, "") // Empty line separator
 	leftCol = append(leftCol, labelStyle.Render("Segment Wall Time"))
-	wallTimeStr := fmt.Sprintf("  Avg: %.0fms  Min: %.0fms  Max: %.0fms",
-		ds.SegmentWallTimeAvg, ds.SegmentWallTimeMin, ds.SegmentWallTimeMax)
-	if ds.SegmentWallTimeAvg == 0 {
-		wallTimeStr = "  Avg: 0ms  Min: 0ms  Max: 0ms"
-	}
-	leftCol = append(leftCol, valueStyle.Render(wallTimeStr))
+	// Use 3-column layout for proper alignment
+	leftCol = append(leftCol,
+		renderMetricRow(
+			"  Avg:",
+			formatMsRaw(ds.SegmentWallTimeAvg),
+			"",
+			&valueStyle,
+			nil,
+		),
+	)
+	leftCol = append(leftCol,
+		renderMetricRow(
+			"  Min:",
+			formatMsRaw(ds.SegmentWallTimeMin),
+			"",
+			&valueStyle,
+			nil,
+		),
+	)
+	leftCol = append(leftCol,
+		renderMetricRow(
+			"  Max:",
+			formatMsRaw(ds.SegmentWallTimeMax),
+			"",
+			&valueStyle,
+			nil,
+		),
+	)
 
 	// === RIGHT COLUMN: Playlists ===
 	rightCol = append(rightCol, labelStyle.Render("Playlists"))
@@ -547,7 +698,6 @@ func (m Model) renderHLSLayer(ds *stats.DebugStatsAggregate) string {
 	if ds.PlaylistsRefreshed > 0 {
 		playlistStyle = valueGoodStyle
 	}
-	playlistRate := formatSuccessRate(ds.InstantPlaylistsRate, ds.PlaylistsRefreshed)
 
 	// Diagnostic: Show parser info if no playlists but we have segments (indicates parsing issue)
 	diagnostic := ""
@@ -561,26 +711,38 @@ func (m Model) renderHLSLayer(ds *stats.DebugStatsAggregate) string {
 			ds.ClientsWithDebugStats, formatNumber(ds.LinesProcessed))
 	}
 
-	rightCol = append(rightCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ✅ Refreshed:"),
-			playlistStyle.Render(fmt.Sprintf("  %s  (%s)%s", formatNumber(ds.PlaylistsRefreshed), playlistRate, diagnostic)),
-		),
+	// Render the row first
+	row := renderMetricRow(
+		"  ✅ Refreshed:",
+		formatNumberRaw(ds.PlaylistsRefreshed),
+		formatBracketRate(ds.InstantPlaylistsRate),
+		&playlistStyle,
+		&playlistStyle,
 	)
+	// Append diagnostic on a new line to avoid affecting column alignment
+	if diagnostic != "" {
+		rightCol = append(rightCol, row)
+		rightCol = append(rightCol, dimStyle.Render(diagnostic))
+	} else {
+		rightCol = append(rightCol, row)
+	}
 
 	// Playlists Failed (always show, per design spec)
 	playlistFailedPercent := 0.0
 	if ds.PlaylistsRefreshed > 0 {
-		playlistFailedPercent = float64(ds.PlaylistsFailed) / float64(ds.PlaylistsRefreshed) * 100
+		playlistFailedPercent = float64(ds.PlaylistsFailed) / float64(ds.PlaylistsRefreshed)
 	}
 	playlistFailedStyle := valueStyle
 	if ds.PlaylistsFailed > 0 {
 		playlistFailedStyle = valueBadStyle
 	}
 	rightCol = append(rightCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ⚠️ Failed:"),
-			playlistFailedStyle.Render(fmt.Sprintf("  %s  (%.2f%%)", formatNumber(ds.PlaylistsFailed), playlistFailedPercent)),
+		renderMetricRow(
+			"  ⚠️ Failed:",
+			formatNumberRaw(ds.PlaylistsFailed),
+			formatBracketPercent(playlistFailedPercent),
+			&playlistFailedStyle,
+			&playlistFailedStyle,
 		),
 	)
 
@@ -589,30 +751,35 @@ func (m Model) renderHLSLayer(ds *stats.DebugStatsAggregate) string {
 	if ds.PlaylistJitterMax > 100 {
 		jitterStyle = valueWarnStyle
 	}
-	jitterStr := fmt.Sprintf("  %.0fms avg/%.0fms max", ds.PlaylistJitterAvg, ds.PlaylistJitterMax)
-	if ds.PlaylistJitterMax == 0 {
-		jitterStr = "  0ms avg/0ms max"
-	}
+	// Jitter: format as "Xms avg/Yms max" - put in value column, max in bracket
+	avgStr := formatMsRaw(ds.PlaylistJitterAvg) + " avg"
+	maxStr := "/" + formatMsRaw(ds.PlaylistJitterMax) + " max"
 	rightCol = append(rightCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ⏱️ Jitter:"),
-			jitterStyle.Render(jitterStr),
+		renderMetricRow(
+			"  ⏱️ Jitter:",
+			avgStr,
+			maxStr,
+			&jitterStyle,
+			&jitterStyle,
 		),
 	)
 
 	// Playlist Late (always show, per design spec)
 	latePercent := 0.0
 	if ds.PlaylistsRefreshed > 0 {
-		latePercent = float64(ds.PlaylistLateCount) / float64(ds.PlaylistsRefreshed) * 100
+		latePercent = float64(ds.PlaylistLateCount) / float64(ds.PlaylistsRefreshed)
 	}
 	lateStyle := valueStyle
 	if ds.PlaylistLateCount > 0 {
 		lateStyle = valueWarnStyle
 	}
 	rightCol = append(rightCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ⏰ Late:"),
-			lateStyle.Render(fmt.Sprintf("  %s  (%.1f%%)", formatNumber(ds.PlaylistLateCount), latePercent)),
+		renderMetricRow(
+			"  ⏰ Late:",
+			formatNumberRaw(ds.PlaylistLateCount),
+			formatBracketPercent(latePercent),
+			&lateStyle,
+			&lateStyle,
 		),
 	)
 
@@ -622,11 +789,29 @@ func (m Model) renderHLSLayer(ds *stats.DebugStatsAggregate) string {
 	// Note: SequenceCurrent not yet tracked - using SegmentsDownloaded as approximation
 	// In the future, we should track actual sequence numbers from DebugEventParser
 	sequenceCurrent := ds.SegmentsDownloaded // Approximation until we track actual sequence
-	rightCol = append(rightCol, valueStyle.Render(fmt.Sprintf("  Current: %s   Skips: %s",
-		formatNumber(sequenceCurrent), formatNumber(ds.SequenceSkips))))
+	// Use 3-column layout for proper alignment
+	rightCol = append(rightCol,
+		renderMetricRow(
+			"  Current:",
+			formatNumberRaw(sequenceCurrent),
+			"",
+			&valueStyle,
+			nil,
+		),
+	)
+	rightCol = append(rightCol,
+		renderMetricRow(
+			"  Skips:",
+			formatNumberRaw(ds.SequenceSkips),
+			"",
+			&valueStyle,
+			nil,
+		),
+	)
 
 	// Render two columns
-	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-6) // Account for box padding
+	// Available width: m.width - 2 (borders) - 2 (padding) = m.width - 4
+	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-4) // Account for box borders and padding
 
 	// Combine with header and separator
 	separator := strings.Repeat("─", m.width-4)
@@ -652,11 +837,13 @@ func (m Model) renderHTTPLayer(ds *stats.DebugStatsAggregate) string {
 	if ds.HTTPOpenCount > 0 {
 		httpStyle = valueGoodStyle
 	}
-	httpRate := formatSuccessRate(ds.InstantHTTPRequestsRate, ds.HTTPOpenCount)
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ✅ Successful:"),
-			httpStyle.Render(fmt.Sprintf("  %s  (%s)", formatNumber(ds.HTTPOpenCount), httpRate)),
+		renderMetricRow(
+			"  ✅ Successful:",
+			formatNumberRaw(ds.HTTPOpenCount),
+			formatBracketRate(ds.InstantHTTPRequestsRate),
+			&httpStyle,
+			&httpStyle,
 		),
 	)
 
@@ -664,16 +851,19 @@ func (m Model) renderHTTPLayer(ds *stats.DebugStatsAggregate) string {
 	failedCount := ds.HTTP4xxCount + ds.HTTP5xxCount
 	failedPercent := 0.0
 	if ds.HTTPOpenCount > 0 {
-		failedPercent = float64(failedCount) / float64(ds.HTTPOpenCount) * 100
+		failedPercent = float64(failedCount) / float64(ds.HTTPOpenCount)
 	}
 	failedStyle := valueStyle
 	if failedCount > 0 {
 		failedStyle = valueBadStyle
 	}
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ⚠️ Failed:"),
-			failedStyle.Render(fmt.Sprintf("  %s  (%.2f%%)", formatNumber(failedCount), failedPercent)),
+		renderMetricRow(
+			"  ⚠️ Failed:",
+			formatNumberRaw(failedCount),
+			formatBracketPercent(failedPercent),
+			&failedStyle,
+			&failedStyle,
 		),
 	)
 
@@ -683,9 +873,12 @@ func (m Model) renderHTTPLayer(ds *stats.DebugStatsAggregate) string {
 		reconnectStyle = valueWarnStyle
 	}
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  🔄 Reconnects:"),
-			reconnectStyle.Render(fmt.Sprintf("  %s", formatNumber(ds.ReconnectCount))),
+		renderMetricRow(
+			"  🔄 Reconnects:",
+			formatNumberRaw(ds.ReconnectCount),
+			"",
+			&reconnectStyle,
+			nil,
 		),
 	)
 
@@ -695,41 +888,50 @@ func (m Model) renderHTTPLayer(ds *stats.DebugStatsAggregate) string {
 	// 4xx Client Errors (always show, per design spec)
 	http4xxPercent := 0.0
 	if ds.HTTPOpenCount > 0 {
-		http4xxPercent = float64(ds.HTTP4xxCount) / float64(ds.HTTPOpenCount) * 100
+		http4xxPercent = float64(ds.HTTP4xxCount) / float64(ds.HTTPOpenCount)
 	}
 	http4xxStyle := valueStyle
 	if ds.HTTP4xxCount > 0 {
 		http4xxStyle = valueBadStyle
 	}
 	rightCol = append(rightCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  4xx Client:"),
-			http4xxStyle.Render(fmt.Sprintf("  %s  (%.2f%%)", formatNumber(ds.HTTP4xxCount), http4xxPercent)),
+		renderMetricRow(
+			"  4xx Client:",
+			formatNumberRaw(ds.HTTP4xxCount),
+			formatBracketPercent(http4xxPercent),
+			&http4xxStyle,
+			&http4xxStyle,
 		),
 	)
 
 	// 5xx Server Errors (always show, per design spec)
 	http5xxPercent := 0.0
 	if ds.HTTPOpenCount > 0 {
-		http5xxPercent = float64(ds.HTTP5xxCount) / float64(ds.HTTPOpenCount) * 100
+		http5xxPercent = float64(ds.HTTP5xxCount) / float64(ds.HTTPOpenCount)
 	}
 	http5xxStyle := valueStyle
 	if ds.HTTP5xxCount > 0 {
 		http5xxStyle = valueBadStyle
 	}
 	rightCol = append(rightCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  5xx Server:"),
-			http5xxStyle.Render(fmt.Sprintf("  %s  (%.2f%%)", formatNumber(ds.HTTP5xxCount), http5xxPercent)),
+		renderMetricRow(
+			"  5xx Server:",
+			formatNumberRaw(ds.HTTP5xxCount),
+			formatBracketPercent(http5xxPercent),
+			&http5xxStyle,
+			&http5xxStyle,
 		),
 	)
 
 	// Error Rate (always show, per design spec)
 	errorRateStyle := GetErrorRateStyle(ds.ErrorRate)
 	rightCol = append(rightCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  Error Rate:"),
-			errorRateStyle.Render(fmt.Sprintf("  %s", formatPercent(ds.ErrorRate))),
+		renderMetricRow(
+			"  Error Rate:",
+			formatPercentRaw(ds.ErrorRate),
+			"",
+			&errorRateStyle,
+			nil,
 		),
 	)
 
@@ -748,14 +950,18 @@ func (m Model) renderHTTPLayer(ds *stats.DebugStatsAggregate) string {
 	}
 	rightCol = append(rightCol, "") // Empty line separator
 	rightCol = append(rightCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  Status:"),
-			statusStyle.Render(fmt.Sprintf("  %s", statusText)),
+		renderMetricRow(
+			"  Status:",
+			statusText,
+			"",
+			&statusStyle,
+			nil,
 		),
 	)
 
 	// Render two columns
-	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-6) // Account for box padding
+	// Available width: m.width - 2 (borders) - 2 (padding) = m.width - 4
+	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-4) // Account for box borders and padding
 
 	// Combine with header and separator
 	separator := strings.Repeat("─", m.width-4)
@@ -779,11 +985,14 @@ func (m Model) renderTCPLayer(ds *stats.DebugStatsAggregate) string {
 	// TCP Success
 	if ds.TCPSuccessCount > 0 {
 		totalTCP := ds.TCPSuccessCount + ds.TCPRefusedCount + ds.TCPTimeoutCount
-		percent := float64(ds.TCPSuccessCount) / float64(totalTCP) * 100
+		percent := float64(ds.TCPSuccessCount) / float64(totalTCP)
 		leftCol = append(leftCol,
-			lipgloss.JoinHorizontal(lipgloss.Left,
-				lipgloss.NewStyle().Render("  ✅ Success:"),
-				valueGoodStyle.Render(fmt.Sprintf("  %s  (%.1f%%)", formatNumber(ds.TCPSuccessCount), percent)),
+			renderMetricRow(
+				"  ✅ Success:",
+				formatNumberRaw(ds.TCPSuccessCount),
+				formatBracketPercent(percent),
+				&valueGoodStyle,
+				&valueGoodStyle,
 			),
 		)
 	}
@@ -792,32 +1001,38 @@ func (m Model) renderTCPLayer(ds *stats.DebugStatsAggregate) string {
 	totalTCP := ds.TCPSuccessCount + ds.TCPRefusedCount + ds.TCPTimeoutCount
 	tcpRefusedPercent := 0.0
 	if totalTCP > 0 {
-		tcpRefusedPercent = float64(ds.TCPRefusedCount) / float64(totalTCP) * 100
+		tcpRefusedPercent = float64(ds.TCPRefusedCount) / float64(totalTCP)
 	}
 	tcpRefusedStyle := valueStyle
 	if ds.TCPRefusedCount > 0 {
 		tcpRefusedStyle = valueBadStyle
 	}
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  🚫 Refused:"),
-			tcpRefusedStyle.Render(fmt.Sprintf("  %s  (%.1f%%)", formatNumber(ds.TCPRefusedCount), tcpRefusedPercent)),
+		renderMetricRow(
+			"  🚫 Refused:",
+			formatNumberRaw(ds.TCPRefusedCount),
+			formatBracketPercent(tcpRefusedPercent),
+			&tcpRefusedStyle,
+			&tcpRefusedStyle,
 		),
 	)
 
 	// TCP Timeout (always show, per design spec)
 	tcpTimeoutPercent := 0.0
 	if totalTCP > 0 {
-		tcpTimeoutPercent = float64(ds.TCPTimeoutCount) / float64(totalTCP) * 100
+		tcpTimeoutPercent = float64(ds.TCPTimeoutCount) / float64(totalTCP)
 	}
 	tcpTimeoutStyle := valueStyle
 	if ds.TCPTimeoutCount > 0 {
 		tcpTimeoutStyle = valueBadStyle
 	}
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  ⏱️ Timeout:"),
-			tcpTimeoutStyle.Render(fmt.Sprintf("  %s  (%.1f%%)", formatNumber(ds.TCPTimeoutCount), tcpTimeoutPercent)),
+		renderMetricRow(
+			"  ⏱️ Timeout:",
+			formatNumberRaw(ds.TCPTimeoutCount),
+			formatBracketPercent(tcpTimeoutPercent),
+			&tcpTimeoutStyle,
+			&tcpTimeoutStyle,
 		),
 	)
 
@@ -831,10 +1046,15 @@ func (m Model) renderTCPLayer(ds *stats.DebugStatsAggregate) string {
 		healthStyle = valueBadStyle
 	}
 	leftCol = append(leftCol, "") // Empty line separator
+	// Health: bar in value column, percentage in bracket column
+	healthPercentStr := formatPercentRaw(ds.TCPHealthRatio)
 	leftCol = append(leftCol,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			lipgloss.NewStyle().Render("  Health:"),
-			healthStyle.Render(fmt.Sprintf("  %s  %s", healthBar, formatPercent(ds.TCPHealthRatio))),
+		renderMetricRow(
+			"  Health:",
+			healthBar,
+			healthPercentStr,
+			&healthStyle,
+			&healthStyle,
 		),
 	)
 
@@ -849,24 +1069,42 @@ func (m Model) renderTCPLayer(ds *stats.DebugStatsAggregate) string {
 	if ds.TCPConnectAvgMs > 500 {
 		latencyStyle = valueBadStyle
 	}
-	avgStr := fmt.Sprintf("  Avg:   %.1fms", ds.TCPConnectAvgMs)
-	minStr := fmt.Sprintf("  Min:   %.1fms", ds.TCPConnectMinMs)
-	maxStr := fmt.Sprintf("  Max:   %.1fms", ds.TCPConnectMaxMs)
-	if ds.TCPConnectAvgMs == 0 {
-		avgStr = "  Avg:   0.0ms"
-		minStr = "  Min:   0.0ms"
-		maxStr = "  Max:   0.0ms"
-	}
-	rightCol = append(rightCol, latencyStyle.Render(avgStr))
-	rightCol = append(rightCol, latencyStyle.Render(minStr))
-	rightCol = append(rightCol, latencyStyle.Render(maxStr))
+	// Use 3-column layout for proper alignment
+	rightCol = append(rightCol,
+		renderMetricRow(
+			"  Avg:",
+			formatMsRaw(ds.TCPConnectAvgMs),
+			"",
+			&latencyStyle,
+			nil,
+		),
+	)
+	rightCol = append(rightCol,
+		renderMetricRow(
+			"  Min:",
+			formatMsRaw(ds.TCPConnectMinMs),
+			"",
+			&latencyStyle,
+			nil,
+		),
+	)
+	rightCol = append(rightCol,
+		renderMetricRow(
+			"  Max:",
+			formatMsRaw(ds.TCPConnectMaxMs),
+			"",
+			&latencyStyle,
+			nil,
+		),
+	)
 	rightCol = append(rightCol, "") // Empty line
 	rightCol = append(rightCol,
 		mutedStyle.Render("  (Note: Keep-alive = few connects)"),
 	)
 
 	// Render two columns
-	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-6) // Account for box padding
+	// Available width: m.width - 2 (borders) - 2 (padding) = m.width - 4
+	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-4) // Account for box borders and padding
 
 	// Combine with header and separator
 	separator := strings.Repeat("─", m.width-4)
@@ -948,31 +1186,32 @@ func formatMsFromDuration(d time.Duration) string {
 
 // renderTwoColumns renders two columns side-by-side with a separator.
 // Used for layered dashboard (HLS/HTTP/TCP) to match design specification.
+// Fixed widths: left=42, right=42, separator=3, total=87.
+// Increased to 42+42 to accommodate 3-column layout within each section:
+//   - labelColWidth (18) + valueColWidth (10) + bracketColWidth (12) = 40 chars
+//   - Plus 2 chars padding = 42 chars per section
 func renderTwoColumns(left, right []string, totalWidth int) string {
-	// Calculate column widths (account for separator and padding)
-	separatorWidth := 3 // " │ "
-	padding := 2        // Box padding
-	availableWidth := totalWidth - separatorWidth - padding*2
+	// Fixed column widths - increased to accommodate 3-column layout (label|value|bracket)
+	// Each section needs: 18 (label) + 10 (value) + 12 (bracket) = 40 chars, plus 2 chars padding
+	const (
+		leftColWidth  = 42
+		rightColWidth = 42
+		separatorWidth = 3 // " │ "
+	)
 
-	// Split width roughly in half, but ensure minimum width for each column
-	leftWidth := availableWidth / 2
-	rightWidth := availableWidth - leftWidth
-
-	// Ensure minimum column width
-	if leftWidth < 20 {
-		leftWidth = 20
-	}
-	if rightWidth < 20 {
-		rightWidth = 20
-	}
-
-	// Render left column
+	// Render left column with fixed width
 	leftContent := lipgloss.JoinVertical(lipgloss.Left, left...)
+	leftStyle := lipgloss.NewStyle().Width(leftColWidth)
 
-	// Render right column
+	// Render right column with fixed width
 	rightContent := lipgloss.JoinVertical(lipgloss.Left, right...)
+	rightStyle := lipgloss.NewStyle().Width(rightColWidth)
 
 	// Join with separator
 	separator := mutedStyle.Render(" │ ")
-	return lipgloss.JoinHorizontal(lipgloss.Top, leftContent, separator, rightContent)
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		leftStyle.Render(leftContent),
+		separator,
+		rightStyle.Render(rightContent),
+	)
 }

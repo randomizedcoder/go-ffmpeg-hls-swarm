@@ -118,8 +118,7 @@ var (
 				Bold(true).
 				BorderStyle(lipgloss.NormalBorder()).
 				BorderBottom(true).
-				BorderForeground(colorBorder).
-				MarginTop(1)
+				BorderForeground(colorBorder)
 
 	// Footer style
 	footerStyle = lipgloss.NewStyle().

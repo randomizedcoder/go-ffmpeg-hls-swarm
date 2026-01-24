@@ -39,9 +39,6 @@ type ClientManager struct {
 	statsBufferSize    int
 	statsDropThreshold float64
 
-	// Socket mode (experimental)
-	useProgressSocket bool
-
 	// Per-client progress tracking (Phase 2)
 	// Maps clientID -> latest ProgressUpdate
 	latestProgress map[int]*parser.ProgressUpdate
@@ -111,8 +108,7 @@ type ManagerConfig struct {
 	StatsBufferSize    int
 	StatsDropThreshold float64
 
-	// Socket mode (experimental)
-	UseProgressSocket bool
+	// FD mode is always enabled when stats are enabled (no flag needed)
 }
 
 // NewClientManager creates a new ClientManager.
@@ -137,7 +133,6 @@ func NewClientManager(cfg ManagerConfig) *ClientManager {
 		statsEnabled:       cfg.StatsEnabled,
 		statsBufferSize:    bufferSize,
 		statsDropThreshold: threshold,
-		useProgressSocket:  cfg.UseProgressSocket,
 		callbacks:          cfg.Callbacks,
 		supervisors:        make(map[int]*supervisor.Supervisor),
 		latestProgress:     make(map[int]*parser.ProgressUpdate),
@@ -208,8 +203,7 @@ func (m *ClientManager) StartClient(ctx context.Context, clientID int) {
 		StatsEnabled:       m.statsEnabled,
 		StatsBufferSize:    m.statsBufferSize,
 		StatsDropThreshold: m.statsDropThreshold,
-		// Socket mode (experimental)
-		UseProgressSocket: m.useProgressSocket,
+		// FD mode is always enabled when stats are enabled
 		// Parsers (Phase 2 - ProgressParser, Phase 7 - DebugEventParser)
 		ProgressParser: progressParser,
 		StderrParser:   stderrParser,
@@ -590,14 +584,56 @@ func (m *ClientManager) GetDebugStats() stats.DebugStatsAggregate {
 			}
 
 			// Aggregate percentiles (take max across clients - worst-case is useful for load testing)
+			if stats.SegmentWallTimeP25 > agg.SegmentWallTimeP25 {
+				agg.SegmentWallTimeP25 = stats.SegmentWallTimeP25
+			}
 			if stats.SegmentWallTimeP50 > agg.SegmentWallTimeP50 {
 				agg.SegmentWallTimeP50 = stats.SegmentWallTimeP50
+			}
+			if stats.SegmentWallTimeP75 > agg.SegmentWallTimeP75 {
+				agg.SegmentWallTimeP75 = stats.SegmentWallTimeP75
 			}
 			if stats.SegmentWallTimeP95 > agg.SegmentWallTimeP95 {
 				agg.SegmentWallTimeP95 = stats.SegmentWallTimeP95
 			}
 			if stats.SegmentWallTimeP99 > agg.SegmentWallTimeP99 {
 				agg.SegmentWallTimeP99 = stats.SegmentWallTimeP99
+			}
+		}
+
+		// Aggregate manifest wall time
+		agg.ManifestCount += stats.ManifestCount
+		if stats.ManifestCount > 0 {
+			// Weighted average
+			totalCount := agg.ManifestCount
+			if totalCount > 0 {
+				agg.ManifestWallTimeAvg = (agg.ManifestWallTimeAvg*float64(agg.ManifestCount-stats.ManifestCount) +
+					stats.ManifestAvgMs*float64(stats.ManifestCount)) / float64(totalCount)
+			}
+
+			// Min/Max
+			if stats.ManifestMaxMs > agg.ManifestWallTimeMax {
+				agg.ManifestWallTimeMax = stats.ManifestMaxMs
+			}
+			if agg.ManifestWallTimeMin == 0 || stats.ManifestMinMs < agg.ManifestWallTimeMin {
+				agg.ManifestWallTimeMin = stats.ManifestMinMs
+			}
+
+			// Aggregate percentiles (take max across clients - worst-case is useful for load testing)
+			if stats.ManifestWallTimeP25 > agg.ManifestWallTimeP25 {
+				agg.ManifestWallTimeP25 = stats.ManifestWallTimeP25
+			}
+			if stats.ManifestWallTimeP50 > agg.ManifestWallTimeP50 {
+				agg.ManifestWallTimeP50 = stats.ManifestWallTimeP50
+			}
+			if stats.ManifestWallTimeP75 > agg.ManifestWallTimeP75 {
+				agg.ManifestWallTimeP75 = stats.ManifestWallTimeP75
+			}
+			if stats.ManifestWallTimeP95 > agg.ManifestWallTimeP95 {
+				agg.ManifestWallTimeP95 = stats.ManifestWallTimeP95
+			}
+			if stats.ManifestWallTimeP99 > agg.ManifestWallTimeP99 {
+				agg.ManifestWallTimeP99 = stats.ManifestWallTimeP99
 			}
 		}
 

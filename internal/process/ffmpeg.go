@@ -108,10 +108,11 @@ func DefaultFFmpegConfig(streamURL string) *FFmpegConfig {
 type FFmpegRunner struct {
 	config *FFmpegConfig
 
-	// progressSocket is the Unix socket path for progress output.
-	// Set by SetProgressSocket() when socket mode is enabled.
-	// When set, uses "-progress unix://<path>" instead of "pipe:1".
-	progressSocket string
+	// progressFD is the file descriptor number for progress output.
+	// Set by SetProgressFD() when stats are enabled.
+	// When set, uses "-progress pipe:N" where N is the FD number.
+	// FD 3 is the first ExtraFiles entry, FD 4 is the second, etc.
+	progressFD int
 
 	// clientID is set during BuildCommand for per-client User-Agent.
 	// This enables correlation with origin logs and packet captures.
@@ -130,13 +131,14 @@ func (r *FFmpegRunner) Name() string {
 	return "ffmpeg"
 }
 
-// SetProgressSocket sets the Unix socket path for progress output.
-// When set, FFmpeg will use "-progress unix://<path>" instead of "pipe:1".
-// This provides cleaner separation from stderr when using -loglevel debug.
+// SetProgressFD sets the file descriptor number for progress output.
+// When set, FFmpeg will use "-progress pipe:N" where N is the FD number.
+// FD 3 is the first ExtraFiles entry, FD 4 is the second, etc.
+// This provides cleaner separation from stderr without creating files.
 //
-// Called by Supervisor before BuildCommand() when socket mode is enabled.
-func (r *FFmpegRunner) SetProgressSocket(path string) {
-	r.progressSocket = path
+// Called by Supervisor before BuildCommand() when stats are enabled.
+func (r *FFmpegRunner) SetProgressFD(fd int) {
+	r.progressFD = fd
 }
 
 // BuildCommand creates an exec.Cmd for FFmpeg with all configured options.
@@ -171,8 +173,8 @@ func (r *FFmpegRunner) buildArgs() []string {
 		// Default to "debug" to capture manifest refreshes ([hls @ ...] Opening '...m3u8')
 		// which are logged at DEBUG level. Verbose only captures segment requests.
 		baseLevel := "debug" // Default to debug for stats (required for manifest tracking)
-		if r.config.DebugLogging && r.progressSocket != "" {
-			// Full debug when socket mode enabled (safe - progress is separated)
+		if r.config.DebugLogging {
+			// Full debug when enabled (safe - progress is on separate FD)
 			baseLevel = "debug"
 		} else if r.config.StatsLogLevel != "" {
 			// Use configured stats level (allows override to verbose if needed)
@@ -188,12 +190,14 @@ func (r *FFmpegRunner) buildArgs() []string {
 	}
 
 	// Progress output for stats parsing
+	// Always uses FD mode (pipe:3) when stats are enabled for clean separation from stderr
 	if r.config.StatsEnabled {
-		if r.progressSocket != "" {
-			// Socket mode: use Unix socket for cleaner separation from stderr
-			args = append(args, "-progress", "unix://"+r.progressSocket)
+		if r.progressFD > 0 {
+			// FD mode: use file descriptor for cleaner separation from stderr
+			// No filesystem files needed, completely ephemeral
+			args = append(args, "-progress", fmt.Sprintf("pipe:%d", r.progressFD))
 		} else {
-			// Pipe mode: output key=value format to stdout
+			// Fallback to stdout if FD not set (should not happen in normal operation)
 			args = append(args, "-progress", "pipe:1")
 		}
 		// Also add -stats_period for more frequent updates (every 1 second)

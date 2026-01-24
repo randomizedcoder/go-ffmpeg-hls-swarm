@@ -95,6 +95,14 @@ var (
 	// BANDWIDTH=1234567 from manifest parsing
 	reBandwidth = regexp.MustCompile(`BANDWIDTH=(\d+)`)
 
+	// [hls @ 0x55...] Format hls probed with size=2048 and score=100
+	// Indicates manifest download and parsing is complete (initial manifest only)
+	reFormatProbed = regexp.MustCompile(`\[hls @ 0x[0-9a-f]+\] (?:\[(?:debug|verbose|info)\] )?Format hls probed with size=(\d+) and score=(\d+)`)
+
+	// [hls @ 0x55...] Skip ('#EXT-X-VERSION:3')
+	// Indicates manifest parsing has started (download complete) - appears on refreshes
+	reManifestSkip = regexp.MustCompile(`\[hls @ 0x[0-9a-f]+\] (?:\[(?:verbose|debug|info)\] )?Skip \('#EXT-X-VERSION:`)
+
 	// Error event patterns (critical for load testing)
 
 	// [http @ 0x55...] HTTP error 503 Service Unavailable
@@ -179,6 +187,22 @@ type DebugEventParser struct {
 	segmentWallTimeDigest *tdigest.TDigest
 	segmentWallTimeDigestMu sync.Mutex // TDigest is not thread-safe
 
+	// Manifest Wall Time tracking (similar to Segment Wall Time)
+	// Maps URL -> start time
+	pendingManifests   map[string]time.Time
+	manifestWallTimes  []time.Duration // Ring buffer (last N samples)
+	manifestWallTimeP0 int             // Ring buffer position
+	manifestCount      atomic.Int64
+
+	// Manifest wall time aggregates
+	manifestWallTimeSum   int64 // nanoseconds
+	manifestWallTimeMax   int64 // nanoseconds
+	manifestWallTimeMin   int64 // nanoseconds (-1 = unset)
+
+	// Manifest wall time percentiles (using accurate FFmpeg timestamps)
+	manifestWallTimeDigest *tdigest.TDigest
+	manifestWallTimeDigestMu sync.Mutex // TDigest is not thread-safe
+
 	// TCP Connect tracking (SECONDARY - only for new connections)
 	// Maps "IP:port" -> connect start time
 	pendingTCPConnect  map[string]time.Time
@@ -260,6 +284,9 @@ func NewDebugEventParser(clientID int, targetDuration time.Duration, callback De
 		segmentWallTimeMin:    -1, // -1 = unset
 		tcpConnectMin:         -1, // -1 = unset
 		segmentWallTimeDigest: tdigest.NewWithCompression(100), // ~100 centroids, ~10KB
+		pendingManifests:      make(map[string]time.Time),
+		manifestWallTimeMin:   -1, // -1 = unset
+		manifestWallTimeDigest: tdigest.NewWithCompression(100), // ~100 centroids, ~10KB
 	}
 }
 
@@ -274,6 +301,8 @@ func (p *DebugEventParser) ParseLine(line string) {
 	// Check for common keywords to skip irrelevant lines quickly
 	if !strings.Contains(line, " @ 0x") &&
 		!strings.Contains(line, "BANDWIDTH=") &&
+		!strings.Contains(line, "Format") &&
+		!strings.Contains(line, "Skip") &&
 		!strings.Contains(line, "HTTP error") &&
 		!strings.Contains(line, "reconnect") &&
 		!strings.Contains(line, "Failed to") &&
@@ -339,7 +368,19 @@ func (p *DebugEventParser) ParseLine(line string) {
 		return
 	}
 
-	// 8. Bandwidth (can appear anywhere in manifest parsing)
+	// 8. Format Probed (manifest download and parsing complete - initial manifest only)
+	if m := reFormatProbed.FindStringSubmatch(line); m != nil {
+		p.handleFormatProbed(now)
+		return
+	}
+
+	// 9. Manifest Skip (manifest parsing started - download complete, appears on refreshes)
+	if reManifestSkip.MatchString(line) {
+		p.handleFormatProbed(now) // Reuse same handler - completes pending manifest
+		return
+	}
+
+	// 10. Bandwidth (can appear anywhere in manifest parsing)
 	if m := reBandwidth.FindStringSubmatch(line); m != nil {
 		bw, _ := strconv.ParseInt(m[1], 10, 64)
 		p.manifestBandwidth.Store(bw)
@@ -355,14 +396,14 @@ func (p *DebugEventParser) ParseLine(line string) {
 
 	// Error events (less frequent but critical for load testing)
 
-	// 9. HTTP Error (4xx/5xx)
+	// 11. HTTP Error (4xx/5xx)
 	if m := reHTTPError.FindStringSubmatch(line); m != nil {
 		code, _ := strconv.Atoi(m[1])
 		p.handleHTTPError(now, code, m[2])
 		return
 	}
 
-	// 10. Content-Length header (tracks bytes downloaded - critical for live streams)
+	// 12. Content-Length header (tracks bytes downloaded - critical for live streams)
 	if m := reContentLength.FindStringSubmatch(line); m != nil {
 		if size, err := strconv.ParseInt(m[1], 10, 64); err == nil {
 			p.bytesDownloaded.Add(size)
@@ -378,13 +419,13 @@ func (p *DebugEventParser) ParseLine(line string) {
 		return
 	}
 
-	// 11. Reconnect attempt
+	// 13. Reconnect attempt
 	if m := reReconnect.FindStringSubmatch(line); m != nil {
 		p.handleReconnect(now)
 		return
 	}
 
-	// 12. Segment failed
+	// 14. Segment failed
 	if m := reSegmentFailed.FindStringSubmatch(line); m != nil {
 		segID, _ := strconv.ParseInt(m[1], 10, 64)
 		playlistID, _ := strconv.Atoi(m[2])
@@ -392,7 +433,7 @@ func (p *DebugEventParser) ParseLine(line string) {
 		return
 	}
 
-	// 13. Segment skipped (after max retries)
+	// 15. Segment skipped (after max retries)
 	if m := reSegmentSkipped.FindStringSubmatch(line); m != nil {
 		segID, _ := strconv.ParseInt(m[1], 10, 64)
 		playlistID, _ := strconv.Atoi(m[2])
@@ -400,18 +441,67 @@ func (p *DebugEventParser) ParseLine(line string) {
 		return
 	}
 
-	// 14. Playlist failed
+	// 16. Playlist failed
 	if m := rePlaylistFailed.FindStringSubmatch(line); m != nil {
 		playlistID, _ := strconv.Atoi(m[1])
 		p.handlePlaylistFailed(now, playlistID)
 		return
 	}
 
-	// 14. Segments expired
+	// 17. Segments expired
 	if m := reSegmentsExpired.FindStringSubmatch(line); m != nil {
 		skipCount, _ := strconv.Atoi(m[1])
 		p.handleSegmentsExpired(now, skipCount)
 		return
+	}
+}
+
+// handleFormatProbed is called when manifest format is probed.
+// This indicates the manifest download and parsing is complete.
+func (p *DebugEventParser) handleFormatProbed(now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Complete oldest pending manifest (if any)
+	// Format probed happens immediately after manifest download and parsing
+	if len(p.pendingManifests) > 0 {
+		var oldestURL string
+		var oldestTime time.Time
+		for u, t := range p.pendingManifests {
+			if oldestTime.IsZero() || t.Before(oldestTime) {
+				oldestURL = u
+				oldestTime = t
+			}
+		}
+		if oldestURL != "" {
+			wallTime := now.Sub(oldestTime)
+			delete(p.pendingManifests, oldestURL)
+
+			// Record manifest wall time (similar to segment wall time)
+			ns := int64(wallTime)
+			p.manifestCount.Add(1)
+			p.manifestWallTimeSum += ns
+
+			if p.manifestWallTimeMin < 0 || ns < p.manifestWallTimeMin {
+				p.manifestWallTimeMin = ns
+			}
+			if ns > p.manifestWallTimeMax {
+				p.manifestWallTimeMax = ns
+			}
+
+			// Ring buffer
+			if len(p.manifestWallTimes) < defaultRingSize {
+				p.manifestWallTimes = append(p.manifestWallTimes, wallTime)
+			} else {
+				p.manifestWallTimes[p.manifestWallTimeP0] = wallTime
+				p.manifestWallTimeP0 = (p.manifestWallTimeP0 + 1) % defaultRingSize
+			}
+
+			// Add to T-Digest for percentile calculation
+			p.manifestWallTimeDigestMu.Lock()
+			p.manifestWallTimeDigest.Add(float64(wallTime.Nanoseconds()), 1)
+			p.manifestWallTimeDigestMu.Unlock()
+		}
 	}
 }
 
@@ -547,6 +637,11 @@ func (p *DebugEventParser) handleTCPFailed(now time.Time, reason string) {
 // handlePlaylistOpen is called when manifest is refreshed.
 func (p *DebugEventParser) handlePlaylistOpen(now time.Time, url string) {
 	p.playlistRefreshes.Add(1)
+
+	// Track manifest download start time
+	p.mu.Lock()
+	p.pendingManifests[url] = now
+	p.mu.Unlock()
 
 	p.mu.Lock()
 	if !p.lastPlaylistRefresh.IsZero() {
@@ -799,9 +894,23 @@ type DebugStats struct {
 	SegmentMinMs float64
 	SegmentMaxMs float64
 	// Percentiles (from T-Digest, using accurate timestamps)
+	SegmentWallTimeP25 time.Duration // 25th percentile
 	SegmentWallTimeP50 time.Duration // 50th percentile (median)
+	SegmentWallTimeP75 time.Duration // 75th percentile
 	SegmentWallTimeP95 time.Duration // 95th percentile
 	SegmentWallTimeP99 time.Duration // 99th percentile
+
+	// Manifest wall time (using accurate FFmpeg timestamps)
+	ManifestCount int64
+	ManifestAvgMs float64
+	ManifestMinMs float64
+	ManifestMaxMs float64
+	// Percentiles (from T-Digest, using accurate timestamps)
+	ManifestWallTimeP25 time.Duration // 25th percentile
+	ManifestWallTimeP50 time.Duration // 50th percentile (median)
+	ManifestWallTimeP75 time.Duration // 75th percentile
+	ManifestWallTimeP95 time.Duration // 95th percentile
+	ManifestWallTimeP99 time.Duration // 99th percentile
 
 	// TCP connect time (SECONDARY metric - only new connections)
 	TCPConnectCount int64
@@ -862,6 +971,7 @@ func (p *DebugEventParser) Stats() DebugStats {
 		PlaylistRefreshes: p.playlistRefreshes.Load(),
 		PlaylistLateCount: p.playlistLateCount.Load(),
 		SequenceSkips:     p.sequenceSkips.Load(),
+		ManifestCount:     p.manifestCount.Load(),
 
 		// Error metrics
 		HTTPErrorCount:      p.httpErrorCount.Load(),
@@ -887,7 +997,9 @@ func (p *DebugEventParser) Stats() DebugStats {
 		// Calculate percentiles from T-Digest (using accurate FFmpeg timestamps)
 		p.segmentWallTimeDigestMu.Lock()
 		if p.segmentWallTimeDigest != nil {
+			stats.SegmentWallTimeP25 = time.Duration(p.segmentWallTimeDigest.Quantile(0.25))
 			stats.SegmentWallTimeP50 = time.Duration(p.segmentWallTimeDigest.Quantile(0.50))
+			stats.SegmentWallTimeP75 = time.Duration(p.segmentWallTimeDigest.Quantile(0.75))
 			stats.SegmentWallTimeP95 = time.Duration(p.segmentWallTimeDigest.Quantile(0.95))
 			stats.SegmentWallTimeP99 = time.Duration(p.segmentWallTimeDigest.Quantile(0.99))
 		}
@@ -909,6 +1021,26 @@ func (p *DebugEventParser) Stats() DebugStats {
 		stats.TCPHealthRatio = float64(stats.TCPSuccessCount) / float64(total)
 	} else {
 		stats.TCPHealthRatio = 1.0 // No failures = healthy
+	}
+
+	// Manifest wall time averages
+	if stats.ManifestCount > 0 {
+		stats.ManifestAvgMs = float64(p.manifestWallTimeSum) / float64(stats.ManifestCount) / 1e6
+		if p.manifestWallTimeMin >= 0 {
+			stats.ManifestMinMs = float64(p.manifestWallTimeMin) / 1e6
+		}
+		stats.ManifestMaxMs = float64(p.manifestWallTimeMax) / 1e6
+
+		// Calculate percentiles from T-Digest (using accurate FFmpeg timestamps)
+		p.manifestWallTimeDigestMu.Lock()
+		if p.manifestWallTimeDigest != nil {
+			stats.ManifestWallTimeP25 = time.Duration(p.manifestWallTimeDigest.Quantile(0.25))
+			stats.ManifestWallTimeP50 = time.Duration(p.manifestWallTimeDigest.Quantile(0.50))
+			stats.ManifestWallTimeP75 = time.Duration(p.manifestWallTimeDigest.Quantile(0.75))
+			stats.ManifestWallTimeP95 = time.Duration(p.manifestWallTimeDigest.Quantile(0.95))
+			stats.ManifestWallTimeP99 = time.Duration(p.manifestWallTimeDigest.Quantile(0.99))
+		}
+		p.manifestWallTimeDigestMu.Unlock()
 	}
 
 	// Playlist jitter

@@ -701,7 +701,12 @@ func (c *Collector) RecordStats(stats *AggregatedStatsUpdate) {
 		prevCount := c.prevHTTPErrors[code]
 		delta := count - prevCount
 		if delta > 0 {
-			hlsHTTPErrorsTotal.WithLabelValues(strconv.Itoa(code)).Add(float64(delta))
+			if code == 0 {
+				// Code 0 is the sentinel for "other" (non-standard HTTP error codes)
+				hlsHTTPErrorsTotal.WithLabelValues("other").Add(float64(delta))
+			} else {
+				hlsHTTPErrorsTotal.WithLabelValues(strconv.Itoa(code)).Add(float64(delta))
+			}
 		}
 		c.prevHTTPErrors[code] = count
 	}
