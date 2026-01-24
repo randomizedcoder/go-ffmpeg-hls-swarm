@@ -251,6 +251,15 @@ Safety & Diagnostics:
 Observability:
   -metrics string     Prometheus metrics address (default "0.0.0.0:9090")
   -v                  Verbose logging
+  -tui                Enable live terminal dashboard
+
+Origin Metrics (optional):
+  -origin-metrics string          Origin node_exporter URL (e.g., http://10.177.0.10:9100/metrics)
+  -nginx-metrics string           Origin nginx_exporter URL (e.g., http://10.177.0.10:9113/metrics)
+  -origin-metrics-host string    Origin server hostname/IP (uses default ports: 9100, 9113)
+  -origin-metrics-node-port int  Node exporter port (default: 9100)
+  -origin-metrics-nginx-port int  Nginx exporter port (default: 9113)
+  -origin-metrics-interval duration Scrape interval (default: 2s)
 
 FFmpeg:
   -ffmpeg string      Path to FFmpeg binary (default "ffmpeg")
@@ -301,6 +310,17 @@ See [CONFIGURATION.md](docs/CONFIGURATION.md) for complete flag reference and ex
 # 30-minute timed load test
 ./go-ffmpeg-hls-swarm -clients 200 -ramp-rate 5 -duration 30m \
   https://cdn.example.com/live/master.m3u8
+
+# Load test with origin metrics (requires Prometheus exporters on origin)
+./go-ffmpeg-hls-swarm -clients 100 -tui \
+  -origin-metrics-host 10.177.0.10 \
+  http://10.177.0.10:17080/stream.m3u8
+
+# Load test with explicit metrics URLs
+./go-ffmpeg-hls-swarm -clients 100 -tui \
+  -origin-metrics http://10.177.0.10:9100/metrics \
+  -nginx-metrics http://10.177.0.10:9113/metrics \
+  http://10.177.0.10:17080/stream.m3u8
 ```
 
 ---
@@ -420,7 +440,9 @@ After running a load test, look for these patterns:
 
 ## Metrics
 
-Available at `/metrics` (default port 9090):
+### Swarm Client Metrics
+
+Available at `/metrics` (default port 17091):
 
 | Metric | Description |
 |--------|-------------|
@@ -429,6 +451,69 @@ Available at `/metrics` (default port 9090):
 | `hlsswarm_clients_started_total` | Total clients ever started |
 | `hlsswarm_clients_restarted_total` | Total restart events |
 | `hlsswarm_process_exits_total{code}` | Exits by exit code |
+
+### Origin Server Metrics (Optional)
+
+When enabled with `-origin-metrics` or `-origin-metrics-host`, the TUI dashboard displays real-time origin server metrics:
+
+- **CPU Usage** — Percentage with progress bar
+- **Memory Usage** — Used/total with percentage
+- **Network Rates** — Bytes/sec in and out
+- **Nginx Connections** — Active client connections
+- **Nginx Request Rate** — Requests per second
+- **Nginx Request Latency** — Average request duration (P99)
+
+**Requirements:**
+- Origin server must have Prometheus exporters running:
+  - `node_exporter` (default port 9100) for system metrics
+  - `nginx_exporter` (default port 9113) for Nginx metrics
+- Feature is opt-in (disabled by default)
+
+**Usage Examples:**
+
+```bash
+# Using host (simplest - uses default ports)
+./go-ffmpeg-hls-swarm -clients 100 -tui \
+  -origin-metrics-host 10.177.0.10 \
+  http://10.177.0.10:17080/stream.m3u8
+
+# Using explicit URLs
+./go-ffmpeg-hls-swarm -clients 100 -tui \
+  -origin-metrics http://10.177.0.10:9100/metrics \
+  -nginx-metrics http://10.177.0.10:9113/metrics \
+  http://10.177.0.10:17080/stream.m3u8
+
+# With custom ports
+./go-ffmpeg-hls-swarm -clients 100 -tui \
+  -origin-metrics-host 10.177.0.10 \
+  -origin-metrics-node-port 19100 \
+  -origin-metrics-nginx-port 19113 \
+  http://10.177.0.10:17080/stream.m3u8
+
+# Custom scrape interval (reduce load on origin)
+./go-ffmpeg-hls-swarm -clients 100 -tui \
+  -origin-metrics-host 10.177.0.10 \
+  -origin-metrics-interval 5s \
+  http://10.177.0.10:17080/stream.m3u8
+```
+
+**Makefile Targets:**
+
+```bash
+# Load test with origin metrics (user-mode networking)
+make load-test-100-with-metrics
+
+# Load test with origin metrics (TAP networking - recommended)
+make load-test-100-with-metrics-tap
+
+# Load test with custom ports
+make load-test-100-with-metrics-custom
+
+# Load test with custom scrape interval
+make load-test-100-with-metrics-interval
+```
+
+See [Origin Metrics Implementation Plan](docs/ORIGIN_METRICS_IMPLEMENTATION_PLAN.md) for detailed documentation.
 
 ---
 
@@ -561,6 +646,7 @@ make check                          # Run all checks
 - ✅ **MicroVM deployment** — Run `make microvm-origin` for full VM isolation (requires KVM).
 - ✅ **TUI Dashboard** — Live metrics display with `-tui` flag (interactive terminal only).
 - ✅ **Prometheus Metrics** — Available at `http://localhost:17091/metrics`.
+- ✅ **Origin Server Metrics** — Real-time CPU, memory, network, and Nginx stats in TUI (requires Prometheus exporters).
 </details>
 
 <details>

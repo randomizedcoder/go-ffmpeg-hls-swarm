@@ -118,12 +118,12 @@ func (m Model) renderSummaryView() string {
 	if m.stats != nil {
 		sections = append(sections, m.renderRequestStats())
 		sections = append(sections, m.renderLatencyStats())
-		sections = append(sections, m.renderHealthStats())
+		sections = append(sections, m.renderHealthAndErrors())
+	}
 
-		// Errors section (only if there are errors)
-		if m.hasErrors() {
-			sections = append(sections, m.renderErrorStats())
-		}
+	// Origin metrics section (if configured)
+	if m.originScraper != nil {
+		sections = append(sections, m.renderOriginMetrics())
 	}
 
 	// Layered debug metrics (HLS/HTTP/TCP) - Phase 7
@@ -312,13 +312,16 @@ func renderLatencyRow(label string, d time.Duration) string {
 // Health Statistics
 // =============================================================================
 
-func (m Model) renderHealthStats() string {
+// renderHealthAndErrors renders Playback Health and Errors side-by-side.
+func (m Model) renderHealthAndErrors() string {
 	if m.stats == nil {
 		return ""
 	}
 
 	s := m.stats
+	var leftCol, rightCol []string
 
+	// === LEFT COLUMN: Playback Health ===
 	// Speed distribution
 	total := s.ClientsAboveRealtime + s.ClientsBelowRealtime
 	var speedDist string
@@ -341,7 +344,8 @@ func (m Model) renderHealthStats() string {
 	}
 	stalled := stalledStyle.Render(fmt.Sprintf("%d", s.StalledClients))
 
-	rows := []string{
+	leftCol = append(leftCol, sectionHeaderStyle.Render("Playback Health"))
+	leftCol = append(leftCol,
 		RenderKeyValue("Speed Distribution", speedDist),
 		lipgloss.JoinHorizontal(lipgloss.Left,
 			labelStyle.Render("Average Speed:"),
@@ -351,7 +355,7 @@ func (m Model) renderHealthStats() string {
 			labelStyle.Render("Stalled Clients:"),
 			stalled,
 		),
-	}
+	)
 
 	// Add drift info if available
 	if s.MaxDrift > 0 {
@@ -359,7 +363,7 @@ func (m Model) renderHealthStats() string {
 		if s.ClientsWithHighDrift > 0 {
 			driftStyle = valueWarnStyle
 		}
-		rows = append(rows,
+		leftCol = append(leftCol,
 			lipgloss.JoinHorizontal(lipgloss.Left,
 				labelStyle.Render("Max Drift:"),
 				driftStyle.Render(formatMsFromDuration(s.MaxDrift)),
@@ -367,15 +371,63 @@ func (m Model) renderHealthStats() string {
 		)
 	}
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		append([]string{sectionHeaderStyle.Render("Playback Health")}, rows...)...,
-	)
+	// === RIGHT COLUMN: Errors ===
+	if m.hasErrors() {
+		rightCol = append(rightCol, sectionHeaderStyle.Render("Errors"))
 
-	return boxStyle.Width(m.width - 2).Render(content)
+		// HTTP errors
+		for code, count := range s.TotalHTTPErrors {
+			rightCol = append(rightCol,
+				lipgloss.JoinHorizontal(lipgloss.Left,
+					labelStyle.Render(fmt.Sprintf("HTTP %d:", code)),
+					valueBadStyle.Render(fmt.Sprintf("%d", count)),
+				),
+			)
+		}
+
+		// Timeouts
+		if s.TotalTimeouts > 0 {
+			rightCol = append(rightCol,
+				lipgloss.JoinHorizontal(lipgloss.Left,
+					labelStyle.Render("Timeouts:"),
+					valueBadStyle.Render(fmt.Sprintf("%d", s.TotalTimeouts)),
+				),
+			)
+		}
+
+		// Reconnections
+		if s.TotalReconnections > 0 {
+			rightCol = append(rightCol,
+				lipgloss.JoinHorizontal(lipgloss.Left,
+					labelStyle.Render("Reconnections:"),
+					valueWarnStyle.Render(fmt.Sprintf("%d", s.TotalReconnections)),
+				),
+			)
+		}
+
+		// Error rate
+		errorRateStyle := GetErrorRateStyle(s.ErrorRate)
+		rightCol = append(rightCol,
+			lipgloss.JoinHorizontal(lipgloss.Left,
+				labelStyle.Render("Error Rate:"),
+				errorRateStyle.Render(formatPercent(s.ErrorRate)),
+			),
+		)
+	} else {
+		// Show empty errors section
+		rightCol = append(rightCol, sectionHeaderStyle.Render("Errors"))
+		rightCol = append(rightCol, dimStyle.Render("  (no errors)"))
+	}
+
+	// Render two columns side-by-side
+	// Available width: m.width - 2 (borders) - 2 (padding) = m.width - 4
+	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-4)
+
+	return boxStyle.Width(m.width - 2).Render(twoColContent)
 }
 
 // =============================================================================
-// Error Statistics
+// Error Statistics (helper)
 // =============================================================================
 
 func (m Model) hasErrors() bool {
@@ -385,61 +437,6 @@ func (m Model) hasErrors() bool {
 	return len(m.stats.TotalHTTPErrors) > 0 ||
 		m.stats.TotalTimeouts > 0 ||
 		m.stats.TotalReconnections > 0
-}
-
-func (m Model) renderErrorStats() string {
-	if m.stats == nil {
-		return ""
-	}
-
-	s := m.stats
-
-	var rows []string
-
-	// HTTP errors
-	for code, count := range s.TotalHTTPErrors {
-		rows = append(rows,
-			lipgloss.JoinHorizontal(lipgloss.Left,
-				labelStyle.Render(fmt.Sprintf("HTTP %d:", code)),
-				valueBadStyle.Render(fmt.Sprintf("%d", count)),
-			),
-		)
-	}
-
-	// Timeouts
-	if s.TotalTimeouts > 0 {
-		rows = append(rows,
-			lipgloss.JoinHorizontal(lipgloss.Left,
-				labelStyle.Render("Timeouts:"),
-				valueBadStyle.Render(fmt.Sprintf("%d", s.TotalTimeouts)),
-			),
-		)
-	}
-
-	// Reconnections
-	if s.TotalReconnections > 0 {
-		rows = append(rows,
-			lipgloss.JoinHorizontal(lipgloss.Left,
-				labelStyle.Render("Reconnections:"),
-				valueWarnStyle.Render(fmt.Sprintf("%d", s.TotalReconnections)),
-			),
-		)
-	}
-
-	// Error rate
-	errorRateStyle := GetErrorRateStyle(s.ErrorRate)
-	rows = append(rows,
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			labelStyle.Render("Error Rate:"),
-			errorRateStyle.Render(formatPercent(s.ErrorRate)),
-		),
-	)
-
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		append([]string{sectionHeaderStyle.Render("Errors")}, rows...)...,
-	)
-
-	return boxStyle.Width(m.width - 2).Render(content)
 }
 
 // =============================================================================
@@ -1214,4 +1211,102 @@ func renderTwoColumns(left, right []string, totalWidth int) string {
 		separator,
 		rightStyle.Render(rightContent),
 	)
+}
+
+// =============================================================================
+// Origin Metrics
+// =============================================================================
+
+// renderOriginMetrics renders origin server metrics.
+func (m Model) renderOriginMetrics() string {
+	if m.originScraper == nil {
+		return ""
+	}
+
+	metrics := m.originScraper.GetMetrics()
+	if metrics == nil {
+		return boxStyle.Width(m.width - 2).Render(
+			dimStyle.Render("Origin metrics not configured"),
+		)
+	}
+
+	if !metrics.Healthy {
+		errorMsg := "Origin metrics unavailable"
+		if metrics.Error != "" {
+			errorMsg = fmt.Sprintf("Origin metrics: %s", metrics.Error)
+		}
+		return boxStyle.Width(m.width - 2).Render(
+			dimStyle.Render(errorMsg),
+		)
+	}
+
+	var leftCol, rightCol []string
+
+	// === LEFT COLUMN: Origin Server ===
+	leftCol = append(leftCol, sectionHeaderStyle.Render("Origin Server"))
+	leftCol = append(leftCol, renderOriginMetricRow("CPU:", fmt.Sprintf("%.1f%%", metrics.CPUPercent), renderProgressBar(metrics.CPUPercent/100, 10)))
+	leftCol = append(leftCol, renderOriginMetricRow("Memory:",
+		fmt.Sprintf("%s / %s", formatBytesRaw(int64(metrics.MemUsed)), formatBytesRaw(metrics.MemTotal)),
+		fmt.Sprintf("(%.0f%%)", metrics.MemPercent)))
+	leftCol = append(leftCol, renderOriginMetricRow("Net In:", formatBytesRaw(int64(metrics.NetInRate))+"/s", ""))
+	leftCol = append(leftCol, renderOriginMetricRow("Net Out:", formatBytesRaw(int64(metrics.NetOutRate))+"/s", ""))
+
+	// === RIGHT COLUMN: Nginx ===
+	if metrics.NginxConnections > 0 || metrics.NginxReqRate > 0 {
+		rightCol = append(rightCol, sectionHeaderStyle.Render("Nginx"))
+		rightCol = append(rightCol, renderOriginMetricRow("Connections:", formatNumberRaw(metrics.NginxConnections), ""))
+		rightCol = append(rightCol, renderOriginMetricRow("Req/sec:", fmt.Sprintf("%.1f", metrics.NginxReqRate), ""))
+		if metrics.NginxReqDuration > 0 {
+			rightCol = append(rightCol, renderOriginMetricRow("Req Time P99:", formatMsRaw(metrics.NginxReqDuration*1000), ""))
+		}
+	} else {
+		// Show empty Nginx section
+		rightCol = append(rightCol, sectionHeaderStyle.Render("Nginx"))
+		rightCol = append(rightCol, dimStyle.Render("  (no data)"))
+	}
+
+	// Render two columns side-by-side
+	// Available width: m.width - 2 (borders) - 2 (padding) = m.width - 4
+	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-4)
+
+	return boxStyle.Width(m.width - 2).Render(twoColContent)
+}
+
+// renderOriginMetricRow renders a single origin metric row.
+func renderOriginMetricRow(label, value, extra string) string {
+	parts := []string{
+		labelWideStyle.Render(label),
+		valueStyle.Width(20).Render(value),
+	}
+	if extra != "" {
+		parts = append(parts, mutedStyle.Render(extra))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+}
+
+// renderProgressBar renders a simple text progress bar.
+func renderProgressBar(progress float64, width int) string {
+	filled := int(progress * float64(width))
+	if filled > width {
+		filled = width
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	return fmt.Sprintf("[%s]", bar)
+}
+
+// formatBytesRaw formats bytes without width/alignment (for use in renderOriginMetricRow).
+func formatBytesRaw(n int64) string {
+	if n >= 1_000_000_000 {
+		return fmt.Sprintf("%.2f GB", float64(n)/1_000_000_000)
+	}
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.2f MB", float64(n)/1_000_000)
+	}
+	if n >= 1_000 {
+		return fmt.Sprintf("%.2f KB", float64(n)/1_000)
+	}
+	return fmt.Sprintf("%d B", n)
 }

@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/common/expfmt"
@@ -38,39 +39,57 @@ type OriginMetrics struct {
 }
 
 // OriginScraper scrapes metrics from node_exporter and nginx_exporter.
+// Uses atomic.Value for lock-free metric reads.
 type OriginScraper struct {
-	nodeExporterURL string
+	nodeExporterURL  string
 	nginxExporterURL string
-	interval        time.Duration
-	metrics         *OriginMetrics
-	mu              sync.RWMutex
-	logger          *slog.Logger
-	httpClient      *http.Client
+	interval         time.Duration
+	logger           *slog.Logger
+	httpClient       *http.Client
 
-	// For rate calculations
-	lastNetIn     float64
-	lastNetOut    float64
-	lastNetTime   time.Time
-	lastNginxReqs float64
-	lastNginxTime time.Time
+	// Atomic storage (lock-free reads)
+	metrics atomic.Value // *OriginMetrics
+
+	// Rate calculation state (atomic for lock-free updates)
+	lastNetIn     atomic.Uint64 // float64 as bits (math.Float64bits)
+	lastNetOut    atomic.Uint64 // float64 as bits
+	lastNetTime   atomic.Value  // time.Time
+	lastNginxReqs atomic.Uint64 // float64 as bits
+	lastNginxTime atomic.Value  // time.Time
 }
 
 // NewOriginScraper creates a new origin metrics scraper.
+// Returns nil if both URLs are empty (feature disabled).
 func NewOriginScraper(nodeExporterURL, nginxExporterURL string, interval time.Duration, logger *slog.Logger) *OriginScraper {
-	return &OriginScraper{
+	if nodeExporterURL == "" && nginxExporterURL == "" {
+		return nil // Feature disabled
+	}
+
+	scraper := &OriginScraper{
 		nodeExporterURL:  nodeExporterURL,
 		nginxExporterURL: nginxExporterURL,
 		interval:         interval,
-		metrics:          &OriginMetrics{},
 		logger:           logger,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
 	}
+
+	// Initialize with empty metrics
+	scraper.metrics.Store(&OriginMetrics{
+		Healthy: false,
+		Error:   "Not yet scraped",
+	})
+
+	return scraper
 }
 
 // Run starts the scraper goroutine.
 func (s *OriginScraper) Run(ctx context.Context) {
+	if s == nil {
+		return // Feature disabled
+	}
+
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
@@ -87,25 +106,32 @@ func (s *OriginScraper) Run(ctx context.Context) {
 	}
 }
 
-// GetMetrics returns the current metrics (thread-safe).
+// GetMetrics returns the current metrics (thread-safe, lock-free).
 func (s *OriginScraper) GetMetrics() *OriginMetrics {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if s == nil {
+		return nil // Feature disabled
+	}
+
+	ptr := s.metrics.Load()
+	if ptr == nil {
+		return nil
+	}
 
 	// Return a copy to avoid race conditions
+	m := ptr.(*OriginMetrics)
 	return &OriginMetrics{
-		CPUPercent:      s.metrics.CPUPercent,
-		MemUsed:         s.metrics.MemUsed,
-		MemTotal:        s.metrics.MemTotal,
-		MemPercent:      s.metrics.MemPercent,
-		NetInRate:       s.metrics.NetInRate,
-		NetOutRate:      s.metrics.NetOutRate,
-		NginxConnections: s.metrics.NginxConnections,
-		NginxReqRate:    s.metrics.NginxReqRate,
-		NginxReqDuration: s.metrics.NginxReqDuration,
-		LastUpdate:      s.metrics.LastUpdate,
-		Healthy:         s.metrics.Healthy,
-		Error:           s.metrics.Error,
+		CPUPercent:      m.CPUPercent,
+		MemUsed:         m.MemUsed,
+		MemTotal:        m.MemTotal,
+		MemPercent:      m.MemPercent,
+		NetInRate:       m.NetInRate,
+		NetOutRate:      m.NetOutRate,
+		NginxConnections: m.NginxConnections,
+		NginxReqRate:    m.NginxReqRate,
+		NginxReqDuration: m.NginxReqDuration,
+		LastUpdate:      m.LastUpdate,
+		Healthy:         m.Healthy,
+		Error:           m.Error,
 	}
 }
 
@@ -115,37 +141,65 @@ func (s *OriginScraper) scrapeAll() {
 	healthy := true
 	var errors []string
 
+	// Get current metrics to preserve values if scrape fails
+	current := s.metrics.Load()
+	var lastMetrics *OriginMetrics
+	if current != nil {
+		lastMetrics = current.(*OriginMetrics)
+	} else {
+		lastMetrics = &OriginMetrics{}
+	}
+
+	// Create new metrics struct
+	newMetrics := &OriginMetrics{
+		CPUPercent:      lastMetrics.CPUPercent, // Preserve last values
+		MemUsed:         lastMetrics.MemUsed,
+		MemTotal:        lastMetrics.MemTotal,
+		MemPercent:      lastMetrics.MemPercent,
+		NetInRate:       lastMetrics.NetInRate,
+		NetOutRate:      lastMetrics.NetOutRate,
+		NginxConnections: lastMetrics.NginxConnections,
+		NginxReqRate:    lastMetrics.NginxReqRate,
+		NginxReqDuration: lastMetrics.NginxReqDuration,
+		LastUpdate:      now,
+	}
+
 	// Scrape node_exporter
 	if s.nodeExporterURL != "" {
-		if err := s.scrapeNodeExporter(); err != nil {
+		if err := s.scrapeNodeExporter(newMetrics); err != nil {
 			healthy = false
 			errors = append(errors, fmt.Sprintf("node_exporter: %v", err))
-			s.logger.Debug("node_exporter_scrape_error", "error", err)
+			if s.logger != nil {
+				s.logger.Debug("node_exporter_scrape_error", "error", err)
+			}
 		}
 	}
 
 	// Scrape nginx_exporter
 	if s.nginxExporterURL != "" {
-		if err := s.scrapeNginxExporter(); err != nil {
+		if err := s.scrapeNginxExporter(newMetrics); err != nil {
 			healthy = false
 			errors = append(errors, fmt.Sprintf("nginx_exporter: %v", err))
-			s.logger.Debug("nginx_exporter_scrape_error", "error", err)
+			if s.logger != nil {
+				s.logger.Debug("nginx_exporter_scrape_error", "error", err)
+			}
 		}
 	}
 
-	s.mu.Lock()
-	s.metrics.LastUpdate = now
-	s.metrics.Healthy = healthy
+	// Update metadata
+	newMetrics.Healthy = healthy
 	if len(errors) > 0 {
-		s.metrics.Error = strings.Join(errors, "; ")
+		newMetrics.Error = strings.Join(errors, "; ")
 	} else {
-		s.metrics.Error = ""
+		newMetrics.Error = ""
 	}
-	s.mu.Unlock()
+
+	// Atomic store (lock-free write)
+	s.metrics.Store(newMetrics)
 }
 
 // scrapeNodeExporter scrapes metrics from node_exporter.
-func (s *OriginScraper) scrapeNodeExporter() error {
+func (s *OriginScraper) scrapeNodeExporter(metrics *OriginMetrics) error {
 	resp, err := s.httpClient.Get(s.nodeExporterURL)
 	if err != nil {
 		return fmt.Errorf("http request failed: %w", err)
@@ -158,7 +212,7 @@ func (s *OriginScraper) scrapeNodeExporter() error {
 
 	// Parse Prometheus text format
 	decoder := expfmt.NewDecoder(resp.Body, expfmt.FmtText)
-	metrics := make(map[string]*dto.MetricFamily)
+	parsedMetrics := make(map[string]*dto.MetricFamily)
 
 	for {
 		var mf dto.MetricFamily
@@ -168,32 +222,23 @@ func (s *OriginScraper) scrapeNodeExporter() error {
 			}
 			return fmt.Errorf("decode error: %w", err)
 		}
-		metrics[mf.GetName()] = &mf
+		parsedMetrics[mf.GetName()] = &mf
 	}
 
 	// Extract CPU usage
-	cpuPercent := s.extractCPUUsage(metrics)
+	metrics.CPUPercent = s.extractCPUUsage(parsedMetrics)
 
 	// Extract memory
-	memUsed, memTotal, memPercent := s.extractMemory(metrics)
+	metrics.MemUsed, metrics.MemTotal, metrics.MemPercent = s.extractMemory(parsedMetrics)
 
 	// Extract network (and calculate rate)
-	netIn, netOut := s.extractNetwork(metrics)
-
-	s.mu.Lock()
-	s.metrics.CPUPercent = cpuPercent
-	s.metrics.MemUsed = memUsed
-	s.metrics.MemTotal = memTotal
-	s.metrics.MemPercent = memPercent
-	s.metrics.NetInRate = netIn
-	s.metrics.NetOutRate = netOut
-	s.mu.Unlock()
+	metrics.NetInRate, metrics.NetOutRate = s.extractNetwork(parsedMetrics)
 
 	return nil
 }
 
 // scrapeNginxExporter scrapes metrics from nginx_exporter.
-func (s *OriginScraper) scrapeNginxExporter() error {
+func (s *OriginScraper) scrapeNginxExporter(metrics *OriginMetrics) error {
 	resp, err := s.httpClient.Get(s.nginxExporterURL)
 	if err != nil {
 		return fmt.Errorf("http request failed: %w", err)
@@ -206,7 +251,7 @@ func (s *OriginScraper) scrapeNginxExporter() error {
 
 	// Parse Prometheus text format
 	decoder := expfmt.NewDecoder(resp.Body, expfmt.FmtText)
-	metrics := make(map[string]*dto.MetricFamily)
+	parsedMetrics := make(map[string]*dto.MetricFamily)
 
 	for {
 		var mf dto.MetricFamily
@@ -216,18 +261,12 @@ func (s *OriginScraper) scrapeNginxExporter() error {
 			}
 			return fmt.Errorf("decode error: %w", err)
 		}
-		metrics[mf.GetName()] = &mf
+		parsedMetrics[mf.GetName()] = &mf
 	}
 
 	// Extract nginx metrics
-	connections := s.extractNginxConnections(metrics)
-	reqRate, duration := s.extractNginxRequests(metrics)
-
-	s.mu.Lock()
-	s.metrics.NginxConnections = connections
-	s.metrics.NginxReqRate = reqRate
-	s.metrics.NginxReqDuration = duration
-	s.mu.Unlock()
+	metrics.NginxConnections = s.extractNginxConnections(parsedMetrics)
+	metrics.NginxReqRate, metrics.NginxReqDuration = s.extractNginxRequests(parsedMetrics)
 
 	return nil
 }
@@ -342,18 +381,26 @@ func (s *OriginScraper) extractNetwork(metrics map[string]*dto.MetricFamily) (in
 		}
 	}
 
-	// Calculate rates
-	if !s.lastNetTime.IsZero() {
-		deltaTime := now.Sub(s.lastNetTime).Seconds()
-		if deltaTime > 0 {
-			inRate = (netInTotal - s.lastNetIn) / deltaTime
-			outRate = (netOutTotal - s.lastNetOut) / deltaTime
+	// Calculate rates (atomic reads)
+	lastNetIn := loadFloat64(&s.lastNetIn)
+	lastNetOut := loadFloat64(&s.lastNetOut)
+	lastNetTimeVal := s.lastNetTime.Load()
+
+	if lastNetTimeVal != nil {
+		lastNetTime := lastNetTimeVal.(time.Time)
+		if !lastNetTime.IsZero() {
+			deltaTime := now.Sub(lastNetTime).Seconds()
+			if deltaTime > 0 {
+				inRate = (netInTotal - lastNetIn) / deltaTime
+				outRate = (netOutTotal - lastNetOut) / deltaTime
+			}
 		}
 	}
 
-	s.lastNetIn = netInTotal
-	s.lastNetOut = netOutTotal
-	s.lastNetTime = now
+	// Atomic writes
+	storeFloat64(&s.lastNetIn, netInTotal)
+	storeFloat64(&s.lastNetOut, netOutTotal)
+	s.lastNetTime.Store(now)
 
 	return inRate, outRate
 }
@@ -384,15 +431,23 @@ func (s *OriginScraper) extractNginxRequests(metrics map[string]*dto.MetricFamil
 		}
 	}
 
-	// Calculate request rate
-	if !s.lastNginxTime.IsZero() {
-		deltaTime := now.Sub(s.lastNginxTime).Seconds()
-		if deltaTime > 0 {
-			reqRate = (reqTotal - s.lastNginxReqs) / deltaTime
+	// Calculate request rate (atomic reads)
+	lastNginxReqs := loadFloat64(&s.lastNginxReqs)
+	lastNginxTimeVal := s.lastNginxTime.Load()
+
+	if lastNginxTimeVal != nil {
+		lastNginxTime := lastNginxTimeVal.(time.Time)
+		if !lastNginxTime.IsZero() {
+			deltaTime := now.Sub(lastNginxTime).Seconds()
+			if deltaTime > 0 {
+				reqRate = (reqTotal - lastNginxReqs) / deltaTime
+			}
 		}
 	}
-	s.lastNginxReqs = reqTotal
-	s.lastNginxTime = now
+
+	// Atomic writes
+	storeFloat64(&s.lastNginxReqs, reqTotal)
+	s.lastNginxTime.Store(now)
 
 	// Extract average request duration
 	durationMF, ok := metrics["nginx_http_request_duration_seconds"]
@@ -412,6 +467,18 @@ func (s *OriginScraper) extractNginxRequests(metrics map[string]*dto.MetricFamil
 	}
 
 	return reqRate, duration
+}
+
+// Helper functions for atomic float64 operations
+
+// storeFloat64 stores a float64 value atomically using math.Float64bits.
+func storeFloat64(addr *atomic.Uint64, val float64) {
+	addr.Store(math.Float64bits(val))
+}
+
+// loadFloat64 loads a float64 value atomically using math.Float64frombits.
+func loadFloat64(addr *atomic.Uint64) float64 {
+	return math.Float64frombits(addr.Load())
 }
 
 // GetOriginHostname extracts hostname from URL for Prometheus labels.

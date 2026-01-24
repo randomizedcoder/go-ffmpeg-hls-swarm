@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/metrics"
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats"
 )
 
@@ -53,6 +54,9 @@ type Model struct {
 	// Debug stats source (optional - for layered metrics)
 	debugStatsSource DebugStatsSource
 
+	// Origin metrics scraper (optional - for origin server metrics)
+	originScraper *metrics.OriginScraper
+
 	// Quit flag
 	quitting bool
 }
@@ -75,6 +79,7 @@ type Config struct {
 	MetricsAddr      string
 	StatsSource      StatsSource
 	DebugStatsSource DebugStatsSource
+	OriginScraper    *metrics.OriginScraper
 }
 
 // New creates a new TUI model.
@@ -85,6 +90,7 @@ func New(cfg Config) Model {
 		metricsAddr:      cfg.MetricsAddr,
 		statsSource:      cfg.StatsSource,
 		debugStatsSource: cfg.DebugStatsSource,
+		originScraper:    cfg.OriginScraper,
 		startTime:        time.Now(),
 		lastUpdate:       time.Now(),
 		width:            80,

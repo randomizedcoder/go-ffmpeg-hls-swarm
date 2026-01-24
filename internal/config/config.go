@@ -1,7 +1,10 @@
 // Package config provides configuration management for go-ffmpeg-hls-swarm.
 package config
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Config holds all configuration options for the orchestrator.
 type Config struct {
@@ -71,6 +74,9 @@ type Config struct {
 	OriginMetricsURL      string        `json:"origin_metrics_url"`       // node_exporter URL (e.g., http://10.177.0.10:9100/metrics)
 	NginxMetricsURL       string        `json:"nginx_metrics_url"`        // nginx_exporter URL (e.g., http://10.177.0.10:9113/metrics)
 	OriginMetricsInterval time.Duration `json:"origin_metrics_interval"` // Scrape interval
+	OriginMetricsHost     string        `json:"origin_metrics_host"`     // Hostname/IP for metrics (used with port flags)
+	OriginMetricsNodePort int           `json:"origin_metrics_node_port"` // Node exporter port (default: 9100)
+	OriginMetricsNginxPort int          `json:"origin_metrics_nginx_port"` // Nginx exporter port (default: 9113)
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -129,5 +135,37 @@ func DefaultConfig() *Config {
 		OriginMetricsURL:      "",                    // Disabled by default
 		NginxMetricsURL:       "",                    // Disabled by default
 		OriginMetricsInterval: 2 * time.Second,       // Scrape every 2 seconds
+		OriginMetricsHost:     "",                    // Empty by default
+		OriginMetricsNodePort: 9100,                  // Standard node_exporter port
+		OriginMetricsNginxPort: 9113,                 // Standard nginx_exporter port
 	}
+}
+
+// OriginMetricsEnabled returns true if origin metrics scraping is enabled.
+func (c *Config) OriginMetricsEnabled() bool {
+	return c.OriginMetricsURL != "" || c.NginxMetricsURL != "" || c.OriginMetricsHost != ""
+}
+
+// ResolveOriginMetricsURLs resolves origin metrics URLs from explicit URLs or host+port combination.
+// Returns node_exporter URL and nginx_exporter URL.
+func (c *Config) ResolveOriginMetricsURLs() (nodeURL, nginxURL string) {
+	// If explicit URLs provided, use them
+	if c.OriginMetricsURL != "" {
+		nodeURL = c.OriginMetricsURL
+	}
+	if c.NginxMetricsURL != "" {
+		nginxURL = c.NginxMetricsURL
+	}
+
+	// If host provided, construct URLs from host + ports
+	if c.OriginMetricsHost != "" {
+		if nodeURL == "" {
+			nodeURL = fmt.Sprintf("http://%s:%d/metrics", c.OriginMetricsHost, c.OriginMetricsNodePort)
+		}
+		if nginxURL == "" {
+			nginxURL = fmt.Sprintf("http://%s:%d/metrics", c.OriginMetricsHost, c.OriginMetricsNginxPort)
+		}
+	}
+
+	return nodeURL, nginxURL
 }

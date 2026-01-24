@@ -74,10 +74,11 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 
 	// Initialize origin scraper if URLs are configured
 	var originScraper *metrics.OriginScraper
-	if cfg.OriginMetricsURL != "" || cfg.NginxMetricsURL != "" {
+	if cfg.OriginMetricsEnabled() {
+		nodeURL, nginxURL := cfg.ResolveOriginMetricsURLs()
 		originScraper = metrics.NewOriginScraper(
-			cfg.OriginMetricsURL,
-			cfg.NginxMetricsURL,
+			nodeURL,
+			nginxURL,
 			cfg.OriginMetricsInterval,
 			logger,
 		)
@@ -376,6 +377,7 @@ func (o *Orchestrator) runWithTUI(ctx context.Context, cancel context.CancelFunc
 		MetricsAddr:      o.config.MetricsAddr,
 		StatsSource:      o,
 		DebugStatsSource: o,
+		OriginScraper:    o.originScraper,
 	})
 
 	// Create Bubble Tea program

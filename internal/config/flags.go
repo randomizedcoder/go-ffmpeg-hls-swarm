@@ -140,11 +140,24 @@ Examples:
 
 	// Origin Metrics
 	flag.StringVar(&cfg.OriginMetricsURL, "origin-metrics", cfg.OriginMetricsURL,
-		"Origin node_exporter URL (e.g., http://10.177.0.10:9100/metrics)")
+		"Origin node_exporter URL (e.g., http://10.177.0.10:9100/metrics). "+
+			"If empty, origin metrics are disabled. Defaults to empty (disabled).")
 	flag.StringVar(&cfg.NginxMetricsURL, "nginx-metrics", cfg.NginxMetricsURL,
-		"Origin nginx_exporter URL (e.g., http://10.177.0.10:9113/metrics)")
+		"Origin nginx_exporter URL (e.g., http://10.177.0.10:9113/metrics). "+
+			"If empty, nginx metrics are disabled. Defaults to empty (disabled).")
 	flag.DurationVar(&cfg.OriginMetricsInterval, "origin-metrics-interval", cfg.OriginMetricsInterval,
-		"Interval for scraping origin metrics")
+		"Interval for scraping origin metrics. Default: 2s. "+
+			"Lower values increase load on origin server.")
+	flag.StringVar(&cfg.OriginMetricsHost, "origin-metrics-host", cfg.OriginMetricsHost,
+		"Origin server hostname/IP for metrics (e.g., 10.177.0.10). "+
+			"If set, constructs URLs using default ports (9100 for node, 9113 for nginx). "+
+			"Overrides -origin-metrics and -nginx-metrics if they are not explicitly set.")
+	flag.IntVar(&cfg.OriginMetricsNodePort, "origin-metrics-node-port", cfg.OriginMetricsNodePort,
+		"Node exporter port (used with -origin-metrics-host). "+
+			"Default: 9100 (standard Prometheus node_exporter port).")
+	flag.IntVar(&cfg.OriginMetricsNginxPort, "origin-metrics-nginx-port", cfg.OriginMetricsNginxPort,
+		"Nginx exporter port (used with -origin-metrics-host). "+
+			"Default: 9113 (standard nginx_exporter port).")
 
 	// Parse
 	flag.Parse()

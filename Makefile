@@ -101,6 +101,9 @@ help: ## Show this help message
 	@echo "$(GREEN)Load Tests (MicroVM origin):$(RESET)"
 	@grep -E '^load-test-.*-microvm:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
+	@echo "$(GREEN)Origin Metrics Examples:$(RESET)"
+	@grep -E '^load-test-.*-with-metrics[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@echo ""
 	@echo "$(GREEN)Network Setup (high-performance):$(RESET)"
 	@grep -E '^network-[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
@@ -404,6 +407,44 @@ load-test-300-microvm: build ## Run 300-client test against MicroVM origin
 load-test-500-microvm: build ## Run 500-client test against MicroVM origin
 	@echo "$(CYAN)Testing against MicroVM at http://localhost:17080$(RESET)"
 	@./bin/go-ffmpeg-hls-swarm -clients 500 -duration $(DURATION) -ramp-rate 100 http://localhost:17080/stream.m3u8
+
+# ============================================================================
+# Origin Metrics Examples (requires Prometheus exporters on origin)
+# ============================================================================
+
+# Origin metrics with explicit URLs (user-mode networking)
+load-test-100-with-metrics: build ## Run 100-client test with origin metrics (localhost ports)
+	@echo "$(CYAN)Testing with origin metrics enabled$(RESET)"
+	@echo "$(YELLOW)Note: Requires MicroVM with exporters running$(RESET)"
+	@./bin/go-ffmpeg-hls-swarm -clients 100 -duration $(DURATION) -tui \
+		-origin-metrics http://localhost:17100/metrics \
+		-nginx-metrics http://localhost:17113/metrics \
+		http://localhost:17080/stream.m3u8
+
+# Origin metrics with host (TAP networking - recommended)
+load-test-100-with-metrics-tap: build ## Run 100-client test with origin metrics (TAP networking)
+	@echo "$(CYAN)Testing with origin metrics enabled (TAP mode)$(RESET)"
+	@echo "$(YELLOW)Note: Requires MicroVM with TAP networking (make microvm-start-tap)$(RESET)"
+	@./bin/go-ffmpeg-hls-swarm -clients 100 -duration $(DURATION) -tui \
+		-origin-metrics-host 10.177.0.10 \
+		http://10.177.0.10:17080/stream.m3u8
+
+# Origin metrics with custom ports
+load-test-100-with-metrics-custom: build ## Run 100-client test with origin metrics (custom ports)
+	@echo "$(CYAN)Testing with origin metrics (custom ports)$(RESET)"
+	@./bin/go-ffmpeg-hls-swarm -clients 100 -duration $(DURATION) -tui \
+		-origin-metrics-host 10.177.0.10 \
+		-origin-metrics-node-port 19100 \
+		-origin-metrics-nginx-port 19113 \
+		http://10.177.0.10:17080/stream.m3u8
+
+# Origin metrics with custom scrape interval
+load-test-100-with-metrics-interval: build ## Run 100-client test with origin metrics (5s interval)
+	@echo "$(CYAN)Testing with origin metrics (5s scrape interval)$(RESET)"
+	@./bin/go-ffmpeg-hls-swarm -clients 100 -duration $(DURATION) -tui \
+		-origin-metrics-host 10.177.0.10 \
+		-origin-metrics-interval 5s \
+		http://10.177.0.10:17080/stream.m3u8
 
 # ============================================================================
 # Network Setup (TAP + vhost-net for high-performance MicroVM networking)
