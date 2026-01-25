@@ -62,7 +62,7 @@ Orchestration Flags:
 		printFlagCategory([]string{"tui", "prom-client-metrics"})
 
 		fmt.Fprintf(os.Stderr, "\nOrigin Metrics:\n")
-		printFlagCategory([]string{"origin-metrics", "nginx-metrics", "origin-metrics-interval"})
+		printFlagCategory([]string{"origin-metrics", "nginx-metrics", "origin-metrics-interval", "origin-metrics-window"})
 
 		fmt.Fprintf(os.Stderr, `
 Flag Convention:
@@ -148,6 +148,11 @@ Examples:
 	flag.DurationVar(&cfg.OriginMetricsInterval, "origin-metrics-interval", cfg.OriginMetricsInterval,
 		"Interval for scraping origin metrics. Default: 2s. "+
 			"Lower values increase load on origin server.")
+	flag.DurationVar(&cfg.OriginMetricsWindow, "origin-metrics-window", cfg.OriginMetricsWindow,
+		"Rolling window duration for network rate percentiles. "+
+			"Default: 30s. "+
+			"Range: 10s-300s (5 minutes). "+
+			"Longer windows provide smoother percentiles but use more memory.")
 	flag.StringVar(&cfg.OriginMetricsHost, "origin-metrics-host", cfg.OriginMetricsHost,
 		"Origin server hostname/IP for metrics (e.g., 10.177.0.10). "+
 			"If set, constructs URLs using default ports (9100 for node, 9113 for nginx). "+

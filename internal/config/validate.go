@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ValidationError represents a configuration validation error.
@@ -129,6 +130,31 @@ func Validate(cfg *Config) error {
 			Field:   "backoff_multiply",
 			Message: "must be >= 1.0",
 		})
+	}
+
+	// Origin metrics window validation (if origin metrics are enabled)
+	if cfg.OriginMetricsURL != "" || cfg.NginxMetricsURL != "" {
+		const minWindow = 10 * time.Second
+		const maxWindow = 300 * time.Second
+		if cfg.OriginMetricsWindow < minWindow {
+			errs = append(errs, ValidationError{
+				Field:   "origin_metrics_window",
+				Message: fmt.Sprintf("must be at least %v (got %v)", minWindow, cfg.OriginMetricsWindow),
+			})
+		}
+		if cfg.OriginMetricsWindow > maxWindow {
+			errs = append(errs, ValidationError{
+				Field:   "origin_metrics_window",
+				Message: fmt.Sprintf("must be at most %v (got %v)", maxWindow, cfg.OriginMetricsWindow),
+			})
+		}
+		// Window should be at least 2× the scrape interval for meaningful percentiles
+		if cfg.OriginMetricsWindow < 2*cfg.OriginMetricsInterval {
+			errs = append(errs, ValidationError{
+				Field:   "origin_metrics_window",
+				Message: fmt.Sprintf("must be at least 2× scrape interval (%v), got %v", 2*cfg.OriginMetricsInterval, cfg.OriginMetricsWindow),
+			})
+		}
 	}
 
 	// Return combined errors

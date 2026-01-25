@@ -80,6 +80,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 			nodeURL,
 			nginxURL,
 			cfg.OriginMetricsInterval,
+			cfg.OriginMetricsWindow,
 			logger,
 		)
 	}

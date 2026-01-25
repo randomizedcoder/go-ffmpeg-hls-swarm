@@ -74,6 +74,7 @@ type Config struct {
 	OriginMetricsURL      string        `json:"origin_metrics_url"`       // node_exporter URL (e.g., http://10.177.0.10:9100/metrics)
 	NginxMetricsURL       string        `json:"nginx_metrics_url"`        // nginx_exporter URL (e.g., http://10.177.0.10:9113/metrics)
 	OriginMetricsInterval time.Duration `json:"origin_metrics_interval"` // Scrape interval
+	OriginMetricsWindow   time.Duration `json:"origin_metrics_window"`   // Rolling window duration for percentiles (default: 30s, max: 300s)
 	OriginMetricsHost     string        `json:"origin_metrics_host"`     // Hostname/IP for metrics (used with port flags)
 	OriginMetricsNodePort int           `json:"origin_metrics_node_port"` // Node exporter port (default: 9100)
 	OriginMetricsNginxPort int          `json:"origin_metrics_nginx_port"` // Nginx exporter port (default: 9113)
@@ -135,6 +136,7 @@ func DefaultConfig() *Config {
 		OriginMetricsURL:      "",                    // Disabled by default
 		NginxMetricsURL:       "",                    // Disabled by default
 		OriginMetricsInterval: 2 * time.Second,       // Scrape every 2 seconds
+		OriginMetricsWindow:   30 * time.Second,      // Rolling window for percentiles (default: 30s)
 		OriginMetricsHost:     "",                    // Empty by default
 		OriginMetricsNodePort: 9100,                  // Standard node_exporter port
 		OriginMetricsNginxPort: 9113,                 // Standard nginx_exporter port

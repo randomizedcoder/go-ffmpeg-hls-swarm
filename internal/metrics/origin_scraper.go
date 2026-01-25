@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/influxdata/tdigest"
 	"github.com/prometheus/common/expfmt"
 	dto "github.com/prometheus/client_model/go"
 )
@@ -24,8 +26,15 @@ type OriginMetrics struct {
 	MemUsed    int64
 	MemTotal   int64
 	MemPercent float64
-	NetInRate  float64 // bytes/sec
-	NetOutRate float64 // bytes/sec
+	NetInRate  float64 // bytes/sec (instantaneous)
+	NetOutRate float64 // bytes/sec (instantaneous)
+
+	// Rolling window percentiles (new)
+	NetInP50  float64 // P50 (median) over rolling window
+	NetInMax  float64 // Max over rolling window
+	NetOutP50 float64 // P50 (median) over rolling window
+	NetOutMax float64 // Max over rolling window
+	NetWindowSeconds int // Window size in seconds (for display)
 
 	// Nginx exporter metrics
 	NginxConnections int64
@@ -56,13 +65,39 @@ type OriginScraper struct {
 	lastNetTime   atomic.Value  // time.Time
 	lastNginxReqs atomic.Uint64 // float64 as bits
 	lastNginxTime atomic.Value  // time.Time
+
+	// Rolling windows for network metrics (using T-Digest)
+	netInDigest  *tdigest.TDigest
+	netInSamples []networkSample
+	netInMu      sync.Mutex
+
+	netOutDigest  *tdigest.TDigest
+	netOutSamples []networkSample
+	netOutMu      sync.Mutex
+
+	windowSize time.Duration // Configurable window size
+	lastClean  time.Time     // Last cleanup time
+}
+
+// networkSample represents a single network rate sample with timestamp.
+type networkSample struct {
+	value float64
+	time  time.Time
 }
 
 // NewOriginScraper creates a new origin metrics scraper.
 // Returns nil if both URLs are empty (feature disabled).
-func NewOriginScraper(nodeExporterURL, nginxExporterURL string, interval time.Duration, logger *slog.Logger) *OriginScraper {
+func NewOriginScraper(nodeExporterURL, nginxExporterURL string, interval, windowSize time.Duration, logger *slog.Logger) *OriginScraper {
 	if nodeExporterURL == "" && nginxExporterURL == "" {
 		return nil // Feature disabled
+	}
+
+	// Clamp window size for safety (validation also done in config.Validate())
+	if windowSize < 10*time.Second {
+		windowSize = 10 * time.Second
+	}
+	if windowSize > 300*time.Second {
+		windowSize = 300 * time.Second
 	}
 
 	scraper := &OriginScraper{
@@ -73,6 +108,11 @@ func NewOriginScraper(nodeExporterURL, nginxExporterURL string, interval time.Du
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
+		// Initialize T-Digests
+		netInDigest:  tdigest.NewWithCompression(100),
+		netOutDigest: tdigest.NewWithCompression(100),
+		windowSize:   windowSize,
+		lastClean:    time.Now(),
 	}
 
 	// Initialize with empty metrics
@@ -119,6 +159,41 @@ func (s *OriginScraper) GetMetrics() *OriginMetrics {
 
 	// Return a copy to avoid race conditions
 	m := ptr.(*OriginMetrics)
+	now := time.Now()
+
+	// Calculate percentiles from T-Digest (following debug_events.go pattern)
+	// Net In
+	s.netInMu.Lock()
+	s.cleanupNetworkWindow(&s.netInSamples, s.netInDigest, now)
+	var netInP50, netInMax float64
+	if len(s.netInSamples) > 0 {
+		netInP50 = s.netInDigest.Quantile(0.50)
+		// Calculate max from samples
+		netInMax = s.netInSamples[0].value
+		for _, sample := range s.netInSamples {
+			if sample.value > netInMax {
+				netInMax = sample.value
+			}
+		}
+	}
+	s.netInMu.Unlock()
+
+	// Net Out
+	s.netOutMu.Lock()
+	s.cleanupNetworkWindow(&s.netOutSamples, s.netOutDigest, now)
+	var netOutP50, netOutMax float64
+	if len(s.netOutSamples) > 0 {
+		netOutP50 = s.netOutDigest.Quantile(0.50)
+		// Calculate max from samples
+		netOutMax = s.netOutSamples[0].value
+		for _, sample := range s.netOutSamples {
+			if sample.value > netOutMax {
+				netOutMax = sample.value
+			}
+		}
+	}
+	s.netOutMu.Unlock()
+
 	return &OriginMetrics{
 		CPUPercent:      m.CPUPercent,
 		MemUsed:         m.MemUsed,
@@ -126,6 +201,11 @@ func (s *OriginScraper) GetMetrics() *OriginMetrics {
 		MemPercent:      m.MemPercent,
 		NetInRate:       m.NetInRate,
 		NetOutRate:      m.NetOutRate,
+		NetInP50:        netInP50,
+		NetInMax:        netInMax,
+		NetOutP50:       netOutP50,
+		NetOutMax:       netOutMax,
+		NetWindowSeconds: int(s.windowSize.Seconds()),
 		NginxConnections: m.NginxConnections,
 		NginxReqRate:    m.NginxReqRate,
 		NginxReqDuration: m.NginxReqDuration,
@@ -402,6 +482,29 @@ func (s *OriginScraper) extractNetwork(metrics map[string]*dto.MetricFamily) (in
 	storeFloat64(&s.lastNetOut, netOutTotal)
 	s.lastNetTime.Store(now)
 
+	// Add to rolling windows (following debug_events.go pattern)
+	// Net In
+	s.netInMu.Lock()
+	s.netInDigest.Add(inRate, 1)
+	s.netInSamples = append(s.netInSamples, networkSample{value: inRate, time: now})
+	// Trigger cleanup if needed (every 10s or when >20 samples)
+	if len(s.netInSamples) > 20 || time.Since(s.lastClean) > 10*time.Second {
+		s.cleanupNetworkWindow(&s.netInSamples, s.netInDigest, now)
+	}
+	s.netInMu.Unlock()
+
+	// Net Out
+	s.netOutMu.Lock()
+	s.netOutDigest.Add(outRate, 1)
+	s.netOutSamples = append(s.netOutSamples, networkSample{value: outRate, time: now})
+	// Trigger cleanup if needed
+	if len(s.netOutSamples) > 20 || time.Since(s.lastClean) > 10*time.Second {
+		s.cleanupNetworkWindow(&s.netOutSamples, s.netOutDigest, now)
+	}
+	s.netOutMu.Unlock()
+
+	s.lastClean = now
+
 	return inRate, outRate
 }
 
@@ -479,6 +582,33 @@ func storeFloat64(addr *atomic.Uint64, val float64) {
 // loadFloat64 loads a float64 value atomically using math.Float64frombits.
 func loadFloat64(addr *atomic.Uint64) float64 {
 	return math.Float64frombits(addr.Load())
+}
+
+// cleanupNetworkWindow removes samples older than window and rebuilds T-Digest.
+// Optimized: Only rebuilds T-Digest when samples actually expire.
+func (s *OriginScraper) cleanupNetworkWindow(samples *[]networkSample, digest *tdigest.TDigest, now time.Time) {
+	cutoff := now.Add(-s.windowSize)
+
+	// Filter valid samples (keep only those within window)
+	valid := make([]networkSample, 0, len(*samples))
+	expiredCount := 0
+	for _, sample := range *samples {
+		if sample.time.After(cutoff) {
+			valid = append(valid, sample)
+		} else {
+			expiredCount++
+		}
+	}
+
+	// Only rebuild T-Digest if samples expired
+	if expiredCount > 0 {
+		*digest = *tdigest.NewWithCompression(100)
+		for _, sample := range valid {
+			digest.Add(sample.value, 1)
+		}
+	}
+
+	*samples = valid
 }
 
 // GetOriginHostname extracts hostname from URL for Prometheus labels.

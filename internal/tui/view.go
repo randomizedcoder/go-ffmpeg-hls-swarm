@@ -1248,8 +1248,37 @@ func (m Model) renderOriginMetrics() string {
 	leftCol = append(leftCol, renderOriginMetricRow("Memory:",
 		fmt.Sprintf("%s / %s", formatBytesRaw(int64(metrics.MemUsed)), formatBytesRaw(metrics.MemTotal)),
 		fmt.Sprintf("(%.0f%%)", metrics.MemPercent)))
-	leftCol = append(leftCol, renderOriginMetricRow("Net In:", formatBytesRaw(int64(metrics.NetInRate))+"/s", ""))
-	leftCol = append(leftCol, renderOriginMetricRow("Net Out:", formatBytesRaw(int64(metrics.NetOutRate))+"/s", ""))
+	// Build percentile strings for Net In
+	netInBracket := ""
+	if metrics.NetInP50 > 0 || metrics.NetInMax > 0 {
+		parts := []string{}
+		if metrics.NetInP50 > 0 {
+			parts = append(parts, fmt.Sprintf("P50: %s/s", formatBytesRaw(int64(metrics.NetInP50))))
+		}
+		if metrics.NetInMax > 0 {
+			parts = append(parts, fmt.Sprintf("Max: %s/s", formatBytesRaw(int64(metrics.NetInMax))))
+		}
+		if len(parts) > 0 {
+			netInBracket = fmt.Sprintf("(%s, %ds)", strings.Join(parts, ", "), metrics.NetWindowSeconds)
+		}
+	}
+	leftCol = append(leftCol, renderOriginMetricRow("Net In:", formatBytesRaw(int64(metrics.NetInRate))+"/s", netInBracket))
+
+	// Build percentile strings for Net Out
+	netOutBracket := ""
+	if metrics.NetOutP50 > 0 || metrics.NetOutMax > 0 {
+		parts := []string{}
+		if metrics.NetOutP50 > 0 {
+			parts = append(parts, fmt.Sprintf("P50: %s/s", formatBytesRaw(int64(metrics.NetOutP50))))
+		}
+		if metrics.NetOutMax > 0 {
+			parts = append(parts, fmt.Sprintf("Max: %s/s", formatBytesRaw(int64(metrics.NetOutMax))))
+		}
+		if len(parts) > 0 {
+			netOutBracket = fmt.Sprintf("(%s, %ds)", strings.Join(parts, ", "), metrics.NetWindowSeconds)
+		}
+	}
+	leftCol = append(leftCol, renderOriginMetricRow("Net Out:", formatBytesRaw(int64(metrics.NetOutRate))+"/s", netOutBracket))
 
 	// === RIGHT COLUMN: Nginx ===
 	if metrics.NginxConnections > 0 || metrics.NginxReqRate > 0 {
