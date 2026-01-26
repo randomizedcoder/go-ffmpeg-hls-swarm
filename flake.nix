@@ -61,6 +61,11 @@
   };
 
   # Enable microvm binary cache for faster builds
+  # Note: Non-trusted users will see warnings about ignoring these settings.
+  # This is harmless - it just means they won't use the cache. Trusted users
+  # can add themselves to trusted-users in nix.conf to use the cache.
+  # These warnings cannot be suppressed without removing the cache entirely,
+  # which would hurt trusted users who can benefit from it.
   nixConfig = {
     extra-substituters = [ "https://microvm.cachix.org" ];
     extra-trusted-public-keys = [
@@ -104,6 +109,14 @@
         };
 
         # Import modular components
+        #
+        # Go Application Build:
+        # - Uses buildGoModule which requires a vendor directory in the source
+        # - The vendor/ directory must be committed to git and included in the source
+        # - vendorHash = null allows buildGoModule to compute the hash automatically
+        # - The vendor directory is created via: go mod vendor
+        # - This ensures reproducible builds by locking all dependency versions
+        # - Both Nix (via vendorHash) and Go (via go.sum) lock dependency versions
         package = import ./nix/package.nix {
           inherit pkgs lib meta src;
         };
@@ -122,25 +135,29 @@
         };
 
         # Test origin server components (with profile support and MicroVM)
-        testOrigin = import ./nix/test-origin { inherit pkgs lib microvm; };
-        testOriginLowLatency = import ./nix/test-origin { inherit pkgs lib microvm; profile = "low-latency"; };
-        testOrigin4kAbr = import ./nix/test-origin { inherit pkgs lib microvm; profile = "4k-abr"; };
-        testOriginStress = import ./nix/test-origin { inherit pkgs lib microvm; profile = "stress-test"; };
+        # Get available profiles from default instance
+        testOriginDefault = import ./nix/test-origin { inherit pkgs lib meta microvm; };
 
-        # Logging-enabled profiles for performance analysis
-        testOriginLogged = import ./nix/test-origin { inherit pkgs lib microvm; profile = "logged"; };
-        testOriginDebug = import ./nix/test-origin { inherit pkgs lib microvm; profile = "debug"; };
-
-        # TAP networking profiles (high performance, requires make network-setup)
-        testOriginTap = import ./nix/test-origin { inherit pkgs lib microvm; profile = "tap"; };
-        testOriginTapLogged = import ./nix/test-origin { inherit pkgs lib microvm; profile = "tap-logged"; };
+        # Generate all profile variants automatically
+        testOriginProfiles = lib.mapAttrs
+          (name: _: import ./nix/test-origin {
+            inherit pkgs lib meta microvm;
+            profile = name;
+          })
+          (lib.genAttrs testOriginDefault.availableProfiles (x: x));
 
         # Swarm client components (with profile support)
-        swarmClient = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; };
-        swarmClientStress = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; profile = "stress"; };
-        swarmClientGentle = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; profile = "gentle"; };
-        swarmClientBurst = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; profile = "burst"; };
-        swarmClientExtreme = import ./nix/swarm-client { inherit pkgs lib; swarmBinary = package; profile = "extreme"; };
+        # Get available profiles from default instance
+        swarmClientDefault = import ./nix/swarm-client { inherit pkgs lib meta; swarmBinary = package; };
+
+        # Generate all profile variants automatically
+        swarmClientProfiles = lib.mapAttrs
+          (name: _: import ./nix/swarm-client {
+            inherit pkgs lib meta;
+            swarmBinary = package;
+            profile = name;
+          })
+          (lib.genAttrs swarmClientDefault.availableProfiles (x: x));
 
       in
       {
@@ -151,38 +168,38 @@
           default = package;
 
           # Test origin server packages (default profile)
-          test-origin = testOrigin.runner;
-          test-origin-container = testOrigin.container;
+          test-origin = testOriginProfiles.default.runner;
+          test-origin-container = testOriginProfiles.default.container;
 
           # Profile-specific test origins
-          test-origin-low-latency = testOriginLowLatency.runner;
-          test-origin-4k-abr = testOrigin4kAbr.runner;
-          test-origin-stress = testOriginStress.runner;
+          test-origin-low-latency = testOriginProfiles.low-latency.runner;
+          test-origin-4k-abr = testOriginProfiles."4k-abr".runner;
+          test-origin-stress = testOriginProfiles.stress-test.runner;
 
           # Logging-enabled profiles for performance analysis
-          test-origin-logged = testOriginLogged.runner;
-          test-origin-debug = testOriginDebug.runner;
+          test-origin-logged = testOriginProfiles.logged.runner;
+          test-origin-debug = testOriginProfiles.debug.runner;
 
           # MicroVM packages (Linux only, requires KVM)
-          test-origin-vm = testOrigin.microvm.vm or (throw "MicroVM not available - requires microvm input");
-          test-origin-vm-low-latency = testOriginLowLatency.microvm.vm or null;
-          test-origin-vm-stress = testOriginStress.microvm.vm or null;
-          test-origin-vm-logged = testOriginLogged.microvm.vm or null;
-          test-origin-vm-debug = testOriginDebug.microvm.vm or null;
+          test-origin-vm = testOriginProfiles.default.microvm.vm or (throw "MicroVM not available - requires microvm input");
+          test-origin-vm-low-latency = testOriginProfiles.low-latency.microvm.vm or null;
+          test-origin-vm-stress = testOriginProfiles.stress-test.microvm.vm or null;
+          test-origin-vm-logged = testOriginProfiles.logged.microvm.vm or null;
+          test-origin-vm-debug = testOriginProfiles.debug.microvm.vm or null;
 
           # TAP networking MicroVMs (high performance, requires make network-setup)
-          test-origin-vm-tap = testOriginTap.microvm.vm or null;
-          test-origin-vm-tap-logged = testOriginTapLogged.microvm.vm or null;
+          test-origin-vm-tap = testOriginProfiles.tap.microvm.vm or null;
+          test-origin-vm-tap-logged = testOriginProfiles.tap-logged.microvm.vm or null;
 
           # Swarm client packages (default profile)
-          swarm-client = swarmClient.runner;
-          swarm-client-container = swarmClient.container;
+          swarm-client = swarmClientProfiles.default.runner;
+          swarm-client-container = swarmClientProfiles.default.container;
 
           # Profile-specific swarm clients
-          swarm-client-stress = swarmClientStress.runner;
-          swarm-client-gentle = swarmClientGentle.runner;
-          swarm-client-burst = swarmClientBurst.runner;
-          swarm-client-extreme = swarmClientExtreme.runner;
+          swarm-client-stress = swarmClientProfiles.stress.runner;
+          swarm-client-gentle = swarmClientProfiles.gentle.runner;
+          swarm-client-burst = swarmClientProfiles.burst.runner;
+          swarm-client-extreme = swarmClientProfiles.extreme.runner;
         };
 
         devShells = {
@@ -193,75 +210,75 @@
           # Test origin server apps (different profiles)
           test-origin = {
             type = "app";
-            program = "${testOrigin.runner}/bin/test-hls-origin";
+            program = "${testOriginProfiles.default.runner}/bin/test-hls-origin";
           };
           test-origin-low-latency = {
             type = "app";
-            program = "${testOriginLowLatency.runner}/bin/test-hls-origin";
+            program = "${testOriginProfiles.low-latency.runner}/bin/test-hls-origin";
           };
           test-origin-4k-abr = {
             type = "app";
-            program = "${testOrigin4kAbr.runner}/bin/test-hls-origin";
+            program = "${testOriginProfiles."4k-abr".runner}/bin/test-hls-origin";
           };
           test-origin-stress = {
             type = "app";
-            program = "${testOriginStress.runner}/bin/test-hls-origin";
+            program = "${testOriginProfiles.stress-test.runner}/bin/test-hls-origin";
           };
 
           # Logging-enabled profiles for performance analysis
           test-origin-logged = {
             type = "app";
-            program = "${testOriginLogged.runner}/bin/test-hls-origin";
+            program = "${testOriginProfiles.logged.runner}/bin/test-hls-origin";
           };
           test-origin-debug = {
             type = "app";
-            program = "${testOriginDebug.runner}/bin/test-hls-origin";
+            program = "${testOriginProfiles.debug.runner}/bin/test-hls-origin";
           };
 
           # MicroVM apps (Linux only, requires KVM)
           test-origin-vm = {
             type = "app";
-            program = "${testOrigin.microvm.runScript}";
+            program = "${testOriginProfiles.default.microvm.runScript}";
           };
           test-origin-vm-logged = {
             type = "app";
-            program = "${testOriginLogged.microvm.runScript}";
+            program = "${testOriginProfiles.logged.microvm.runScript}";
           };
           test-origin-vm-debug = {
             type = "app";
-            program = "${testOriginDebug.microvm.runScript}";
+            program = "${testOriginProfiles.debug.microvm.runScript}";
           };
 
           # TAP networking MicroVM apps (high performance)
           test-origin-vm-tap = {
             type = "app";
-            program = "${testOriginTap.microvm.runScript}";
+            program = "${testOriginProfiles.tap.microvm.runScript}";
           };
           test-origin-vm-tap-logged = {
             type = "app";
-            program = "${testOriginTapLogged.microvm.runScript}";
+            program = "${testOriginProfiles.tap-logged.microvm.runScript}";
           };
 
           # Swarm client apps (different profiles)
           swarm-client = {
             type = "app";
-            program = "${swarmClient.runner}/bin/swarm-client";
+            program = "${swarmClientProfiles.default.runner}/bin/swarm-client";
           };
           swarm-client-stress = {
             type = "app";
-            program = "${swarmClientStress.runner}/bin/swarm-client";
+            program = "${swarmClientProfiles.stress.runner}/bin/swarm-client";
           };
           swarm-client-gentle = {
             type = "app";
-            program = "${swarmClientGentle.runner}/bin/swarm-client";
+            program = "${swarmClientProfiles.gentle.runner}/bin/swarm-client";
           };
           swarm-client-burst = {
             type = "app";
-            program = "${swarmClientBurst.runner}/bin/swarm-client";
+            program = "${swarmClientProfiles.burst.runner}/bin/swarm-client";
           };
           swarm-client-extreme = {
             type = "app";
-            program = "${swarmClientExtreme.runner}/bin/swarm-client";
+            program = "${swarmClientProfiles.extreme.runner}/bin/swarm-client";
           };
         };
 

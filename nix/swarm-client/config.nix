@@ -5,7 +5,7 @@
 #   config = import ./config.nix { profile = "default"; };
 #   config = import ./config.nix { profile = "stress"; overrides = { clients = 300; }; };
 #
-{ profile ? "default", overrides ? {} }:
+{ profile ? "default", overrides ? {}, lib, meta }:
 
 let
   # ═══════════════════════════════════════════════════════════════════════════
@@ -83,11 +83,14 @@ let
     };
   };
 
-  # Select profile
-  base = profiles.${profile} or (throw "Unknown profile: ${profile}. Available: ${builtins.concatStringsSep ", " (builtins.attrNames profiles)}");
+  # Use generic profile system
+  profileSystem = meta.mkProfileSystem {
+    base = {};  # swarm-client has no base config, only profiles
+    inherit profiles;
+  };
 
-  # Apply overrides
-  cfg = base // overrides;
+  # Get merged config
+  cfg = profileSystem.getConfig profile overrides;
 
 in cfg // {
   # ═══════════════════════════════════════════════════════════════════════════
@@ -116,9 +119,6 @@ in cfg // {
     vmMemoryMB = builtins.ceil (((cfg.clients * 19) + 64) * 1.3) + 256;
   };
 
-  # Profile metadata
-  _profile = {
-    name = profile;
-    availableProfiles = builtins.attrNames profiles;
-  };
+  # Profile metadata (already included by getConfig, but explicit for clarity)
+  _profile = cfg._profile;
 }

@@ -633,6 +633,64 @@ make check                          # Run all checks
 
 ---
 
+## Nix Test Scripts
+
+The project includes automated test scripts to verify all Nix flake outputs after refactoring. These scripts systematically test packages, profiles, containers, MicroVMs, and apps.
+
+### Running Tests
+
+```bash
+# Run all tests (recommended)
+./scripts/nix-tests/test-all.sh
+
+# Or via Makefile
+make test-nix-all
+
+# Run individual test categories
+make test-nix-packages      # Test all package builds
+make test-nix-profiles      # Test profile accessibility (fast)
+make test-nix-containers    # Test container builds
+make test-nix-microvms      # Test MicroVM builds (Linux only, requires KVM)
+make test-nix-apps          # Test app execution
+```
+
+### Shellcheck Validation
+
+All test scripts must pass `shellcheck` validation. Run validation before committing:
+
+```bash
+# Validate all test scripts
+./scripts/nix-tests/shellcheck.sh
+
+# Or via Makefile
+make shellcheck-nix-tests
+```
+
+**Requirements:**
+- `shellcheck` must be installed (`nix-shell -p shellcheck` or `brew install shellcheck`)
+
+**What it checks:**
+- All scripts in `scripts/nix-tests/` directory
+- Shellcheck compliance (errors and warnings)
+- Proper error handling and exit codes
+
+### Test Scripts Overview
+
+| Script | Purpose | Time |
+|--------|---------|------|
+| `test-profiles.sh` | Verify all profiles are accessible | ~30s |
+| `test-packages.sh` | Build all packages | ~5-10 min |
+| `test-containers.sh` | Build container images | ~3-5 min |
+| `test-microvms.sh` | Build MicroVM images (Linux only) | ~10-15 min |
+| `test-apps.sh` | Test app execution | ~1-2 min |
+| `test-all.sh` | Run all tests | ~20-30 min |
+
+**Note:** MicroVM tests are automatically skipped on non-Linux systems or when KVM is not available.
+
+For detailed information, see [Nix Test Scripts Design](docs/nix_test_scripts_design.md).
+
+---
+
 ## FAQ
 
 <details>

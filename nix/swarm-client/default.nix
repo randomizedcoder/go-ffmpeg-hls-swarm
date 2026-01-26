@@ -15,13 +15,15 @@
 #     configOverrides = { clients = 100; };
 #   };
 #
-{ pkgs, lib, swarmBinary, profile ? "default", configOverrides ? {} }:
+{ pkgs, lib, meta, swarmBinary, profile ? "default", configOverrides ? {} }:
 
 let
   # Load configuration with profile and overrides
   config = import ./config.nix {
     inherit profile;
     overrides = configOverrides;
+    lib = lib;  # nixpkgs lib for standard functions
+    meta = meta;  # custom lib for mkProfileSystem, deepMerge, etc.
   };
 
   # Initialize components with config

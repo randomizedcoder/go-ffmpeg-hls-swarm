@@ -65,6 +65,7 @@ RESET := \033[0m
 .PHONY: load-test-50 load-test-100 load-test-300 load-test-500 load-test-1000
 .PHONY: network-setup network-teardown network-check
 .PHONY: git-add
+.PHONY: shellcheck-nix-tests test-nix-all test-nix-packages test-nix-profiles test-nix-containers test-nix-microvms test-nix-apps
 
 # ============================================================================
 # Help
@@ -195,7 +196,7 @@ fmt-nix: ## Format Nix files
 
 fmt-all: fmt fmt-nix ## Format all code (Go + Nix)
 
-check: check-go check-nix ## Run all checks
+check: check-go check-nix shellcheck-nix-tests ## Run all checks
 
 check-go: ## Run Go checks via Nix
 	$(NIX_BUILD) .#checks.x86_64-linux.go-lint
@@ -461,6 +462,31 @@ network-check: ## Verify network configuration is correct
 	@./scripts/network/check.sh
 
 # ============================================================================
+# Nix Test Scripts
+# ============================================================================
+
+shellcheck-nix-tests: ## Run shellcheck on all Nix test scripts
+	@./scripts/nix-tests/shellcheck.sh
+
+test-nix-all: shellcheck-nix-tests ## Run all Nix tests (packages, profiles, containers, apps, microvms)
+	@./scripts/nix-tests/test-all.sh
+
+test-nix-packages: ## Test all Nix package builds
+	@./scripts/nix-tests/test-packages.sh
+
+test-nix-profiles: ## Test all Nix profile accessibility
+	@./scripts/nix-tests/test-profiles.sh
+
+test-nix-containers: ## Test all Nix container builds
+	@./scripts/nix-tests/test-containers.sh
+
+test-nix-microvms: ## Test all Nix MicroVM builds (Linux only, requires KVM)
+	@./scripts/nix-tests/test-microvms.sh
+
+test-nix-apps: ## Test all Nix app execution
+	@./scripts/nix-tests/test-apps.sh
+
+# ============================================================================
 # Git helpers
 # ============================================================================
 
@@ -477,7 +503,7 @@ quick-test: ## Quick smoke test: build and show version
 	@echo ""
 	@$(OUTPUT) --help 2>/dev/null || $(OUTPUT)
 
-ci: check-nix fmt-nix lint test-unit ## Run CI pipeline locally
+ci: check-nix fmt-nix lint test-unit shellcheck-nix-tests ## Run CI pipeline locally
 	@echo "$(GREEN)CI checks passed$(RESET)"
 
 # ============================================================================

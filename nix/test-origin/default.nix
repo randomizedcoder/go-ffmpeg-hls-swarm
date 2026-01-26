@@ -21,13 +21,15 @@
 #     microvm = inputs.microvm;  # Pass the microvm flake
 #   };
 #
-{ pkgs, lib, profile ? "default", configOverrides ? {}, microvm ? null }:
+{ pkgs, lib, meta, profile ? "default", configOverrides ? {}, microvm ? null }:
 
 let
   # Load configuration with profile and overrides
   config = import ./config.nix {
     inherit profile;
     overrides = configOverrides;
+    lib = lib;  # nixpkgs lib for standard functions
+    meta = meta;  # custom lib for mkProfileSystem, deepMerge, etc.
   };
 
   # Initialize components with config
