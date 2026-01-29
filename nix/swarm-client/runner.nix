@@ -97,10 +97,13 @@ in pkgs.writeShellApplication {
     )
 
     # Add optional reconnect flags
-    if [ "${toString cfg.reconnect}" = "true" ] || [ "''${RECONNECT:-}" = "1" ]; then
+    # Use variables to avoid shellcheck constant expression warnings
+    RECONNECT_FLAG="${toString cfg.reconnect}"
+    RECONNECT_DELAY="${toString cfg.reconnectDelayMax}"
+    if [ "$RECONNECT_FLAG" = "true" ] || [ "''${RECONNECT:-}" = "1" ]; then
       CMD+=(--reconnect)
-      if [ "${toString cfg.reconnectDelayMax}" -gt 0 ]; then
-        CMD+=(--reconnect-delay-max "${toString cfg.reconnectDelayMax}")
+      if [ "$RECONNECT_DELAY" -gt 0 ]; then
+        CMD+=(--reconnect-delay-max "$RECONNECT_DELAY")
       fi
     fi
 

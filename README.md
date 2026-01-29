@@ -124,6 +124,43 @@ Save as `preview-swarm.sh`, run with `bash preview-swarm.sh`, and you'll see exa
 
 ## Quick Start
 
+### Quick Reference
+
+| I want... | Run this Command | Requirements |
+|-----------|------------------|--------------|
+| **A local origin fast** | `nix run .#up -- default runner` | Any OS with Nix |
+| **A container origin** | `nix run .#up -- default container` | Linux to run |
+| **Max realism (Linux)** | `nix run .#up -- default vm` | Linux + KVM |
+| **Low-latency testing** | `nix run .#up -- low-latency runner` | Any OS with Nix |
+| **Stress test origin** | `nix run .#up -- stress runner` | Any OS with Nix |
+| **High-performance TAP networking** | `nix run .#up -- tap vm` | Linux + KVM + sudo |
+| **View nginx config** | `nix run .#nginx-config` | Any OS with Nix |
+| **Help / Examples** | `nix run .#up -- --help` | Any OS with Nix |
+
+### Unified CLI Entry Point
+
+The `nix run .#up` command provides a single entry point for all deployments:
+
+- **Interactive mode** (TTY): Shows menu to select profile and type
+- **Non-interactive mode** (CI/non-TTY): Uses defaults (profile=default, type=runner)
+- **With arguments**: `nix run .#up -- <profile> <type>`
+
+**Available profiles:**
+- `default` - Standard 2s segments, 720p
+- `low-latency` - 1s segments, optimized for speed
+- `4k-abr` - Multi-bitrate 4K streaming
+- `stress` - Maximum throughput configuration
+- `logged` - With buffered segment logging
+- `debug` - Full logging with gzip compression
+- `tap` - High-performance TAP networking (MicroVM only)
+
+**Available types:**
+- `runner` - Local shell script (all platforms)
+- `container` - OCI container (Linux to run)
+- `vm` - MicroVM (Linux + KVM only)
+
+See `nix run .#up -- --help` for full documentation.
+
 ### Option 1: Test Origin Server (Fully Implemented ✅)
 
 The test origin server is fully implemented and ready to use. It generates HLS streams locally using FFmpeg and serves them via Nginx:
@@ -517,6 +554,73 @@ See [Origin Metrics Implementation Plan](docs/ORIGIN_METRICS_IMPLEMENTATION_PLAN
 
 ---
 
+## Shell Autocompletion
+
+Generate completion scripts from the single source of truth:
+
+```bash
+# Generate completion scripts
+nix run .#generate-completion
+
+# Source for your shell
+source ./scripts/completion/bash-completion.sh  # Bash
+source ./scripts/completion/zsh-completion.sh    # Zsh
+```
+
+**Available completions:**
+- Profile names (default, low-latency, 4k-abr, stress, etc.)
+- Type names (runner, container, vm)
+- Unified CLI commands
+
+**Permanent setup:**
+
+Add to your `~/.bashrc` or `~/.zshrc`:
+```bash
+# Generate and source Nix completions
+if command -v nix &> /dev/null; then
+  nix run .#generate-completion 2>/dev/null
+  source ./scripts/completion/bash-completion.sh 2>/dev/null || true
+fi
+```
+
+## Nginx Config Generator
+
+View the generated nginx configuration for any profile:
+
+```bash
+# View default profile config
+nix run .#nginx-config
+
+# View specific profile config
+nix run .#nginx-config low-latency
+nix run .#nginx-config stress
+nix run .#nginx-config 4k-abr
+
+# Build and save to file
+nix build .#test-origin-nginx-config
+cat ./result > nginx-default.conf
+
+# Build specific profile
+nix build .#test-origin-nginx-config-low-latency
+cat ./result > nginx-low-latency.conf
+```
+
+**Available packages:**
+- `test-origin-nginx-config` (default profile)
+- `test-origin-nginx-config-low-latency`
+- `test-origin-nginx-config-4k-abr`
+- `test-origin-nginx-config-stress`
+- `test-origin-nginx-config-logged`
+- `test-origin-nginx-config-debug`
+
+**Use cases:**
+- Debugging: Understand what nginx config is actually being used
+- Customization: See the generated config before modifying it
+- Documentation: Share config examples for different profiles
+- Validation: Verify cache headers and performance settings
+
+See [Nginx Config Generator Design](docs/NGINX_CONFIG_GENERATOR_DESIGN.md) for details.
+
 ## Documentation
 
 | Your Goal | Read This |
@@ -526,9 +630,12 @@ See [Origin Metrics Implementation Plan](docs/ORIGIN_METRICS_IMPLEMENTATION_PLAN
 | **Run origin as MicroVM/Container** | [Test Origin Guide](docs/TEST_ORIGIN.md) |
 | **High-performance MicroVM networking** | [MicroVM Networking](docs/MICROVM_NETWORKING.md) — TAP/bridge, ~10 Gbps |
 | **Nginx security hardening** | [Nginx Security](docs/NGINX_SECURITY.md) — DynamicUser, syscall filtering |
+| **View nginx configuration** | [Nginx Config Generator](#nginx-config-generator) (above) |
 | **Reset MicroVM environment** | `make microvm-reset-full` then `make network-setup && make microvm-start-tap` |
 | **Understand the swarm client CLI** | [Configuration Reference](docs/CONFIGURATION.md) |
 | **Run at scale (OS tuning)** | [Operations Guide](docs/OPERATIONS.md) |
+| **Technical reference** | [Reference Guide](docs/REFERENCE.md) — Environment variables, flags, platform matrix |
+| **CI/CD setup** | [CI/CD Guide](docs/CI_CD.md) — Remote builders, GitHub Actions |
 | **Contribute to development** | [Contributing](CONTRIBUTING.md) → [Design](docs/DESIGN.md) |
 
 <details>
@@ -635,9 +742,9 @@ make check                          # Run all checks
 
 ## Nix Test Scripts
 
-The project includes automated test scripts to verify all Nix flake outputs after refactoring. These scripts systematically test packages, profiles, containers, MicroVMs, and apps.
+The project includes comprehensive automated test scripts to verify all Nix flake outputs. These scripts systematically test packages, profiles, containers, MicroVMs, apps, and the unified CLI.
 
-### Running Tests
+### Quick Start
 
 ```bash
 # Run all tests (recommended)
@@ -645,13 +752,75 @@ The project includes automated test scripts to verify all Nix flake outputs afte
 
 # Or via Makefile
 make test-nix-all
+```
 
-# Run individual test categories
-make test-nix-packages      # Test all package builds
-make test-nix-profiles      # Test profile accessibility (fast)
-make test-nix-containers    # Test container builds
-make test-nix-microvms      # Test MicroVM builds (Linux only, requires KVM)
-make test-nix-apps          # Test app execution
+### Test Categories
+
+| Category | Script | Purpose | Requirements | Time |
+|----------|--------|---------|--------------|------|
+| **Fast Checks** | `test-eval.sh` | Evaluation only (no builds) | None | ~30s |
+| | `gatekeeper.sh` | Single source of truth validation | None | ~10s |
+| | `test-profiles.sh` | Profile accessibility | None | ~30s |
+| **Build Tests** | `test-packages.sh` | Build all packages | None | ~5-10 min |
+| | `test-containers.sh` | Build container images | None | ~3-5 min |
+| | `test-iso.sh` | Build ISO images | Linux (optional KVM) | ~10-15 min |
+| | `test-microvms.sh` | Build MicroVM images | Linux + KVM | ~10-15 min |
+| **Execution Tests** | `test-apps.sh` | Test app execution | None | ~1-2 min |
+| | `test-cli.sh` | Unified CLI testing | None | ~30s |
+| | `test-containers-env.sh` | Container execution | Docker | ~2-5 min |
+| | `test-microvms-network.sh` | MicroVM network tests | Linux + KVM + sudo | ~1-2 min |
+| | `test-nginx-config.sh` | Nginx config generator | None | ~30s |
+| **All Tests** | `test-all.sh` | Run all tests | Various | ~20-30 min |
+
+### Running Individual Tests
+
+```bash
+# Fast evaluation tests (no builds, ~30s)
+./scripts/nix-tests/test-eval.sh
+
+# Gatekeeper validation (~10s)
+./scripts/nix-tests/gatekeeper.sh
+
+# Profile accessibility (~30s)
+./scripts/nix-tests/test-profiles.sh
+
+# Package builds (~5-10 min)
+./scripts/nix-tests/test-packages.sh
+
+# Container builds (~3-5 min)
+./scripts/nix-tests/test-containers.sh
+
+# Container execution (requires Docker, ~2-5 min)
+./scripts/nix-tests/test-containers-env.sh
+
+# MicroVM builds (Linux + KVM, ~10-15 min)
+./scripts/nix-tests/test-microvms.sh
+
+# MicroVM network tests (Linux + KVM + sudo, ~1-2 min)
+sudo ./scripts/nix-tests/test-microvms-network.sh
+
+# ISO builds (Linux, ~10-15 min)
+./scripts/nix-tests/test-iso.sh
+
+# App execution (~1-2 min)
+./scripts/nix-tests/test-apps.sh
+
+# Unified CLI (~30s)
+./scripts/nix-tests/test-cli.sh
+
+# Nginx config generator (~30s)
+./scripts/nix-tests/test-nginx-config.sh
+```
+
+### Via Makefile
+
+```bash
+make test-nix-all          # Run all tests
+make test-nix-packages     # Test all package builds
+make test-nix-profiles     # Test profile accessibility (fast)
+make test-nix-containers   # Test container builds
+make test-nix-microvms    # Test MicroVM builds (Linux only, requires KVM)
+make test-nix-apps        # Test app execution
 ```
 
 ### Shellcheck Validation
@@ -674,20 +843,62 @@ make shellcheck-nix-tests
 - Shellcheck compliance (errors and warnings)
 - Proper error handling and exit codes
 
-### Test Scripts Overview
+### Test Results
 
-| Script | Purpose | Time |
-|--------|---------|------|
-| `test-profiles.sh` | Verify all profiles are accessible | ~30s |
-| `test-packages.sh` | Build all packages | ~5-10 min |
-| `test-containers.sh` | Build container images | ~3-5 min |
-| `test-microvms.sh` | Build MicroVM images (Linux only) | ~10-15 min |
-| `test-apps.sh` | Test app execution | ~1-2 min |
-| `test-all.sh` | Run all tests | ~20-30 min |
+Tests report results in a standardized format:
 
-**Note:** MicroVM tests are automatically skipped on non-Linux systems or when KVM is not available.
+```
+════════════════════════════════════════════════════════════
+Test Summary
+════════════════════════════════════════════════════════════
+Passed:  X
+Failed:  Y
+Skipped: Z
+```
 
-For detailed information, see [Nix Test Scripts Design](docs/nix_test_scripts_design.md).
+- **Passed**: Test succeeded ✅
+- **Failed**: Test failed (needs attention) ❌
+- **Skipped**: Test skipped (platform/requirements not met) ⊘
+
+**Skipped tests are expected** when:
+- Platform requirements not met (e.g., Linux-only tests on macOS)
+- Prerequisites missing (e.g., Docker, KVM)
+- Optional features not available
+
+### Network Setup for Testing
+
+Some tests require network setup (TAP networking for high-performance MicroVMs):
+
+```bash
+# Automated (handled by test-microvms-network.sh)
+sudo ./scripts/nix-tests/test-microvms-network.sh
+
+# Manual setup
+./scripts/network/teardown.sh
+sudo ./scripts/network/setup.sh
+./scripts/network/check.sh
+```
+
+### Continuous Integration
+
+For CI/CD pipelines, use tiered testing:
+
+```bash
+# Fast path (~30s) - evaluation only
+./scripts/nix-tests/test-eval.sh
+./scripts/nix-tests/gatekeeper.sh
+
+# Build path (~10-15 min) - builds only
+./scripts/nix-tests/test-packages.sh
+./scripts/nix-tests/test-containers.sh
+
+# Full path (~20-30 min) - everything
+./scripts/nix-tests/test-all.sh
+```
+
+For detailed information, see:
+- [Nix Test Scripts Design](docs/nix_test_scripts_design.md)
+- [Nix Test Scripts README](scripts/nix-tests/README.md)
 
 ---
 

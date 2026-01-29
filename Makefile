@@ -24,7 +24,10 @@ GOFLAGS     ?=
 LDFLAGS     ?= -s -w
 
 # Streaming settings
-ORIGIN_PORT ?= 8080
+# Note: Default container port is 17080, but can be overridden
+# See docs/PORTS.md for port documentation
+ORIGIN_PORT ?= 17080
+METRICS_PORT ?= 17091
 STREAM_URL  ?= http://localhost:$(ORIGIN_PORT)/stream.m3u8
 
 # Nix settings
@@ -57,7 +60,7 @@ RESET := \033[0m
 .PHONY: test test-unit test-integration test-integration-interactive
 .PHONY: lint fmt fmt-nix check check-nix
 .PHONY: test-origin test-origin-low-latency test-origin-4k-abr test-origin-stress test-origin-logged test-origin-debug
-.PHONY: container container-load container-run
+.PHONY: container container-load container-run container-run-origin swarm-container-run-100 container-full-test
 .PHONY: swarm-client swarm-client-stress swarm-client-gentle swarm-client-burst swarm-client-extreme
 .PHONY: swarm-container swarm-container-load swarm-container-run
 .PHONY: microvm-check-kvm microvm-check-ports microvm-start microvm-start-tap microvm-stop microvm-origin microvm-origin-build microvm-origin-stop microvm-origin-logged microvm-origin-debug microvm-origin-tap microvm-origin-tap-logged
@@ -91,6 +94,9 @@ help: ## Show this help message
 	@echo ""
 	@echo "$(GREEN)Containers:$(RESET)"
 	@grep -E '^container[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@echo ""
+	@echo "$(GREEN)Container Quick Start:$(RESET)"
+	@grep -E '^(container-run-origin|swarm-container-run-100|container-full-test):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(GREEN)MicroVMs (requires KVM):$(RESET)"
 	@grep -E '^microvm-(start|stop|check):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
@@ -259,9 +265,80 @@ swarm-container-load: swarm-container ## Build and load swarm container into Doc
 	docker load < ./result
 	@echo "$(GREEN)Swarm container loaded$(RESET)"
 
-swarm-container-run: swarm-container-load ## Build, load, and run swarm container
-	@test -n "$(STREAM_URL)" || (echo "$(YELLOW)Usage:$(RESET) make swarm-container-run STREAM_URL=http://origin:8080/stream.m3u8" && exit 1)
-	docker run --rm -e STREAM_URL=$(STREAM_URL) -p 9090:9090 go-ffmpeg-hls-swarm:latest
+swarm-container-run: swarm-container-load ## Build, load, and run swarm container (metrics port: $(METRICS_PORT))
+	@test -n "$(STREAM_URL)" || (echo "$(YELLOW)Usage:$(RESET) make swarm-container-run STREAM_URL=http://origin:17080/stream.m3u8" && exit 1)
+	@if command -v podman >/dev/null 2>&1; then \
+		CONTAINER_CMD=podman; \
+	elif command -v docker >/dev/null 2>&1; then \
+		CONTAINER_CMD=docker; \
+	else \
+		echo "$(YELLOW)Error:$(RESET) Neither podman nor docker found"; \
+		exit 1; \
+	fi; \
+	$$CONTAINER_CMD run --rm -e STREAM_URL=$(STREAM_URL) -e METRICS_PORT=$(METRICS_PORT) -p $(METRICS_PORT):$(METRICS_PORT) go-ffmpeg-hls-swarm:latest
+
+swarm-container-run-100: swarm-container-load ## Build, load, and run swarm container with 100 clients (metrics port: $(METRICS_PORT))
+	@test -n "$(STREAM_URL)" || (echo "$(YELLOW)Usage:$(RESET) make swarm-container-run-100 STREAM_URL=http://origin:17080/stream.m3u8" && exit 1)
+	@echo "$(CYAN)Starting swarm client with 100 clients...$(RESET)"
+	@echo "$(GREEN)Stream URL:$(RESET) $(STREAM_URL)"
+	@echo "$(GREEN)Metrics:$(RESET)    http://localhost:$(METRICS_PORT)/metrics"
+	@echo ""
+	@if command -v podman >/dev/null 2>&1; then \
+		CONTAINER_CMD=podman; \
+	elif command -v docker >/dev/null 2>&1; then \
+		CONTAINER_CMD=docker; \
+	else \
+		echo "$(YELLOW)Error:$(RESET) Neither podman nor docker found"; \
+		exit 1; \
+	fi; \
+	if ss -tlnp 2>/dev/null | grep -q ":$(METRICS_PORT) " || netstat -tlnp 2>/dev/null | grep -q ":$(METRICS_PORT) "; then \
+		echo "$(YELLOW)Warning:$(RESET) Port $(METRICS_PORT) is already in use"; \
+		echo "  Free it with: sudo fuser -k $(METRICS_PORT)/tcp"; \
+		echo "  Or use a different port: make swarm-container-run-100 METRICS_PORT=27091 STREAM_URL=..."; \
+		exit 1; \
+	fi; \
+	$$CONTAINER_CMD run --rm -e STREAM_URL=$(STREAM_URL) -e CLIENTS=100 -e METRICS_PORT=$(METRICS_PORT) -p $(METRICS_PORT):$(METRICS_PORT) go-ffmpeg-hls-swarm:latest
+
+container-full-test: container-load swarm-container-load ## Start origin container, wait, then run 100-client load test
+	@echo "$(CYAN)Starting full container test (origin + 100 clients)...$(RESET)"
+	@echo ""
+	@echo "$(GREEN)Step 1:$(RESET) Starting origin container..."
+	@if command -v podman >/dev/null 2>&1; then \
+		RUNTIME=podman; \
+		CONTAINER_CMD=podman; \
+	elif command -v docker >/dev/null 2>&1; then \
+		RUNTIME=docker; \
+		CONTAINER_CMD=docker; \
+	else \
+		echo "$(YELLOW)Error:$(RESET) Neither podman nor docker found"; \
+		exit 1; \
+	fi; \
+	$$CONTAINER_CMD run -d --name hls-origin-test -p $(ORIGIN_PORT):17080 go-ffmpeg-hls-swarm-test-origin:latest || \
+		($$CONTAINER_CMD stop hls-origin-test 2>/dev/null; $$CONTAINER_CMD rm hls-origin-test 2>/dev/null; \
+		 $$CONTAINER_CMD run -d --name hls-origin-test -p $(ORIGIN_PORT):17080 go-ffmpeg-hls-swarm-test-origin:latest); \
+	echo "$(GREEN)✓ Origin container started$(RESET)"; \
+	echo ""; \
+	echo "$(GREEN)Step 2:$(RESET) Waiting for stream to be ready (10 seconds)..."; \
+	sleep 10; \
+	echo "$(GREEN)✓ Stream should be ready$(RESET)"; \
+	echo ""; \
+		echo "$(GREEN)Step 3:$(RESET) Starting swarm client with 100 clients..."; \
+		echo "$(GREEN)Stream URL:$(RESET) http://localhost:$(ORIGIN_PORT)/stream.m3u8"; \
+		echo "$(GREEN)Metrics:$(RESET)    http://localhost:$(METRICS_PORT)/metrics"; \
+		echo ""; \
+		if ss -tlnp 2>/dev/null | grep -q ":$(METRICS_PORT) " || netstat -tlnp 2>/dev/null | grep -q ":$(METRICS_PORT) "; then \
+			echo "$(YELLOW)Warning:$(RESET) Port $(METRICS_PORT) is already in use"; \
+			echo "  Free it with: sudo fuser -k $(METRICS_PORT)/tcp"; \
+			echo "  Or use a different port: make container-full-test METRICS_PORT=27091"; \
+			exit 1; \
+		fi; \
+		echo "Press Ctrl+C to stop the load test (origin will continue running)"; \
+		echo ""; \
+		$$CONTAINER_CMD run --rm --network host -e STREAM_URL=http://localhost:$(ORIGIN_PORT)/stream.m3u8 -e CLIENTS=100 -e METRICS_PORT=$(METRICS_PORT) -p $(METRICS_PORT):$(METRICS_PORT) go-ffmpeg-hls-swarm:latest || true; \
+	echo ""; \
+	echo "$(YELLOW)Load test finished. Origin container still running.$(RESET)"; \
+	echo "$(GREEN)Stop origin with:$(RESET) $$CONTAINER_CMD stop hls-origin-test"; \
+	echo "$(GREEN)Remove origin with:$(RESET) $$CONTAINER_CMD rm hls-origin-test"
 
 # ============================================================================
 # Container targets (Test Origin)
@@ -276,8 +353,68 @@ container-load: container ## Build and load test origin container into Docker
 	docker load < ./result
 	@echo "$(GREEN)Container loaded$(RESET)"
 
-container-run: container-load ## Build, load, and run test origin container
-	docker run --rm -p 8080:80 test-hls-origin:latest
+container-run: container-load ## Build, load, and run test origin container (default port: 17080)
+	@echo "$(CYAN)Starting test origin container...$(RESET)"
+	@echo "$(GREEN)Stream URL:$(RESET) http://localhost:$(ORIGIN_PORT)/stream.m3u8"
+	@echo "$(GREEN)Health:$(RESET)     http://localhost:$(ORIGIN_PORT)/health"
+	@echo ""
+	@echo "Press Ctrl+C to stop"
+	@echo ""
+	@if command -v podman >/dev/null 2>&1; then \
+		podman run --rm -p $(ORIGIN_PORT):17080 go-ffmpeg-hls-swarm-test-origin:latest; \
+	elif command -v docker >/dev/null 2>&1; then \
+		docker run --rm -p $(ORIGIN_PORT):17080 go-ffmpeg-hls-swarm-test-origin:latest; \
+	else \
+		echo "$(YELLOW)Error:$(RESET) Neither podman nor docker found"; \
+		exit 1; \
+	fi
+
+container-run-origin: container-load ## Start test origin container in background (default port: 17080)
+	@echo "$(CYAN)Starting test origin container in background...$(RESET)"
+	@if command -v podman >/dev/null 2>&1; then \
+		CONTAINER_CMD=podman; \
+	elif command -v docker >/dev/null 2>&1; then \
+		CONTAINER_CMD=docker; \
+	else \
+		echo "$(YELLOW)Error:$(RESET) Neither podman nor docker found"; \
+		exit 1; \
+	fi; \
+	if $$CONTAINER_CMD ps -a --format "{{.Names}}" | grep -q "^hls-origin$$"; then \
+		echo "$(YELLOW)Container 'hls-origin' already exists.$(RESET)"; \
+		echo "Stopping and removing existing container..."; \
+		$$CONTAINER_CMD stop hls-origin 2>/dev/null || true; \
+		$$CONTAINER_CMD rm hls-origin 2>/dev/null || true; \
+	fi; \
+	CONTAINER_ID=$$($$CONTAINER_CMD run -d --name hls-origin -p $(ORIGIN_PORT):17080 go-ffmpeg-hls-swarm-test-origin:latest); \
+	if [ -n "$$CONTAINER_ID" ]; then \
+		echo "$(GREEN)✓ Origin container started$(RESET)"; \
+		echo "  Container ID: $$CONTAINER_ID"; \
+		echo "  Container name: hls-origin"; \
+		echo ""; \
+		echo "$(GREEN)Container Status:$(RESET)"; \
+		$$CONTAINER_CMD ps --filter "name=hls-origin" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"; \
+		echo ""; \
+		echo "$(GREEN)Access URLs:$(RESET)"; \
+		echo "  Stream URL: http://localhost:$(ORIGIN_PORT)/stream.m3u8"; \
+		echo "  Health:     http://localhost:$(ORIGIN_PORT)/health"; \
+		echo ""; \
+		echo "$(GREEN)Management:$(RESET)"; \
+		echo "  View logs:  $$CONTAINER_CMD logs -f hls-origin"; \
+		echo "  Stop:       $$CONTAINER_CMD stop hls-origin"; \
+		echo "  Remove:     $$CONTAINER_CMD rm hls-origin"; \
+		echo ""; \
+		echo "$(CYAN)Waiting for container to be ready (5 seconds)...$(RESET)"; \
+		sleep 5; \
+		if $$CONTAINER_CMD ps --filter "name=hls-origin" --format "{{.Status}}" | grep -q "Up"; then \
+			echo "$(GREEN)✓ Container is running$(RESET)"; \
+		else \
+			echo "$(YELLOW)⚠ Container may not be running properly$(RESET)"; \
+			echo "Check logs with: $$CONTAINER_CMD logs hls-origin"; \
+		fi; \
+	else \
+		echo "$(YELLOW)✗ Failed to start container$(RESET)"; \
+		exit 1; \
+	fi
 
 # ============================================================================
 # MicroVM targets (requires KVM)

@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-# shellcheck source=lib.sh
+# shellcheck source=scripts/nix-tests/lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
 SYSTEM=$(get_system)
@@ -19,7 +19,7 @@ echo ""
 test_package_exists() {
     local package_name=$1
     local attr_path=".#packages.$SYSTEM.$package_name"
-    
+
     # Just check if the command succeeds
     # Allow stderr through (warnings are OK) but suppress stdout
     if nix eval "$attr_path" >/dev/null 2>&1; then

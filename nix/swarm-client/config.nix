@@ -8,6 +8,12 @@
 { profile ? "default", overrides ? {}, lib, meta }:
 
 let
+  # Import profile list and validation (single source of truth)
+  profileListConfig = import ./config/profile-list.nix { inherit lib; };
+  
+  # Validate profile name
+  validatedProfile = profileListConfig.validateProfile profile;
+  
   # ═══════════════════════════════════════════════════════════════════════════
   # Profile Definitions
   # ═══════════════════════════════════════════════════════════════════════════
@@ -89,8 +95,8 @@ let
     inherit profiles;
   };
 
-  # Get merged config
-  cfg = profileSystem.getConfig profile overrides;
+  # Get merged config with validated profile
+  cfg = profileSystem.getConfig validatedProfile overrides;
 
 in cfg // {
   # ═══════════════════════════════════════════════════════════════════════════

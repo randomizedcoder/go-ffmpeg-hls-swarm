@@ -3,11 +3,18 @@
 #
 # Performance features:
 # - aio threads: Async I/O prevents worker blocking under load
+# - directio 4m: Only use direct I/O for files > 4MB (allows OS page cache for segments)
 # - tcp_nopush for segments: Fill packets for throughput
 # - tcp_nodelay for manifests: Immediate delivery for freshness
+# - keepalive_timeout 30s: Optimized for HLS polling (frees connections faster)
 # - reset_timedout_connection: Free memory from dirty client exits
+# - client_body_buffer_size 128k: Minimal buffer (HLS origins don't accept POST)
 # - Dynamic cache headers based on segment duration
+# - Method filtering: Only GET/HEAD/OPTIONS allowed (security)
 # - Optional buffered logging for performance analysis
+#
+# Note: nixpkgs nginx is built with --with-pcre-jit (PCRE2 with JIT) by default
+# for fast regex matching on location blocks.
 #
 { pkgs, lib, config }:
 
@@ -92,6 +99,7 @@ in rec {
   # High-performance nginx.conf - Optimized for 100k+ concurrent connections
   # ═══════════════════════════════════════════════════════════════════════════
   configFile = pkgs.writeText "nginx-hls.conf" ''
+    user nginx;  # Run as dedicated nginx user (non-root for security)
     worker_processes auto;
     worker_rlimit_nofile 65535;
     error_log /dev/stderr warn;
@@ -117,7 +125,7 @@ in rec {
         # ═══════════════════════════════════════════════════════════════
         sendfile           on;
         tcp_nopush         on;      # Fill packets before sending (throughput)
-        keepalive_timeout  65;
+        keepalive_timeout  30;      # Reduced for HLS polling (frees connections faster)
         keepalive_requests 10000;
 
         # Free memory faster from dirty client exits
@@ -133,17 +141,29 @@ in rec {
         ${defaultAccessLog};
         gzip off;  # .ts files are already compressed
 
+        # Client body buffer (HLS origins don't accept POST)
+        client_body_buffer_size 128k;
+
         # ═══════════════════════════════════════════════════════════════
         # Async I/O for high-load scenarios
-        # Even with tmpfs, prevents worker blocking on metadata ops
+        # Optimized for small HLS segments (2-4MB) on fast storage
+        # directio 4m: Only use direct I/O for files > 4MB
+        # This allows OS page cache to serve hot .m3u8 and .ts files
         # ═══════════════════════════════════════════════════════════════
         aio            threads=default;
-        directio       512;
+        directio       4m;  # Only use direct I/O for files > 4MB (allows page cache for segments)
 
         server {
             listen ${toString cfg.port} reuseport;
             server_name _;
             root ${cfg.hlsDir};
+
+            # ═══════════════════════════════════════════════════════════
+            # Security: Method filtering (HLS origins only need GET/HEAD/OPTIONS)
+            # ═══════════════════════════════════════════════════════════
+            if ($request_method !~ ^(GET|HEAD|OPTIONS)$ ) {
+                return 405;
+            }
 
             # ═══════════════════════════════════════════════════════════
             # Master playlist (ABR entry point)
@@ -231,6 +251,7 @@ in rec {
   # Minimal config for runner script (dynamic port/dir)
   # ═══════════════════════════════════════════════════════════════════════════
   minimalConfigTemplate = port: hlsDir: pkgs.writeText "nginx-minimal.conf" ''
+    user nginx;  # Run as dedicated nginx user (non-root for security)
     worker_processes 1;
     error_log /dev/stderr warn;
     pid /tmp/nginx-test.pid;
@@ -242,16 +263,27 @@ in rec {
         default_type application/octet-stream;
         sendfile on;
         tcp_nopush on;
+        keepalive_timeout 30;
         access_log off;
         reset_timedout_connection on;
+        client_body_buffer_size 128k;
 
         # File caching
         open_file_cache max=1000 inactive=30s;
         open_file_cache_valid 10s;
 
+        # Async I/O (optimized for small segments)
+        aio threads=default;
+        directio 4m;
+
         server {
             listen ${toString port};
             root ${hlsDir};
+
+            # Security: Method filtering
+            if ($request_method !~ ^(GET|HEAD|OPTIONS)$ ) {
+                return 405;
+            }
 
             # Master playlist
             location = /${h.masterPlaylist} {
@@ -298,4 +330,7 @@ in rec {
   };
 
   runtimeInputs = [ pkgs.nginx ];
+
+  # Export config file as a package (for nginx-config generator)
+  configPackage = configFile;
 }

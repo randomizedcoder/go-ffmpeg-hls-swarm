@@ -14,10 +14,17 @@
     masterPlaylist = "master.m3u8";
 
     # FFmpeg HLS flags
+    # - delete_segments: Remove old .ts files automatically
+    # - omit_endlist: Live stream (no #EXT-X-ENDLIST)
+    # - temp_file: Atomic writes (write to .tmp then rename)
+    # - strftime: Required for second_level_segment_index (enables strftime in segment filenames)
+    # - second_level_segment_index: Better segment indexing for ABR (requires strftime)
     flags = [
       "delete_segments"
       "omit_endlist"
       "temp_file"
+      "strftime"
+      "second_level_segment_index"
     ];
   };
 

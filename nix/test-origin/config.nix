@@ -9,6 +9,12 @@
 { profile ? "default", overrides ? {}, lib, meta }:
 
 let
+  # Import profile list and validation (single source of truth)
+  profileListConfig = import ./config/profile-list.nix { inherit lib; };
+  
+  # Validate profile name
+  validatedProfile = profileListConfig.validateProfile profile;
+  
   # Import split modules
   profiles = import ./config/profiles.nix;
   baseConfig = import ./config/base.nix;
@@ -19,8 +25,8 @@ let
     inherit profiles;
   };
   
-  # Get merged config
-  mergedConfig = profileSystem.getConfig profile overrides;
+  # Get merged config with validated profile
+  mergedConfig = profileSystem.getConfig validatedProfile overrides;
 
   # Import derived and cache calculations
   derived = import ./config/derived.nix { config = mergedConfig; };

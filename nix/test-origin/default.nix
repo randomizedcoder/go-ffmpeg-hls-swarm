@@ -21,7 +21,7 @@
 #     microvm = inputs.microvm;  # Pass the microvm flake
 #   };
 #
-{ pkgs, lib, meta, profile ? "default", configOverrides ? {}, microvm ? null }:
+{ pkgs, lib, meta, profile ? "default", configOverrides ? {}, microvm ? null, nixpkgs ? null }:
 
 let
   # Load configuration with profile and overrides
@@ -92,6 +92,9 @@ in {
     master = nginx.masterCacheControl;
   };
 
+  # Export nginx config file as a package (for config generator)
+  nginxConfig = nginx.configPackage;
+
   # Export mkFfmpegArgs for integration tests
   inherit (ffmpeg) mkFfmpegArgs mkMultiBitrateArgs;
 
@@ -104,4 +107,25 @@ in {
 
   # Check if MicroVM support is available
   hasMicrovm = microvm != null;
+
+  # Enhanced container (Linux only)
+  # Requires nixpkgs input for nixosSystem
+  containerEnhanced = if pkgs.stdenv.isLinux && nixpkgs != null then
+    import ./container-enhanced.nix {
+      inherit pkgs lib config nixosModule;
+      inherit nixpkgs;
+    }
+  else
+    null;
+
+  # ISO image (Linux only)
+  # Requires nixpkgs input for nixosSystem
+  iso = if pkgs.stdenv.isLinux && nixpkgs != null then
+    import ./iso.nix {
+      inherit pkgs lib config nixosModule;
+      inherit nixpkgs;
+      cloudInit = null;  # Can be overridden via flake args
+    }
+  else
+    null;
 }

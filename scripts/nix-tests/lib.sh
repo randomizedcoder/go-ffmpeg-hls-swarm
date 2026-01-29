@@ -34,19 +34,19 @@ log_test() {
 
 # Test result tracking
 test_pass() {
-    ((PASSED++))
+    ((PASSED++)) || true  # || true prevents exit on error if PASSED is readonly (shouldn't happen, but safe)
     RESULTS+=("PASS: $1")
     log_info "✓ $1"
 }
 
 test_fail() {
-    ((FAILED++))
+    ((FAILED++)) || true  # || true prevents exit on error
     RESULTS+=("FAIL: $1 - $2")
     log_error "✗ $1: $2"
 }
 
 test_skip() {
-    ((SKIPPED++))
+    ((SKIPPED++)) || true  # || true prevents exit on error
     RESULTS+=("SKIP: $1 - $2")
     log_warn "⊘ $1: $2"
 }

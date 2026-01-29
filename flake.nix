@@ -103,6 +103,7 @@
                 ".git"
                 ".vscode"
                 ".cursor"
+                "control.socket"  # Socket file (unsupported by Nix)
               ];
             in
             !(builtins.elem baseName ignoredPaths);
@@ -135,29 +136,31 @@
         };
 
         # Test origin server components (with profile support and MicroVM)
-        # Get available profiles from default instance
-        testOriginDefault = import ./nix/test-origin { inherit pkgs lib meta microvm; };
+        # Import single source of truth for profiles
+        testOriginProfileConfig = import ./nix/test-origin/config/profile-list.nix { inherit (pkgs) lib; };
+        testOriginProfileNames = testOriginProfileConfig.profiles;
 
-        # Generate all profile variants automatically
-        testOriginProfiles = lib.mapAttrs
-          (name: _: import ./nix/test-origin {
-            inherit pkgs lib meta microvm;
-            profile = name;
-          })
-          (lib.genAttrs testOriginDefault.availableProfiles (x: x));
+        # Generate all profile variants (derives from single list)
+        testOriginProfiles = lib.genAttrs testOriginProfileNames (name:
+          import ./nix/test-origin {
+            inherit pkgs lib meta microvm nixpkgs;
+            profile = testOriginProfileConfig.validateProfile name;
+          }
+        );
 
         # Swarm client components (with profile support)
-        # Get available profiles from default instance
-        swarmClientDefault = import ./nix/swarm-client { inherit pkgs lib meta; swarmBinary = package; };
+        # Import single source of truth for profiles
+        swarmClientProfileConfig = import ./nix/swarm-client/config/profile-list.nix { inherit (pkgs) lib; };
+        swarmClientProfileNames = swarmClientProfileConfig.profiles;
 
-        # Generate all profile variants automatically
-        swarmClientProfiles = lib.mapAttrs
-          (name: _: import ./nix/swarm-client {
+        # Generate all profile variants (derives from single list)
+        swarmClientProfiles = lib.genAttrs swarmClientProfileNames (name:
+          import ./nix/swarm-client {
             inherit pkgs lib meta;
             swarmBinary = package;
-            profile = name;
-          })
-          (lib.genAttrs swarmClientDefault.availableProfiles (x: x));
+            profile = swarmClientProfileConfig.validateProfile name;
+          }
+        );
 
       in
       {
@@ -166,6 +169,12 @@
         packages = {
           ${meta.pname} = package;
           default = package;
+
+          # OCI container for main binary (all platforms can build)
+          go-ffmpeg-hls-swarm-container = import ./nix/container.nix {
+            inherit pkgs lib;
+            package = package;
+          };
 
           # Test origin server packages (default profile)
           test-origin = testOriginProfiles.default.runner;
@@ -200,6 +209,20 @@
           swarm-client-gentle = swarmClientProfiles.gentle.runner;
           swarm-client-burst = swarmClientProfiles.burst.runner;
           swarm-client-extreme = swarmClientProfiles.extreme.runner;
+
+          # Nginx config generator packages (for viewing generated configs)
+          test-origin-nginx-config = testOriginProfiles.default.nginxConfig;
+          test-origin-nginx-config-low-latency = testOriginProfiles.low-latency.nginxConfig;
+          test-origin-nginx-config-4k-abr = testOriginProfiles."4k-abr".nginxConfig;
+          test-origin-nginx-config-stress = testOriginProfiles.stress-test.nginxConfig;
+          test-origin-nginx-config-logged = testOriginProfiles.logged.nginxConfig;
+          test-origin-nginx-config-debug = testOriginProfiles.debug.nginxConfig;
+        } // lib.optionalAttrs pkgs.stdenv.isLinux {
+          # Enhanced test origin container (requires systemd)
+          test-origin-container-enhanced = testOriginProfiles.default.containerEnhanced or null;
+
+          # ISO image (requires NixOS)
+          test-origin-iso = testOriginProfiles.default.iso or null;
         };
 
         devShells = {
@@ -279,6 +302,57 @@
           swarm-client-extreme = {
             type = "app";
             program = "${swarmClientProfiles.extreme.runner}/bin/swarm-client";
+          };
+
+          # Nginx config generator app
+          nginx-config = {
+            type = "app";
+            program = "${pkgs.writeShellScript "nginx-config" ''
+              set -euo pipefail
+              
+              PROFILE="''${1:-default}"
+              
+              # Map profile names to package names
+              case "$PROFILE" in
+                default)
+                  PACKAGE="test-origin-nginx-config"
+                  ;;
+                low-latency)
+                  PACKAGE="test-origin-nginx-config-low-latency"
+                  ;;
+                4k-abr)
+                  PACKAGE="test-origin-nginx-config-4k-abr"
+                  ;;
+                stress)
+                  PACKAGE="test-origin-nginx-config-stress"
+                  ;;
+                logged)
+                  PACKAGE="test-origin-nginx-config-logged"
+                  ;;
+                debug)
+                  PACKAGE="test-origin-nginx-config-debug"
+                  ;;
+                *)
+                  echo "Error: Unknown profile '$PROFILE'" >&2
+                  echo "Available profiles: default, low-latency, 4k-abr, stress, logged, debug" >&2
+                  exit 1
+                  ;;
+              esac
+              
+              # Get current system
+              SYSTEM=$(nix eval --impure --expr 'builtins.currentSystem' --raw 2>/dev/null)
+              
+              # Build and output the config
+              CONFIG_PATH=$(nix build ".#packages.$SYSTEM.$PACKAGE" --print-out-paths 2>/dev/null)
+              if [[ -n "$CONFIG_PATH" ]] && [[ -f "$CONFIG_PATH" ]]; then
+                cat "$CONFIG_PATH"
+              else
+                echo "Error: Failed to build nginx config for profile '$PROFILE'" >&2
+                echo "Package: $PACKAGE" >&2
+                echo "System: $SYSTEM" >&2
+                exit 1
+              fi
+            ''}";
           };
         };
 
