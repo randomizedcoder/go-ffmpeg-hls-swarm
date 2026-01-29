@@ -1,955 +1,644 @@
 # go-ffmpeg-hls-swarm
 
-<p align="center">
-  <img src="go-ffmpeg-hls-swarm.png" alt="go-ffmpeg-hls-swarm logo" width="200">
-</p>
+**Find where your streaming infrastructure breaks — before your viewers do.**
 
-<p align="center">
-  <strong>Find where your streaming infrastructure breaks — before your viewers do.</strong>
-</p>
-
-<p align="center">
-  <kbd>✅ <b>STATUS: TESTED & WORKING</b></kbd>
-</p>
-
-<p align="center">
-  <em>✅ <b>End-to-End Tested</b> — Origin + Swarm Client verified working together<br/>
-  ✅ <b>Test Origin Server</b> — Fully implemented (runner, container, MicroVM)<br/>
-  ✅ <b>Go Swarm Client</b> — CLI, preflight checks, supervision, graceful shutdown</em>
-  <br/><br/>
-  ⭐ <b>Star</b> if useful &nbsp;•&nbsp; 🐛 <b>Report bugs</b> &nbsp;•&nbsp; 💬 <b>Open an issue</b> for feedback
-</p>
+A specialized HLS load testing tool that orchestrates FFmpeg processes to simulate concurrent viewers. Unlike generic HTTP load testers, this tool understands HLS protocol semantics: playlist parsing, variant selection, segment sequencing, and reconnection handling.
 
 ---
 
-A Go-based load testing tool that orchestrates a swarm of FFmpeg processes to stress-test HLS (HTTP Live Streaming) infrastructure. HLS is the dominant protocol for live and on-demand video streaming, powering services like Twitch, YouTube Live, and Apple's ecosystem.
+## Table of Contents
+
+- [Overview](#overview)
+- [Why This Tool?](#why-this-tool)
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Test Origin Server](#test-origin-server)
+- [Observability](#observability)
+- [Deployment Options](#deployment-options)
+- [Architecture](#architecture)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [FAQ](#faq)
+- [License](#license)
+
+---
+
+## Overview
+
+### What It Does
+
+go-ffmpeg-hls-swarm spawns and manages multiple FFmpeg processes, each acting as an HLS viewer:
+
+- **Realistic HLS simulation**: Master playlist parsing, variant playlist following, segment downloading
+- **Scalable load generation**: 50-500+ concurrent clients from a single machine
+- **Configurable ramp-up**: Gradual client startup with jitter to avoid thundering herd
+- **Automatic recovery**: Process supervision with exponential backoff restart
+- **Rich observability**: Prometheus metrics, TUI dashboard, exit summary reports
+
+### What It Is NOT
+
+- Not a video player — downloads segments but doesn't decode/render video
+- Not an ABR simulator — doesn't switch qualities based on bandwidth
+- Not rate-limited — downloads at maximum speed (not playback rate)
+- Not a DDoS tool — designed for authorized testing of your own infrastructure
+
+### Key Capabilities
+
+| Feature | Description |
+|---------|-------------|
+| Concurrent clients | 50-500+ from a single machine |
+| Variant selection | all, highest, lowest, first |
+| DNS override | Test specific servers by IP |
+| Cache bypass | Add no-cache headers to stress origin |
+| Prometheus metrics | 40+ metrics covering requests, latency, health |
+| TUI dashboard | Live terminal UI with real-time stats |
+| Origin metrics | Scrape node_exporter/nginx_exporter from origin |
+| Graceful shutdown | Clean SIGTERM propagation to all processes |
 
 ---
 
 ## Why This Tool?
 
-Most load testing tools (k6, Locust, Gatling) generate HTTP requests but **don't understand HLS**. They can't:
-
-- Parse master playlists and follow variant playlist URLs
-- Track segment sequencing in live streams
-- Handle playlist refresh timing correctly
-- Simulate realistic client reconnection behavior
-
-**FFmpeg's HLS demuxer handles all of this natively**, making it ideal for realistic load testing. This tool orchestrates many FFmpeg processes to simulate concurrent viewers hitting your CDN or origin server.
-
 ### Comparison with Alternatives
 
-| Feature | go-ffmpeg-hls-swarm | k6 / Locust | curl loops |
-|---------|----------|-------------|------------|
-| **HLS Protocol Understanding** | ✅ Native (via FFmpeg) | ❌ HTTP only | ❌ HTTP only |
-| **Follows Variant Playlists** | ✅ Automatic | ❌ Manual scripting | ❌ Manual |
-| **Handles Live Playlist Refresh** | ✅ Yes | ❌ Must implement | ❌ No |
-| **Multi-variant Testing** | ✅ All/highest/lowest | ❌ Manual | ❌ No |
-| **Reconnection on Failure** | ✅ Built-in | ⚠️ Must implement | ❌ No |
-| **Prometheus Metrics** | ✅ Yes | ✅ Yes | ❌ No |
-| **Setup Complexity** | Single binary + FFmpeg | Python/JS ecosystem | Shell scripts |
+| Tool | HLS Protocol Aware | Segment Sequencing | Playlist Refresh | Reconnection | Best For |
+|------|-------------------|--------------------|------------------|--------------|----------|
+| **go-ffmpeg-hls-swarm** | Yes | Yes | Yes | Yes | HLS infrastructure testing |
+| k6/Locust | No | No | No | No | Generic HTTP load testing |
+| curl loops | No | No | No | No | Simple request testing |
+| Video players | Yes | Yes | Yes | Yes | Single stream playback |
+
+### Why FFmpeg?
+
+FFmpeg's HLS demuxer handles all protocol edge cases:
+- Master playlist parsing and variant enumeration
+- Live playlist refresh (respects `#EXT-X-TARGETDURATION`)
+- Segment download with retry logic
+- AES-128 decryption (if stream is encrypted)
+- Network error recovery and reconnection
+
+Building this from scratch would require reimplementing FFmpeg's battle-tested HLS stack.
 
 ### Use Cases
 
-| Scenario | How This Helps |
-|----------|----------------|
-| CDN capacity planning | Find the breaking point before a major event |
-| Origin server stress testing | Bypass CDN cache to test origin directly |
-| Edge node validation | Test specific servers by IP |
-| Failover testing | See how infrastructure handles mass reconnection |
+| Scenario | How go-ffmpeg-hls-swarm Helps |
+|----------|-------------------------------|
+| **CDN capacity planning** | Find maximum concurrent viewers before major events |
+| **Origin stress testing** | Bypass CDN cache, test origin directly |
+| **Edge node validation** | Test specific edge servers by IP |
+| **Failover testing** | See how infrastructure handles mass reconnection |
+| **Regression testing** | Ensure changes don't degrade streaming performance |
 
----
+### Limitations
 
-## What It Does
-
-- 🎬 **Spawns 50–200+ concurrent HLS clients** using FFmpeg subprocesses
-- 📊 **No video decoding** — exercises playlist fetching and segment downloads only
-- 🎚️ **Variant selection** — test with all bitrates, highest only, or lowest only
-- 🌐 **DNS override** — test specific servers by IP (bypass CDN routing)
-- 🚫 **Cache bypass** — no-cache headers to stress origin servers directly
-- 🚀 **Controlled ramp-up** — avoid thundering herd with configurable start rates
-- 🔄 **Auto-restart with backoff** — handles transient failures gracefully
-- 📈 **Prometheus metrics** — monitor active clients, restarts, and failure rates
-- 🛑 **Graceful shutdown** — clean signal propagation to all child processes
-
----
-
-## Try It Now (No Installation Needed)
-
-**Can't wait for go-ffmpeg-hls-swarm?** Try the core concept immediately with just FFmpeg:
-
-### Single Client Test
-
-```bash
-# This single FFmpeg command simulates one HLS viewer
-ffmpeg -hide_banner -loglevel info \
-  -reconnect 1 -reconnect_streamed 1 \
-  -i "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" \
-  -map 0 -c copy -f null -
-```
-
-Watch FFmpeg fetch the master playlist, select variants, and download segments. Press `Ctrl+C` to stop.
-
-### Multi-Client Preview (Shell Script)
-
-Want to see what go-ffmpeg-hls-swarm will automate? Run this shell script to spawn 5 concurrent FFmpeg clients:
-
-```bash
-#!/bin/bash
-# preview-swarm.sh — Preview what go-ffmpeg-hls-swarm will do
-URL="https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
-CLIENTS=5
-
-trap 'kill $(jobs -p) 2>/dev/null; echo "Stopped $CLIENTS clients"' EXIT
-
-echo "Starting $CLIENTS FFmpeg clients..."
-for i in $(seq 1 $CLIENTS); do
-  ffmpeg -hide_banner -loglevel warning \
-    -reconnect 1 -reconnect_streamed 1 \
-    -i "$URL" -map 0 -c copy -f null - &
-  echo "  Started client $i (PID: $!)"
-  sleep 0.2  # Slight ramp-up
-done
-
-echo -e "\n$CLIENTS clients running. Press Ctrl+C to stop."
-echo "Monitor with: ps aux | grep ffmpeg"
-wait
-```
-
-Save as `preview-swarm.sh`, run with `bash preview-swarm.sh`, and you'll see exactly what this tool automates — minus the metrics, supervision, and graceful restart handling.
-
-> ⚠️ **Be respectful of public test streams** — keep client count ≤10. For serious testing, use your own infrastructure.
+- Downloads at maximum speed (not playback rate)
+- Single stream URL per run
+- No ABR quality switching simulation
+- Linux recommended for high concurrency
 
 ---
 
 ## Quick Start
 
-### Quick Reference
+### Prerequisites
 
-| I want... | Run this Command | Requirements |
-|-----------|------------------|--------------|
-| **A local origin fast** | `nix run .#up -- default runner` | Any OS with Nix |
-| **A container origin** | `nix run .#up -- default container` | Linux to run |
-| **Max realism (Linux)** | `nix run .#up -- default vm` | Linux + KVM |
-| **Low-latency testing** | `nix run .#up -- low-latency runner` | Any OS with Nix |
-| **Stress test origin** | `nix run .#up -- stress runner` | Any OS with Nix |
-| **High-performance TAP networking** | `nix run .#up -- tap vm` | Linux + KVM + sudo |
-| **View nginx config** | `nix run .#nginx-config` | Any OS with Nix |
-| **Help / Examples** | `nix run .#up -- --help` | Any OS with Nix |
+- Go 1.25+ (`go version`)
+- FFmpeg with HLS support (`ffmpeg -version`)
 
-### Unified CLI Entry Point
-
-The `nix run .#up` command provides a single entry point for all deployments:
-
-- **Interactive mode** (TTY): Shows menu to select profile and type
-- **Non-interactive mode** (CI/non-TTY): Uses defaults (profile=default, type=runner)
-- **With arguments**: `nix run .#up -- <profile> <type>`
-
-**Available profiles:**
-- `default` - Standard 2s segments, 720p
-- `low-latency` - 1s segments, optimized for speed
-- `4k-abr` - Multi-bitrate 4K streaming
-- `stress` - Maximum throughput configuration
-- `logged` - With buffered segment logging
-- `debug` - Full logging with gzip compression
-- `tap` - High-performance TAP networking (MicroVM only)
-
-**Available types:**
-- `runner` - Local shell script (all platforms)
-- `container` - OCI container (Linux to run)
-- `vm` - MicroVM (Linux + KVM only)
-
-See `nix run .#up -- --help` for full documentation.
-
-### Option 1: Test Origin Server (Fully Implemented ✅)
-
-The test origin server is fully implemented and ready to use. It generates HLS streams locally using FFmpeg and serves them via Nginx:
+### Build and Run
 
 ```bash
-# Using Nix (recommended)
-nix run .#test-origin
+# Clone and build
+git clone https://github.com/randomizedcoder/go-ffmpeg-hls-swarm.git
+cd go-ffmpeg-hls-swarm
+make build
 
-# Or with Makefile
+# Run quick test (5 clients, 10 seconds)
+./bin/go-ffmpeg-hls-swarm -clients 5 -duration 10s \
+  https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+```
+
+### With Test Origin Server
+
+```bash
+# Terminal 1: Start local HLS origin
 make test-origin
 
-# Stream available at: http://localhost:8080/stream.m3u8
+# Terminal 2: Run load test
+./bin/go-ffmpeg-hls-swarm -clients 50 -tui \
+  http://localhost:17080/stream.m3u8
 ```
 
-**Available profiles:**
+### Quick Recipes
+
 ```bash
-make test-origin              # Default: 720p, 2s segments
-make test-origin-low-latency  # 1s segments, optimized for speed
-make test-origin-4k-abr       # Multi-bitrate 4K streaming
-make test-origin-stress       # Maximum throughput
+# Stress test CDN (all quality levels)
+./bin/go-ffmpeg-hls-swarm -clients 100 -variant all https://cdn.example.com/master.m3u8
+
+# Test origin directly (bypass cache)
+./bin/go-ffmpeg-hls-swarm -clients 50 -no-cache https://cdn.example.com/master.m3u8
+
+# Test specific server by IP
+./bin/go-ffmpeg-hls-swarm -clients 50 -resolve 192.168.1.100 --dangerous https://cdn.example.com/master.m3u8
+
+# With TUI and origin metrics
+./bin/go-ffmpeg-hls-swarm -clients 100 -tui -origin-metrics-host 10.177.0.10 http://10.177.0.10:17080/stream.m3u8
 ```
 
-**MicroVM mode** (full VM isolation, requires KVM):
-```bash
-make microvm-check-kvm        # Verify KVM support
-make microvm-origin           # Run as lightweight VM (user-mode networking)
-```
+---
 
-**High-performance TAP networking** (recommended for load testing):
-```bash
-make network-setup            # One-time: create bridge/TAP (requires sudo)
-make microvm-start-tap        # Run VM with direct network access
+## Installation
 
-# Access VM services directly (no port forwarding):
-curl http://10.177.0.10:17080/health     # HLS origin
-curl http://10.177.0.10:9100/metrics     # Node exporter (system metrics)
-curl http://10.177.0.10:9113/metrics     # Nginx exporter
-ssh root@10.177.0.10                      # SSH (empty password)
-```
-
-**Reset and rebuild** (clean slate for testing):
-```bash
-make microvm-reset            # Stop VM + teardown networking
-make microvm-reset-full       # Also remove build artifacts
-
-# Full rebuild workflow:
-make microvm-reset-full       # 1. Clean everything
-make network-setup            # 2. Setup bridge/TAP
-make microvm-start-tap        # 3. Build & start VM (verifies all services)
-```
-
-**Run load tests against MicroVM:**
-```bash
-make load-test-100-microvm    # 100 concurrent clients
-make load-test-300-microvm    # 300 concurrent clients
-make load-test-1000-microvm   # 1000 concurrent clients (stress test)
-```
-
-See [MicroVM Networking](docs/MICROVM_NETWORKING.md) for details.
-
-**Container mode** (requires Podman/Docker):
-```bash
-nix build .#test-origin-container
-podman load < result
-podman run -d -p 8080:8080 go-ffmpeg-hls-swarm-test-origin:latest
-```
-
-### Option 2: Swarm Client (Working ✅)
-
-The Go swarm client is functional and ready to test:
+### From Source (Go)
 
 ```bash
-# Build the binary
+git clone https://github.com/randomizedcoder/go-ffmpeg-hls-swarm.git
+cd go-ffmpeg-hls-swarm
 go build -o go-ffmpeg-hls-swarm ./cmd/go-ffmpeg-hls-swarm
-
-# Run against your HLS stream
-./go-ffmpeg-hls-swarm -clients 10 -duration 60s http://localhost:8080/stream.m3u8
-
-# Or with verbose output
-./go-ffmpeg-hls-swarm -clients 5 -v https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
 ```
 
-**Example output:**
-```
-Preflight checks:
-  ✓ file_descriptors: 524288 available (need 140)
-  ✓ process_limit: 514435 available (need 52)
-  ✓ ffmpeg: found at ffmpeg (version 8.0)
-  ✓ ephemeral_ports: 64509 available (need 8)
+### Using Nix (Recommended)
 
-  Target:      10 clients at 5/sec
-  Stream:      http://localhost:8080/stream.m3u8
-  Metrics:     http://0.0.0.0:9090/metrics
-
-Press Ctrl+C to stop.
+```bash
+git clone https://github.com/randomizedcoder/go-ffmpeg-hls-swarm.git
+cd go-ffmpeg-hls-swarm
+nix build
+# Binary at ./result/bin/go-ffmpeg-hls-swarm
 ```
 
-For the complete tutorial, see **[Quick Start Guide](docs/QUICKSTART.md)**.
+Or run directly:
+
+```bash
+nix run github:randomizedcoder/go-ffmpeg-hls-swarm
+```
+
+### Using Makefile
+
+```bash
+make build          # Build binary to ./bin/
+make build-nix      # Build with Nix (reproducible)
+make dev            # Enter development shell
+```
+
+### Docker/Podman
+
+```bash
+nix build .#swarm-client-container
+docker load < ./result
+docker run --rm go-ffmpeg-hls-swarm:latest --help
+```
 
 ---
 
 ## Usage
 
+### Basic Syntax
+
 ```bash
 go-ffmpeg-hls-swarm [flags] <HLS_URL>
-
-Orchestration Flags:
-  -clients int        Number of concurrent clients (default 10)
-  -ramp-rate int      Clients to start per second (default 5)
-  -duration duration  Run duration, 0 = forever (default 0)
-
-Variant Selection:
-  -variant string     Bitrate selection: "all", "highest", "lowest", "first" (default "all")
-
-Network / Testing:
-  -resolve string     Connect to this IP (bypasses DNS, requires --dangerous)
-  -no-cache           Add no-cache headers (bypass CDN cache)
-  -header string      Add custom HTTP header (can repeat)
-
-Safety & Diagnostics:
-  --dangerous         Required for -resolve (disables TLS verification)
-  --print-cmd         Print the FFmpeg command that would be run, then exit
-  --check             Validate config and run 1 client for 10 seconds, then exit
-
-Observability:
-  -metrics string     Prometheus metrics address (default "0.0.0.0:9090")
-  -v                  Verbose logging
-  -tui                Enable live terminal dashboard
-
-Origin Metrics (optional):
-  -origin-metrics string          Origin node_exporter URL (e.g., http://10.177.0.10:9100/metrics)
-  -nginx-metrics string           Origin nginx_exporter URL (e.g., http://10.177.0.10:9113/metrics)
-  -origin-metrics-host string    Origin server hostname/IP (uses default ports: 9100, 9113)
-  -origin-metrics-node-port int  Node exporter port (default: 9100)
-  -origin-metrics-nginx-port int  Nginx exporter port (default: 9113)
-  -origin-metrics-interval duration Scrape interval (default: 2s)
-
-FFmpeg:
-  -ffmpeg string      Path to FFmpeg binary (default "ffmpeg")
 ```
 
-> **Flag convention**: Single-dash flags (`-clients`, `-resolve`) are normal options. Double-dash flags (`--dangerous`, `--check`, `--print-cmd`) are safety gates or diagnostic modes that change the tool's behavior significantly.
+### Orchestration Flags
 
-See [CONFIGURATION.md](docs/CONFIGURATION.md) for complete flag reference and examples.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-clients` | 10 | Number of concurrent clients |
+| `-ramp-rate` | 5 | Clients to start per second |
+| `-ramp-jitter` | 200ms | Random jitter per client start |
+| `-duration` | 0 (forever) | Test duration (0 = run until Ctrl+C) |
 
----
+### Variant Selection
 
-## Variant Selection
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-variant` | "all" | Quality selection: "all", "highest", "lowest", "first" |
+| `-probe-failure-policy` | "fallback" | On ffprobe failure: "fallback" or "fail" |
 
-| Mode | Description | Best For |
-|------|-------------|----------|
+**Variant modes explained:**
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
 | `all` | Download ALL quality levels simultaneously | Maximum CDN stress |
-| `highest` | Highest bitrate only (via ffprobe) | Simulating premium viewers |
-| `lowest` | Lowest bitrate only (via ffprobe) | Simulating mobile users |
-| `first` | First variant in playlist (no probe) | Fast startup, unpredictable quality |
+| `highest` | Highest bitrate only (via ffprobe) | Premium viewer simulation |
+| `lowest` | Lowest bitrate only (via ffprobe) | Mobile viewer simulation |
+| `first` | First listed variant (no probe) | Fast startup |
 
-> ⚠️ **Note on `-variant all`**: This downloads every quality level simultaneously, which is NOT how real viewers behave. With 4 variants and 50 clients, you generate **200 concurrent streams** (4× bandwidth). Use for maximum stress testing; use `highest` or `lowest` for more realistic simulation.
+> **Note**: `-variant all` with 4 variants creates 4x the bandwidth per client.
 
-> ℹ️ **Note on `-variant first`**: "First" means first listed in the master playlist. Playlist ordering varies by encoder—it might be highest, lowest, or something else. Use this mode for quick tests when you don't care about specific quality.
+### Network / Testing Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-resolve` | "" | Connect to specific IP (requires `--dangerous`) |
+| `-no-cache` | false | Add no-cache headers to bypass CDN |
+| `-header` | - | Add custom HTTP header (repeatable) |
+
+### Safety Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dangerous` | false | Required for `-resolve` (disables TLS verification) |
+| `--print-cmd` | false | Print FFmpeg command and exit |
+| `--check` | false | Validate config, run 1 client for 10s |
+| `--skip-preflight` | false | Skip system checks |
+
+### Observability Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-metrics` | "0.0.0.0:17091" | Prometheus metrics address |
+| `-tui` | false | Enable live terminal dashboard |
+| `-v` | false | Verbose logging |
+| `-log-format` | "json" | Log format: "json" or "text" |
+
+### Stats Collection Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-stats` | true | Enable FFmpeg output parsing |
+| `-stats-loglevel` | "debug" | FFmpeg loglevel for stats |
+| `-stats-buffer` | 1000 | Lines to buffer per client |
+| `-ffmpeg-debug` | false | Enable FFmpeg debug logging |
+
+### Origin Metrics Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-origin-metrics-host` | "" | Origin hostname for metrics |
+| `-origin-metrics` | "" | node_exporter URL |
+| `-nginx-metrics` | "" | nginx_exporter URL |
+| `-origin-metrics-interval` | 2s | Scrape interval |
+| `-origin-metrics-window` | 30s | Rolling window for percentiles |
 
 ---
 
-## Examples
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORIGIN_PORT` | 17088 | Local origin server port |
+| `METRICS_PORT` | 17091 | Prometheus metrics port |
+| `MICROVM_HTTP_PORT` | 17080 | MicroVM nginx port |
+
+### Profiles
+
+**Test Origin Profiles:**
+
+| Profile | Description |
+|---------|-------------|
+| `default` | Standard 2s segments, 720p |
+| `low-latency` | 1s segments, optimized for speed |
+| `4k-abr` | Multi-bitrate 4K streaming |
+| `stress` | Maximum throughput |
+| `logged` | With segment logging |
+| `debug` | Full debug logging |
+
+**Swarm Client Profiles:**
+
+| Profile | Clients | Ramp Rate |
+|---------|---------|-----------|
+| `default` | 50 | 5/sec |
+| `gentle` | 20 | 1/sec |
+| `burst` | 100 | 50/sec |
+| `stress` | 200 | 20/sec |
+| `extreme` | 500 | 50/sec |
+
+---
+
+## Test Origin Server
+
+A complete HLS origin server for testing, using FFmpeg for stream generation and Nginx for serving.
+
+### Quick Start
 
 ```bash
-# Quick smoke test with a public stream
-./go-ffmpeg-hls-swarm -clients 5 https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+# Local runner
+make test-origin
 
-# Simulate premium viewers: highest bitrate only
-./go-ffmpeg-hls-swarm -clients 100 -variant highest https://cdn.example.com/live/master.m3u8
+# With specific profile
+make test-origin-low-latency
+make test-origin-stress
+```
 
-# Bypass CDN cache (stress origin directly)
-./go-ffmpeg-hls-swarm -clients 50 -no-cache https://cdn.example.com/live/master.m3u8
+### Deployment Options
 
-# Test specific server by IP (⚠️ disables TLS verification!)
-./go-ffmpeg-hls-swarm -clients 50 -resolve 192.168.1.100 --dangerous \
-  https://cdn.example.com/live/master.m3u8
+| Type | Command | Requirements |
+|------|---------|--------------|
+| Runner | `make test-origin` | All platforms |
+| Container | `make container-run` | Docker/Podman |
+| MicroVM | `make microvm-origin` | Linux + KVM |
 
-# Full stress test: specific origin + cache bypass + all variants
-./go-ffmpeg-hls-swarm -clients 100 -variant all \
-  -resolve 10.0.0.50 --dangerous -no-cache \
-  https://cdn.example.com/live/master.m3u8
+### MicroVM with TAP Networking
 
-# 30-minute timed load test
-./go-ffmpeg-hls-swarm -clients 200 -ramp-rate 5 -duration 30m \
-  https://cdn.example.com/live/master.m3u8
+For high-performance testing (~10 Gbps):
 
-# Load test with origin metrics (requires Prometheus exporters on origin)
-./go-ffmpeg-hls-swarm -clients 100 -tui \
-  -origin-metrics-host 10.177.0.10 \
-  http://10.177.0.10:17080/stream.m3u8
+```bash
+# One-time setup
+make network-setup
 
-# Load test with explicit metrics URLs
-./go-ffmpeg-hls-swarm -clients 100 -tui \
-  -origin-metrics http://10.177.0.10:9100/metrics \
-  -nginx-metrics http://10.177.0.10:9113/metrics \
-  http://10.177.0.10:17080/stream.m3u8
+# Start MicroVM with TAP
+make microvm-start-tap
+
+# Access origin
+curl http://10.177.0.10:17080/stream.m3u8
+```
+
+### Ports
+
+| Port | Service |
+|------|---------|
+| 17080 | Nginx (HLS stream) |
+| 17088 | Local origin (scripts) |
+| 17091 | Swarm client metrics |
+| 9100 | node_exporter (MicroVM) |
+| 9113 | nginx_exporter (MicroVM) |
+
+---
+
+## Observability
+
+### Prometheus Metrics
+
+Exposed at `/metrics` (default port 17091).
+
+**Key metrics:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `hls_swarm_active_clients` | Gauge | Currently running clients |
+| `hls_swarm_target_clients` | Gauge | Target client count |
+| `hls_swarm_segment_requests_per_second` | Gauge | Current segment request rate |
+| `hls_swarm_throughput_bytes_per_second` | Gauge | Download throughput |
+| `hls_swarm_inferred_latency_p99_seconds` | Gauge | P99 latency |
+| `hls_swarm_client_restarts_total` | Counter | Total restarts |
+| `hls_swarm_average_speed` | Gauge | Average playback speed |
+
+**Example queries:**
+
+```promql
+# Active clients
+hls_swarm_active_clients
+
+# Throughput in Mbps
+hls_swarm_throughput_bytes_per_second * 8 / 1000000
+
+# Restart rate per minute
+rate(hls_swarm_client_restarts_total[1m]) * 60
+
+# Error rate
+hls_swarm_error_rate
+```
+
+### TUI Dashboard
+
+Enable with `-tui`:
+
+```bash
+./bin/go-ffmpeg-hls-swarm -tui -clients 100 http://localhost:17080/stream.m3u8
+```
+
+Displays:
+- Active clients, ramp progress
+- Request rates, throughput
+- Latency percentiles
+- Client health status
+- Error counts
+- Origin metrics (if enabled)
+
+### Exit Summary
+
+On shutdown, prints a comprehensive summary:
+
+```
+═══════════════════════════════════════════════════════════════════
+                        go-ffmpeg-hls-swarm Exit Summary
+═══════════════════════════════════════════════════════════════════
+Run Duration:           00:05:00
+Target Clients:         100
+Peak Active Clients:    100
+
+Uptime Distribution:
+  P50 (median):         04:55
+  P95:                  04:58
+  P99:                  04:59
+
+Lifecycle:
+  Total Starts:         100
+  Total Restarts:       2
+
+Metrics endpoint was: http://0.0.0.0:17091/metrics
+═══════════════════════════════════════════════════════════════════
 ```
 
 ---
 
-## What This Tool Is (and Isn't)
+## Deployment Options
 
-> 💡 **This is a stress testing tool, not a viewer simulator.**
-
-| ✅ Great For | ❌ Not Designed For |
-|-------------|---------------------|
-| Finding CDN/origin breaking points | Simulating realistic viewer behavior |
-| Validating infrastructure before events | Quality of Experience (QoE) testing |
-| Testing specific servers by IP | ABR algorithm testing |
-| Bypassing cache to stress origins | Network impairment simulation |
-
-### Key Limitations
-
-| Limitation | Why It Matters | Workaround |
-|------------|----------------|------------|
-| **Downloads at full speed** | FFmpeg fetches segments ASAP, not at playback rate | This maximizes stress — use external rate limiting if needed |
-| **Linux recommended** | High concurrency needs OS tuning (FDs, processes) | See [OS Tuning](#os-tuning-for-high-concurrency) |
-| **Single stream URL** | All clients target the same URL per run | Run multiple instances for multiple streams |
-| **No ABR simulation** | Clients don't switch bitrates dynamically | Use `-variant` flag to select quality level |
-
-See [OPERATIONS.md](docs/OPERATIONS.md) for detailed discussion of limitations and failure modes.
-
----
-
-## Requirements
-
-- **Go 1.25+**
-- **FFmpeg** with HLS demuxer support (most builds include this)
-- **Linux** recommended (for high process/FD limits)
-
-### OS Tuning for High Concurrency
+### Local Runner
 
 ```bash
-# Increase file descriptor limit (required for 100+ clients)
-ulimit -n 8192
-
-# Or permanently via /etc/security/limits.conf
-# your-user soft nofile 8192
-# your-user hard nofile 16384
+make test-origin      # Start origin
+make load-test-100    # Run 100-client test
 ```
 
-See [OPERATIONS.md](docs/OPERATIONS.md) for complete tuning guide.
+### OCI Containers
+
+```bash
+# Build and load
+make container-load
+make swarm-container-load
+
+# Run origin
+make container-run-origin
+
+# Run swarm
+make swarm-container-run-100 STREAM_URL=http://host.docker.internal:17080/stream.m3u8
+```
+
+### MicroVMs (Linux + KVM)
+
+```bash
+# Check KVM availability
+make microvm-check-kvm
+
+# Start MicroVM
+make microvm-origin
+
+# With TAP networking (high performance)
+make network-setup
+make microvm-start-tap
+```
 
 ---
 
-## How It Works
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Orchestrator                            │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │ CLI / Config │  │ Ramp Scheduler│  │ Metrics Server       │  │
-│  │   Parser     │  │              │  │ (Prometheus /metrics)│  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-│                           │                                     │
-│                           ▼                                     │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │                   Client Manager                          │  │
-│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐       ┌─────────┐   │  │
-│  │  │Client 0 │ │Client 1 │ │Client 2 │  ...  │Client N │   │  │
-│  │  │Supervisor│ │Supervisor│ │Supervisor│     │Supervisor│   │  │
-│  │  └────┬────┘ └────┬────┘ └────┬────┘       └────┬────┘   │  │
-│  └───────┼───────────┼───────────┼─────────────────┼────────┘  │
-└──────────┼───────────┼───────────┼─────────────────┼───────────┘
-           │           │           │                 │
-           ▼           ▼           ▼                 ▼
-       ┌───────┐   ┌───────┐   ┌───────┐         ┌───────┐
-       │FFmpeg │   │FFmpeg │   │FFmpeg │   ...   │FFmpeg │
-       │Process│   │Process│   │Process│         │Process│
-       └───────┘   └───────┘   └───────┘         └───────┘
+│                        Orchestrator                              │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
+│  │  Supervisor │  │  Supervisor │  │  Supervisor │  ...         │
+│  │  (Client 0) │  │  (Client 1) │  │  (Client N) │              │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘              │
+│         │                │                │                      │
+│  ┌──────▼──────┐  ┌──────▼──────┐  ┌──────▼──────┐              │
+│  │   FFmpeg    │  │   FFmpeg    │  │   FFmpeg    │              │
+│  │  (HLS DL)   │  │  (HLS DL)   │  │  (HLS DL)   │              │
+│  └─────────────┘  └─────────────┘  └─────────────┘              │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │                    Metrics Collector                        ││
+│  │  • Prometheus /metrics endpoint                             ││
+│  │  • TUI Dashboard (optional)                                 ││
+│  │  • Origin metrics scraper (optional)                        ││
+│  └─────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Orchestrator** parses config and starts the metrics server
-2. **Ramp scheduler** starts clients at the configured rate with jitter
-3. **Each client supervisor** spawns an FFmpeg process:
-   ```bash
-   ffmpeg -hide_banner -nostdin -loglevel info \
-     -reconnect 1 -reconnect_streamed 1 \
-     -user_agent "go-ffmpeg-hls-swarm/1.0" \
-     -i "<HLS_URL>" -map 0 -c copy -f null -
-   ```
-4. **On failure**, clients restart with exponential backoff
-5. **On SIGTERM/SIGINT**, signals propagate to all FFmpeg processes
+### Components
+
+| Component | Package | Responsibility |
+|-----------|---------|----------------|
+| Orchestrator | `internal/orchestrator` | Client lifecycle, ramp scheduling |
+| Supervisor | `internal/supervisor` | Process management, restart logic |
+| Process | `internal/process` | FFmpeg command building, execution |
+| Metrics | `internal/metrics` | Prometheus collectors, origin scraping |
+| Parser | `internal/parser` | FFmpeg output parsing |
+| TUI | `internal/tui` | Terminal dashboard |
+| Config | `internal/config` | CLI flags, configuration |
+| Preflight | `internal/preflight` | System checks |
+
+### Design Principles
+
+1. **Process supervision**: Each client has a dedicated supervisor goroutine
+2. **Graceful degradation**: Partial failures don't stop the test
+3. **Memory efficiency**: Bounded buffers, no unbounded growth
+4. **Observable**: Rich metrics for debugging and analysis
 
 ---
-
-## Why Trust This Design?
-
-This tool is built on careful research, not guesswork:
-
-- **[FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md)** — Deep source code analysis of FFmpeg's HLS implementation
-- **Every CLI flag** maps to documented, tested FFmpeg options
-- **Process supervision** follows proven patterns from production orchestrators
-- **Failure modes** are explicitly documented with mitigations
-
-The design phase lets us get the architecture right before writing code that's hard to change.
-
----
-
-## Interpreting Your Results
-
-After running a load test, look for these patterns:
-
-| Scenario | What You'll See | What It Means |
-|----------|-----------------|---------------|
-| 🟢 **Healthy** | Active clients ≈ target, low restart rate | Infrastructure handling load well |
-| 🟡 **At Limit** | Active < target (e.g., 150/200), steady restarts | Found the breaking point — this is useful data! |
-| 🔴 **Failing** | All clients restarting rapidly, high error rate | Origin/CDN severely overloaded or misconfigured |
-
-**Key insight**: "Failure" in load testing is often success — you're finding where things break before your users do.
-
----
-
-## Metrics
-
-### Swarm Client Metrics
-
-Available at `/metrics` (default port 17091):
-
-| Metric | Description |
-|--------|-------------|
-| `hlsswarm_clients_active` | Currently running FFmpeg processes |
-| `hlsswarm_clients_target` | Configured target client count |
-| `hlsswarm_clients_started_total` | Total clients ever started |
-| `hlsswarm_clients_restarted_total` | Total restart events |
-| `hlsswarm_process_exits_total{code}` | Exits by exit code |
-
-### Origin Server Metrics (Optional)
-
-When enabled with `-origin-metrics` or `-origin-metrics-host`, the TUI dashboard displays real-time origin server metrics:
-
-- **CPU Usage** — Percentage with progress bar
-- **Memory Usage** — Used/total with percentage
-- **Network Rates** — Bytes/sec in and out
-- **Nginx Connections** — Active client connections
-- **Nginx Request Rate** — Requests per second
-- **Nginx Request Latency** — Average request duration (P99)
-
-**Requirements:**
-- Origin server must have Prometheus exporters running:
-  - `node_exporter` (default port 9100) for system metrics
-  - `nginx_exporter` (default port 9113) for Nginx metrics
-- Feature is opt-in (disabled by default)
-
-**Usage Examples:**
-
-```bash
-# Using host (simplest - uses default ports)
-./go-ffmpeg-hls-swarm -clients 100 -tui \
-  -origin-metrics-host 10.177.0.10 \
-  http://10.177.0.10:17080/stream.m3u8
-
-# Using explicit URLs
-./go-ffmpeg-hls-swarm -clients 100 -tui \
-  -origin-metrics http://10.177.0.10:9100/metrics \
-  -nginx-metrics http://10.177.0.10:9113/metrics \
-  http://10.177.0.10:17080/stream.m3u8
-
-# With custom ports
-./go-ffmpeg-hls-swarm -clients 100 -tui \
-  -origin-metrics-host 10.177.0.10 \
-  -origin-metrics-node-port 19100 \
-  -origin-metrics-nginx-port 19113 \
-  http://10.177.0.10:17080/stream.m3u8
-
-# Custom scrape interval (reduce load on origin)
-./go-ffmpeg-hls-swarm -clients 100 -tui \
-  -origin-metrics-host 10.177.0.10 \
-  -origin-metrics-interval 5s \
-  http://10.177.0.10:17080/stream.m3u8
-```
-
-**Makefile Targets:**
-
-```bash
-# Load test with origin metrics (user-mode networking)
-make load-test-100-with-metrics
-
-# Load test with origin metrics (TAP networking - recommended)
-make load-test-100-with-metrics-tap
-
-# Load test with custom ports
-make load-test-100-with-metrics-custom
-
-# Load test with custom scrape interval
-make load-test-100-with-metrics-interval
-```
-
-See [Origin Metrics Implementation Plan](docs/ORIGIN_METRICS_IMPLEMENTATION_PLAN.md) for detailed documentation.
-
----
-
-## Shell Autocompletion
-
-Generate completion scripts from the single source of truth:
-
-```bash
-# Generate completion scripts
-nix run .#generate-completion
-
-# Source for your shell
-source ./scripts/completion/bash-completion.sh  # Bash
-source ./scripts/completion/zsh-completion.sh    # Zsh
-```
-
-**Available completions:**
-- Profile names (default, low-latency, 4k-abr, stress, etc.)
-- Type names (runner, container, vm)
-- Unified CLI commands
-
-**Permanent setup:**
-
-Add to your `~/.bashrc` or `~/.zshrc`:
-```bash
-# Generate and source Nix completions
-if command -v nix &> /dev/null; then
-  nix run .#generate-completion 2>/dev/null
-  source ./scripts/completion/bash-completion.sh 2>/dev/null || true
-fi
-```
-
-## Nginx Config Generator
-
-View the generated nginx configuration for any profile:
-
-```bash
-# View default profile config
-nix run .#nginx-config
-
-# View specific profile config
-nix run .#nginx-config low-latency
-nix run .#nginx-config stress
-nix run .#nginx-config 4k-abr
-
-# Build and save to file
-nix build .#test-origin-nginx-config
-cat ./result > nginx-default.conf
-
-# Build specific profile
-nix build .#test-origin-nginx-config-low-latency
-cat ./result > nginx-low-latency.conf
-```
-
-**Available packages:**
-- `test-origin-nginx-config` (default profile)
-- `test-origin-nginx-config-low-latency`
-- `test-origin-nginx-config-4k-abr`
-- `test-origin-nginx-config-stress`
-- `test-origin-nginx-config-logged`
-- `test-origin-nginx-config-debug`
-
-**Use cases:**
-- Debugging: Understand what nginx config is actually being used
-- Customization: See the generated config before modifying it
-- Documentation: Share config examples for different profiles
-- Validation: Verify cache headers and performance settings
-
-See [Nginx Config Generator Design](docs/NGINX_CONFIG_GENERATOR_DESIGN.md) for details.
 
 ## Documentation
 
-| Your Goal | Read This |
-|-----------|-----------|
-| **Run a load test** | [Load Testing Guide](docs/LOAD_TESTING.md) ← **Start here!** |
-| **Start a test HLS origin** | [Quick Start](#quick-start) (above) or `make test-origin` |
-| **Run origin as MicroVM/Container** | [Test Origin Guide](docs/TEST_ORIGIN.md) |
-| **High-performance MicroVM networking** | [MicroVM Networking](docs/MICROVM_NETWORKING.md) — TAP/bridge, ~10 Gbps |
-| **Nginx security hardening** | [Nginx Security](docs/NGINX_SECURITY.md) — DynamicUser, syscall filtering |
-| **View nginx configuration** | [Nginx Config Generator](#nginx-config-generator) (above) |
-| **Reset MicroVM environment** | `make microvm-reset-full` then `make network-setup && make microvm-start-tap` |
-| **Understand the swarm client CLI** | [Configuration Reference](docs/CONFIGURATION.md) |
-| **Run at scale (OS tuning)** | [Operations Guide](docs/OPERATIONS.md) |
-| **Technical reference** | [Reference Guide](docs/REFERENCE.md) — Environment variables, flags, platform matrix |
-| **CI/CD setup** | [CI/CD Guide](docs/CI_CD.md) — Remote builders, GitHub Actions |
-| **Contribute to development** | [Contributing](CONTRIBUTING.md) → [Design](docs/DESIGN.md) |
+Full documentation in [`./documents/`](documents/):
 
-<details>
-<summary><b>📚 All Documentation</b></summary>
+### User Guide
 
-**User Documentation:**
-- [Load Testing Guide](docs/LOAD_TESTING.md) — **Pre-configured test scripts**
-- [Quick Start Guide](docs/QUICKSTART.md) — 5-minute tutorial
-- [Configuration Reference](docs/CONFIGURATION.md) — All CLI flags
-- [Operations Guide](docs/OPERATIONS.md) — OS tuning, troubleshooting
-- [Observability](docs/OBSERVABILITY.md) — Metrics, logging
+- [Installation](documents/user-guide/getting-started/INSTALLATION.md)
+- [Quick Start](documents/user-guide/getting-started/QUICKSTART.md)
+- [CLI Reference](documents/user-guide/configuration/CLI_REFERENCE.md)
+- [Profiles](documents/user-guide/configuration/PROFILES.md)
+- [Load Testing](documents/user-guide/operations/LOAD_TESTING.md)
+- [OS Tuning](documents/user-guide/operations/OS_TUNING.md)
+- [Troubleshooting](documents/user-guide/operations/TROUBLESHOOTING.md)
+- [Metrics](documents/user-guide/observability/METRICS.md)
+- [TUI Dashboard](documents/user-guide/observability/TUI_DASHBOARD.md)
 
-**Contributor/Advanced:**
-- [Design Document](docs/DESIGN.md) — Architecture for contributors
-- [Metrics Enhancement](docs/METRICS_ENHANCEMENT_DESIGN.md) — **FFmpeg output parsing**, latency tracking, live HLS notes
-- [FFmpeg HLS Reference](docs/FFMPEG_HLS_REFERENCE.md) — FFmpeg source analysis
-- [Supervision](docs/SUPERVISION.md) — Process lifecycle details
-- [Test Origin Server](docs/TEST_ORIGIN.md) — Local HLS origin for testing
-- [MicroVM Networking](docs/MICROVM_NETWORKING.md) — **TAP/bridge networking** (direct VM access, ~10 Gbps)
-- [Nginx Security](docs/NGINX_SECURITY.md) — **Systemd hardening** (DynamicUser, syscall filtering, score 1.1)
-- [HLS Generator Security](docs/HLS_GENERATOR_SECURITY.md) — **FFmpeg hardening** (PrivateNetwork, syscall filtering)
-- [Client Deployment](docs/CLIENT_DEPLOYMENT.md) — Containers/VMs
-- [Nix Flake Design](docs/NIX_FLAKE_DESIGN.md) — For Nix users
+### Contributor Guide
 
-</details>
+- [Architecture](documents/contributor-guide/architecture/)
+- [Components](documents/contributor-guide/components/)
+- [Infrastructure](documents/contributor-guide/infrastructure/)
+
+### Reference
+
+- [CLI Flags](documents/reference/CLI_FLAGS.md)
+- [Metrics Reference](documents/reference/METRICS_REFERENCE.md)
+- [Ports](documents/reference/PORTS.md)
 
 ---
 
-## Project Status & Roadmap
+## Contributing
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| ✅ **End-to-End Testing** | **Verified** | Origin + Client tested together |
-| ✅ **Design & Documentation** | Complete | All docs written |
-| ✅ **FFmpeg HLS Research** | Complete | See [FFMPEG_HLS_REFERENCE.md](docs/FFMPEG_HLS_REFERENCE.md) |
-| ✅ **Nix Infrastructure** | Complete | Flake, shell, checks, apps |
-| ✅ **Test Origin Server** | **Working** | Runner, container, MicroVM (SSH, metrics) |
-| ✅ **Go Swarm Client** | **Working** | CLI, preflight, supervision, enhanced metrics, TUI |
-| ✅ **Makefile** | Complete | All targets functional |
-| ⏳ **NixOS Integration Tests** | Defined | Automated VM tests pending |
+Contributions welcome! See [CONTRIBUTING.md](documents/contributor-guide/CONTRIBUTING.md).
 
-### End-to-End Test Results
-
-The full pipeline has been tested and verified working with enhanced metrics:
-
-```
-┌─────────────────┐      ┌──────────────────┐      ┌─────────────────┐
-│  Test Origin    │ ───▶ │  HLS Stream      │ ◀─── │  Swarm Client   │
-│  MicroVM TAP    │      │  10.177.0.10     │      │  100 FFmpeg     │
-└─────────────────┘      └──────────────────┘      └─────────────────┘
-```
-
-**Test run (30 seconds, 100 clients against MicroVM):**
-- ✅ All preflight checks passed
-- ✅ 100 clients ramped up at 20/sec
-- ✅ Request tracking: 1.8K manifests, 1.3K segments
-- ✅ Latency tracking: P50=4485ms, P99=5993ms (live HLS includes segment wait)
-- ✅ Playback health: 38% healthy, 61% buffering, avg 1.00x speed
-- ✅ Drift monitoring: avg=1907ms, max=4218ms
-- ✅ Clean shutdown: all 100 clients exited gracefully
-
-**Note on live HLS metrics:**
-- `Total Bytes = 0` — FFmpeg reports `N/A` for live streams (see [METRICS_ENHANCEMENT_DESIGN.md](docs/METRICS_ENHANCEMENT_DESIGN.md#5-live-hls-stream-limitations))
-- Inferred latency includes waiting for segments to be generated (~2-4s for 2s segments)
-
-### Quick Start
+### Development Setup
 
 ```bash
-# Terminal 1: Start test origin
-PORT=8888 nix run .#test-origin
+# Clone
+git clone https://github.com/randomizedcoder/go-ffmpeg-hls-swarm.git
+cd go-ffmpeg-hls-swarm
 
-# Terminal 2: Run swarm client
-go build -o go-ffmpeg-hls-swarm ./cmd/go-ffmpeg-hls-swarm
-./go-ffmpeg-hls-swarm -clients 5 -duration 30s http://localhost:8888/stream.m3u8
+# Enter dev shell (provides all tools)
+nix develop
+
+# Or with make
+make dev
 ```
 
-### All Make Targets
+### Running Tests
 
 ```bash
-# Test origin server (FFmpeg + Nginx)
-make test-origin                    # Run locally (default port 8080)
-make test-origin ORIGIN_PORT=8888   # Run on alternate port
-make microvm-origin                 # Run in MicroVM (user-mode networking)
-
-# MicroVM with TAP networking (high-performance)
-make network-setup                  # Setup bridge/TAP (one-time, requires sudo)
-make microvm-start-tap              # Start VM with TAP (~10 Gbps)
-make microvm-reset                  # Stop VM + teardown networking
-make microvm-reset-full             # Full reset (includes build artifacts)
-
-# Load testing
-make load-test-100-microvm          # 100 clients against MicroVM
-make load-test-300-microvm          # 300 clients against MicroVM
-
-# Development
-make dev                            # Enter Nix shell
-make build                          # Build Go binary
-make check                          # Run all checks
+make test              # Go tests
+make lint              # Linting
+make check             # All checks
+make test-nix-all      # Nix tests
 ```
-
-**Want to help?** Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
-
----
-
-## Nix Test Scripts
-
-The project includes comprehensive automated test scripts to verify all Nix flake outputs. These scripts systematically test packages, profiles, containers, MicroVMs, apps, and the unified CLI.
-
-### Quick Start
-
-```bash
-# Run all tests (recommended)
-./scripts/nix-tests/test-all.sh
-
-# Or via Makefile
-make test-nix-all
-```
-
-### Test Categories
-
-| Category | Script | Purpose | Requirements | Time |
-|----------|--------|---------|--------------|------|
-| **Fast Checks** | `test-eval.sh` | Evaluation only (no builds) | None | ~30s |
-| | `gatekeeper.sh` | Single source of truth validation | None | ~10s |
-| | `test-profiles.sh` | Profile accessibility | None | ~30s |
-| **Build Tests** | `test-packages.sh` | Build all packages | None | ~5-10 min |
-| | `test-containers.sh` | Build container images | None | ~3-5 min |
-| | `test-iso.sh` | Build ISO images | Linux (optional KVM) | ~10-15 min |
-| | `test-microvms.sh` | Build MicroVM images | Linux + KVM | ~10-15 min |
-| **Execution Tests** | `test-apps.sh` | Test app execution | None | ~1-2 min |
-| | `test-cli.sh` | Unified CLI testing | None | ~30s |
-| | `test-containers-env.sh` | Container execution | Docker | ~2-5 min |
-| | `test-microvms-network.sh` | MicroVM network tests | Linux + KVM + sudo | ~1-2 min |
-| | `test-nginx-config.sh` | Nginx config generator | None | ~30s |
-| **All Tests** | `test-all.sh` | Run all tests | Various | ~20-30 min |
-
-### Running Individual Tests
-
-```bash
-# Fast evaluation tests (no builds, ~30s)
-./scripts/nix-tests/test-eval.sh
-
-# Gatekeeper validation (~10s)
-./scripts/nix-tests/gatekeeper.sh
-
-# Profile accessibility (~30s)
-./scripts/nix-tests/test-profiles.sh
-
-# Package builds (~5-10 min)
-./scripts/nix-tests/test-packages.sh
-
-# Container builds (~3-5 min)
-./scripts/nix-tests/test-containers.sh
-
-# Container execution (requires Docker, ~2-5 min)
-./scripts/nix-tests/test-containers-env.sh
-
-# MicroVM builds (Linux + KVM, ~10-15 min)
-./scripts/nix-tests/test-microvms.sh
-
-# MicroVM network tests (Linux + KVM + sudo, ~1-2 min)
-sudo ./scripts/nix-tests/test-microvms-network.sh
-
-# ISO builds (Linux, ~10-15 min)
-./scripts/nix-tests/test-iso.sh
-
-# App execution (~1-2 min)
-./scripts/nix-tests/test-apps.sh
-
-# Unified CLI (~30s)
-./scripts/nix-tests/test-cli.sh
-
-# Nginx config generator (~30s)
-./scripts/nix-tests/test-nginx-config.sh
-```
-
-### Via Makefile
-
-```bash
-make test-nix-all          # Run all tests
-make test-nix-packages     # Test all package builds
-make test-nix-profiles     # Test profile accessibility (fast)
-make test-nix-containers   # Test container builds
-make test-nix-microvms    # Test MicroVM builds (Linux only, requires KVM)
-make test-nix-apps        # Test app execution
-```
-
-### Shellcheck Validation
-
-All test scripts must pass `shellcheck` validation. Run validation before committing:
-
-```bash
-# Validate all test scripts
-./scripts/nix-tests/shellcheck.sh
-
-# Or via Makefile
-make shellcheck-nix-tests
-```
-
-**Requirements:**
-- `shellcheck` must be installed (`nix-shell -p shellcheck` or `brew install shellcheck`)
-
-**What it checks:**
-- All scripts in `scripts/nix-tests/` directory
-- Shellcheck compliance (errors and warnings)
-- Proper error handling and exit codes
-
-### Test Results
-
-Tests report results in a standardized format:
-
-```
-════════════════════════════════════════════════════════════
-Test Summary
-════════════════════════════════════════════════════════════
-Passed:  X
-Failed:  Y
-Skipped: Z
-```
-
-- **Passed**: Test succeeded ✅
-- **Failed**: Test failed (needs attention) ❌
-- **Skipped**: Test skipped (platform/requirements not met) ⊘
-
-**Skipped tests are expected** when:
-- Platform requirements not met (e.g., Linux-only tests on macOS)
-- Prerequisites missing (e.g., Docker, KVM)
-- Optional features not available
-
-### Network Setup for Testing
-
-Some tests require network setup (TAP networking for high-performance MicroVMs):
-
-```bash
-# Automated (handled by test-microvms-network.sh)
-sudo ./scripts/nix-tests/test-microvms-network.sh
-
-# Manual setup
-./scripts/network/teardown.sh
-sudo ./scripts/network/setup.sh
-./scripts/network/check.sh
-```
-
-### Continuous Integration
-
-For CI/CD pipelines, use tiered testing:
-
-```bash
-# Fast path (~30s) - evaluation only
-./scripts/nix-tests/test-eval.sh
-./scripts/nix-tests/gatekeeper.sh
-
-# Build path (~10-15 min) - builds only
-./scripts/nix-tests/test-packages.sh
-./scripts/nix-tests/test-containers.sh
-
-# Full path (~20-30 min) - everything
-./scripts/nix-tests/test-all.sh
-```
-
-For detailed information, see:
-- [Nix Test Scripts Design](docs/nix_test_scripts_design.md)
-- [Nix Test Scripts README](scripts/nix-tests/README.md)
 
 ---
 
 ## FAQ
 
-<details>
-<summary><b>Can I use this tool today?</b></summary>
+### General
 
-**Yes!** The full pipeline has been tested and verified working:
-- ✅ **Swarm Client** — Build with `go build ./cmd/go-ffmpeg-hls-swarm` and run against any HLS stream.
-- ✅ **Enhanced Metrics** — Request counts, latency percentiles, playback health, drift tracking.
-- ✅ **Test Origin Server** — Run `PORT=8888 nix run .#test-origin` to start a local HLS stream.
-- ✅ **End-to-End Tested** — 100-client test against MicroVM verified working (see above).
-- ✅ **MicroVM deployment** — Run `make microvm-origin` for full VM isolation (requires KVM).
-- ✅ **TUI Dashboard** — Live metrics display with `-tui` flag (interactive terminal only).
-- ✅ **Prometheus Metrics** — Available at `http://localhost:17091/metrics`.
-- ✅ **Origin Server Metrics** — Real-time CPU, memory, network, and Nginx stats in TUI (requires Prometheus exporters).
-</details>
+**Q: Can I use this today?**
+A: Yes! The tool is production-ready and actively tested.
 
-<details>
-<summary><b>Why FFmpeg instead of a custom HLS client?</b></summary>
+**Q: Why FFmpeg instead of a custom HLS client?**
+A: FFmpeg's HLS demuxer handles all protocol edge cases (playlist parsing, segment retries, encryption, reconnection). Building this from scratch would be significant effort.
 
-FFmpeg's HLS demuxer handles all protocol edge cases: master playlist parsing, variant selection, live playlist refresh, segment sequencing, and reconnection. We'd spend months reimplementing what FFmpeg already does perfectly.
-</details>
+**Q: How many clients can I run?**
+A: 50-500+ from a single machine depending on system resources. Each FFmpeg process uses ~20-50 MB.
 
-<details>
-<summary><b>How many clients can I run?</b></summary>
+**Q: Does this work on macOS/Windows?**
+A: macOS: Yes, with limitations (no MicroVM support). Windows: Not tested, may work via WSL2.
 
-Depends on your system. Typically 50-200+ on a well-tuned Linux box. Each FFmpeg process uses ~20-50MB RAM. See [Operations Guide](docs/OPERATIONS.md) for OS tuning.
-</details>
+**Q: Is this a DDoS tool?**
+A: No. It's designed for authorized testing of your own infrastructure. Always get permission before load testing.
 
-<details>
-<summary><b>Will this work on macOS/Windows?</b></summary>
+### Technical
 
-Linux is recommended for high concurrency (easier FD/process tuning). macOS should work for smaller tests. Windows is untested.
-</details>
+**Q: Why does `-variant all` use so much bandwidth?**
+A: It downloads ALL quality levels simultaneously. With 4 variants, that's 4x the bandwidth per client.
 
-<details>
-<summary><b>Is this a DDoS tool?</b></summary>
+**Q: Why isn't the TUI showing?**
+A: TUI requires a terminal (TTY). Check you're running interactively with `-tui` flag.
 
-No. This is for testing **your own** infrastructure. Please don't use it against services you don't own or have permission to test.
-</details>
+**Q: Why are clients restarting frequently?**
+A: Usually means the origin is overloaded. Reduce client count or check origin logs.
+
+**Q: What's the difference between ports 17080 and 17088?**
+A: 17080 is MicroVM Nginx, 17088 is local origin scripts. See [PORTS.md](documents/reference/PORTS.md).
+
+### Troubleshooting
+
+**Q: "too many open files"**
+A: Run `ulimit -n 8192` before the test.
+
+**Q: No metrics at localhost:17091**
+A: Check if port is in use (`lsof -i :17091`) or use different port (`-metrics 0.0.0.0:9091`).
+
+**Q: FFmpeg exits immediately**
+A: Test the URL directly: `ffmpeg -i <URL> -t 5 -f null -`
 
 ---
 
 ## License
 
-[MIT](LICENSE)
+MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-<p align="center">
-  <em>Built for finding where your streaming infrastructure breaks, so you can fix it before your viewers do.</em>
-</p>
+## Acknowledgments
+
+- [FFmpeg](https://ffmpeg.org/) for the HLS demuxer
+- [Prometheus](https://prometheus.io/) for metrics
+- [Bubbletea](https://github.com/charmbracelet/bubbletea) for the TUI framework
+- [Nix](https://nixos.org/) for reproducible builds
+
+---
+
+**Find where your streaming infrastructure breaks — before your viewers do.**

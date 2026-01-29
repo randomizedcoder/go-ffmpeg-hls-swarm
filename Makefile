@@ -261,8 +261,15 @@ swarm-container: ## Build swarm client OCI container
 	@echo "$(GREEN)Swarm container built:$(RESET) ./result"
 	@echo "Load with: docker load < ./result"
 
-swarm-container-load: swarm-container ## Build and load swarm container into Docker
-	docker load < ./result
+swarm-container-load: swarm-container ## Build and load swarm container into Docker/Podman
+	@if command -v podman >/dev/null 2>&1; then \
+		podman load -i ./result; \
+	elif command -v docker >/dev/null 2>&1; then \
+		docker load < ./result; \
+	else \
+		echo "$(YELLOW)Error:$(RESET) Neither podman nor docker found"; \
+		exit 1; \
+	fi
 	@echo "$(GREEN)Swarm container loaded$(RESET)"
 
 swarm-container-run: swarm-container-load ## Build, load, and run swarm container (metrics port: $(METRICS_PORT))
@@ -297,7 +304,7 @@ swarm-container-run-100: swarm-container-load ## Build, load, and run swarm cont
 		echo "  Or use a different port: make swarm-container-run-100 METRICS_PORT=27091 STREAM_URL=..."; \
 		exit 1; \
 	fi; \
-	$$CONTAINER_CMD run --rm -e STREAM_URL=$(STREAM_URL) -e CLIENTS=100 -e METRICS_PORT=$(METRICS_PORT) -p $(METRICS_PORT):$(METRICS_PORT) go-ffmpeg-hls-swarm:latest
+	$$CONTAINER_CMD run --rm -it -e STREAM_URL=$(STREAM_URL) -e CLIENTS=100 -e METRICS_PORT=$(METRICS_PORT) -e TUI=1 -p $(METRICS_PORT):$(METRICS_PORT) go-ffmpeg-hls-swarm:latest
 
 container-full-test: container-load swarm-container-load ## Start origin container, wait, then run 100-client load test
 	@echo "$(CYAN)Starting full container test (origin + 100 clients)...$(RESET)"

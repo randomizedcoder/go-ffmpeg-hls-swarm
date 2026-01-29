@@ -123,6 +123,7 @@ let
         -log-format "''$LOG_FORMAT" \
         -variant "''$VARIANT" \
         -timeout "''$TIMEOUT" \
+        ''${TUI:+-tui} \
         ''${RECONNECT:+--reconnect} \
         ''${NO_CACHE:+-no-cache} \
         ''${RESOLVE_IP:+-resolve "''$RESOLVE_IP"} \
