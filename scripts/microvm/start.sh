@@ -103,7 +103,7 @@ fi
 
 HEALTH_URL="http://${URL_BASE}:${HTTP_PORT}/health"
 STREAM_URL="http://${URL_BASE}:${HTTP_PORT}/stream.m3u8"
-FILES_URL="http://${URL_BASE}:${HTTP_PORT}/files/"
+FILES_URL="http://${URL_BASE}:${HTTP_PORT}/files/json/"
 
 cd "${PROJECT_ROOT}"
 

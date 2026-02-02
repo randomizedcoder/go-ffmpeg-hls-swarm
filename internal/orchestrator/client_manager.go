@@ -21,6 +21,16 @@ type debugRateSnapshot struct {
 	tcpConnects  int64
 }
 
+// cachedDebugStatsEntry holds cached debug stats to avoid double-drain.
+// Problem: Both TUI (500ms tick) and statsUpdateLoop (1s tick) call GetDebugStats().
+// GetDebugStats() drains throughput histograms, so whichever runs first gets the data
+// and the other gets empty histograms (P50=0).
+// Solution: Cache the result for 1 second so both consumers see the same data.
+type cachedDebugStatsEntry struct {
+	stats     stats.DebugStatsAggregate
+	timestamp time.Time
+}
+
 // ClientManager coordinates multiple client supervisors.
 // It handles starting clients, tracking their state, and coordinating shutdown.
 type ClientManager struct {
@@ -39,6 +49,9 @@ type ClientManager struct {
 	statsBufferSize    int
 	statsDropThreshold float64
 
+	// Segment size lookup (for accurate byte tracking)
+	segmentSizeLookup parser.SegmentSizeLookup
+
 	// Per-client progress tracking (Phase 2)
 	// Maps clientID -> latest ProgressUpdate
 	latestProgress map[int]*parser.ProgressUpdate
@@ -51,6 +64,13 @@ type ClientManager struct {
 
 	// Rate tracking for debug stats (Phase 7.4) - Lock-free using atomic.Value
 	prevDebugSnapshot atomic.Value // *debugRateSnapshot
+
+	// Cached debug stats to avoid double-drain race condition
+	// Both TUI (500ms) and statsUpdateLoop (1s) call GetDebugStats().
+	// Without caching, one consumer always gets empty histogram data.
+	cachedDebugStats    atomic.Value // *cachedDebugStatsEntry
+	debugStatsCacheTTL  time.Duration
+	debugStatsCacheMu   sync.Mutex // Protects cache refresh to prevent double-drain race
 
 	// Per-client stats (Phase 4/5)
 	// Maps clientID -> ClientStats
@@ -108,6 +128,9 @@ type ManagerConfig struct {
 	StatsBufferSize    int
 	StatsDropThreshold float64
 
+	// Segment size lookup (for accurate byte tracking)
+	SegmentSizeLookup parser.SegmentSizeLookup
+
 	// FD mode is always enabled when stats are enabled (no flag needed)
 }
 
@@ -133,6 +156,7 @@ func NewClientManager(cfg ManagerConfig) *ClientManager {
 		statsEnabled:       cfg.StatsEnabled,
 		statsBufferSize:    bufferSize,
 		statsDropThreshold: threshold,
+		segmentSizeLookup:  cfg.SegmentSizeLookup,
 		callbacks:          cfg.Callbacks,
 		supervisors:        make(map[int]*supervisor.Supervisor),
 		latestProgress:     make(map[int]*parser.ProgressUpdate),
@@ -140,6 +164,9 @@ func NewClientManager(cfg ManagerConfig) *ClientManager {
 		clientStats:        make(map[int]*stats.ClientStats),
 		aggregator:         stats.NewStatsAggregator(threshold),
 		configSeed:         time.Now().UnixNano(),
+		// Cache TTL for debug stats to avoid double-drain race
+		// 1 second matches the Prometheus statsUpdateLoop interval
+		debugStatsCacheTTL: time.Second,
 	}
 	// Initialize atomic.Value with first snapshot (lock-free)
 	cm.prevDebugSnapshot.Store(&debugRateSnapshot{timestamp: time.Now()})
@@ -179,10 +206,11 @@ func (m *ClientManager) StartClient(ctx context.Context, clientID int) {
 	if m.statsEnabled {
 		// Target duration for jitter calculation (2s is HLS default)
 		targetDuration := 2 * time.Second
-		debugParser = parser.NewDebugEventParser(
+		debugParser = parser.NewDebugEventParserWithSizeLookup(
 			clientID,
 			targetDuration,
 			m.createDebugEventCallback(clientID, clientStats),
+			m.segmentSizeLookup, // Pass segment size lookup for accurate byte tracking
 		)
 		stderrParser = debugParser
 
@@ -544,7 +572,41 @@ func (m *ClientManager) createDebugEventCallback(clientID int, clientStats *stat
 
 // GetDebugStats returns aggregated debug statistics across all clients.
 // This is the primary method for the layered TUI dashboard (Phase 7).
+//
+// IMPORTANT: This method uses caching to avoid double-drain race condition.
+// Both TUI (500ms tick) and statsUpdateLoop (1s tick) call this method.
+// Without caching, DrainThroughputHistogram() would be called multiple times,
+// causing one consumer to get empty histogram data (P50=0).
+// The cache TTL (1s) ensures both consumers see the same aggregated data.
 func (m *ClientManager) GetDebugStats() stats.DebugStatsAggregate {
+	// Check cache first (lock-free read)
+	if cached := m.cachedDebugStats.Load(); cached != nil {
+		entry := cached.(*cachedDebugStatsEntry)
+		if time.Since(entry.timestamp) < m.debugStatsCacheTTL {
+			return entry.stats
+		}
+	}
+
+	// Cache stale - need to refresh, but use mutex to prevent double-drain race
+	// If multiple goroutines hit this simultaneously, only one computes
+	m.debugStatsCacheMu.Lock()
+	defer m.debugStatsCacheMu.Unlock()
+
+	// Double-check after acquiring lock (another goroutine may have refreshed)
+	if cached := m.cachedDebugStats.Load(); cached != nil {
+		entry := cached.(*cachedDebugStatsEntry)
+		if time.Since(entry.timestamp) < m.debugStatsCacheTTL {
+			return entry.stats
+		}
+	}
+
+	// Cache miss or stale - compute fresh stats
+	return m.computeDebugStats()
+}
+
+// computeDebugStats aggregates debug statistics and updates the cache.
+// This is the actual implementation that drains histograms.
+func (m *ClientManager) computeDebugStats() stats.DebugStatsAggregate {
 	m.debugMu.RLock()
 	defer m.debugMu.RUnlock()
 
@@ -556,7 +618,13 @@ func (m *ClientManager) GetDebugStats() stats.DebugStatsAggregate {
 	var totalSegWallTime, totalTCPConnect float64
 	var segWallTimeCount, tcpConnectCount int64
 
+	// Collect throughput histograms from all clients for merging
+	drainedHistograms := make([][64]uint64, 0, len(m.debugParsers))
+
 	for _, dp := range m.debugParsers {
+		// Drain throughput histogram from each parser (before Stats() to avoid double-counting)
+		drained := dp.DrainThroughputHistogram()
+		drainedHistograms = append(drainedHistograms, drained)
 		stats := dp.Stats()
 
 		// HLS Layer
@@ -669,6 +737,12 @@ func (m *ClientManager) GetDebugStats() stats.DebugStatsAggregate {
 		// Timing accuracy
 		agg.TimestampsUsed += stats.TimestampsUsed
 		agg.LinesProcessed += stats.LinesProcessed
+
+		// Segment bytes and throughput (from segment size tracking)
+		agg.TotalSegmentBytes += stats.SegmentBytesDownloaded
+		if stats.MaxThroughput > agg.SegmentThroughputMax {
+			agg.SegmentThroughputMax = stats.MaxThroughput
+		}
 	}
 
 	// Calculate averages
@@ -691,6 +765,16 @@ func (m *ClientManager) GetDebugStats() stats.DebugStatsAggregate {
 	if agg.HTTPOpenCount > 0 {
 		totalErrors := agg.HTTP4xxCount + agg.HTTP5xxCount + agg.SegmentsFailed
 		agg.ErrorRate = float64(totalErrors) / float64(agg.HTTPOpenCount)
+	}
+
+	// Merge throughput histograms and calculate percentiles
+	if len(drainedHistograms) > 0 {
+		agg.SegmentThroughputBuckets = parser.MergeBuckets(drainedHistograms...)
+		agg.SegmentThroughputP25 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.25)
+		agg.SegmentThroughputP50 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.50)
+		agg.SegmentThroughputP75 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.75)
+		agg.SegmentThroughputP95 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.95)
+		agg.SegmentThroughputP99 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.99)
 	}
 
 	// Calculate instantaneous rates (Phase 7.4) - Lock-free using atomic.Value
@@ -716,6 +800,12 @@ func (m *ClientManager) GetDebugStats() stats.DebugStatsAggregate {
 		tcpConnects:  agg.TCPConnectCount,
 	}
 	m.prevDebugSnapshot.Store(newSnapshot)
+
+	// Cache the result to avoid double-drain race condition
+	m.cachedDebugStats.Store(&cachedDebugStatsEntry{
+		stats:     agg,
+		timestamp: now,
+	})
 
 	return agg
 }

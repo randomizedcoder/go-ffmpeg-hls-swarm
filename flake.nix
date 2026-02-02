@@ -55,7 +55,8 @@
 
     # MicroVM support for lightweight VM testing
     microvm = {
-      url = "github:astro/microvm.nix";
+      # Testing vhost-net fix: https://github.com/randomizedcoder/microvm.nix/tree/tap-performance
+      url = "github:randomizedcoder/microvm.nix/tap-performance";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

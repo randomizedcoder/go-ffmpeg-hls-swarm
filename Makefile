@@ -58,6 +58,7 @@ RESET := \033[0m
 .PHONY: dev shell
 .PHONY: run run-with-args
 .PHONY: test test-unit test-integration test-integration-interactive
+.PHONY: ffmpeg-debug-capture
 .PHONY: lint fmt fmt-nix check check-nix
 .PHONY: test-origin test-origin-low-latency test-origin-4k-abr test-origin-stress test-origin-logged test-origin-debug
 .PHONY: container container-load container-run container-run-origin swarm-container-run-100 container-full-test
@@ -85,6 +86,9 @@ help: ## Show this help message
 	@echo ""
 	@echo "$(GREEN)Testing:$(RESET)"
 	@grep -E '^test[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@echo ""
+	@echo "$(GREEN)FFmpeg Debug (parser development):$(RESET)"
+	@grep -E '^ffmpeg-[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(GREEN)Test Origin Server:$(RESET)"
 	@grep -E '^test-origin[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
@@ -177,6 +181,20 @@ test-coverage: ## Run tests with coverage report
 	go test -v -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "$(GREEN)Coverage report:$(RESET) coverage.html"
+
+# ============================================================================
+# FFmpeg Debug Capture (for parser development)
+# ============================================================================
+
+FFMPEG_STREAM_URL ?= http://10.177.0.10:17080/stream.m3u8
+FFMPEG_DURATION ?= 30s
+
+ffmpeg-debug-capture: ## Capture FFmpeg debug output for parser analysis
+	@./scripts/ffmpeg-debug-capture.sh "$(FFMPEG_STREAM_URL)" "$(FFMPEG_DURATION)"
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
 
 test-integration: ## Run NixOS integration tests (Linux only)
 	$(NIX_BUILD) .#checks.x86_64-linux.integration-test

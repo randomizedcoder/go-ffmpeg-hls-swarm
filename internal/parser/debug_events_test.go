@@ -923,3 +923,579 @@ func BenchmarkDebugEventParser_RealTestdata(b *testing.B) {
 
 	b.ReportMetric(float64(len(lines)), "lines/op")
 }
+
+// =============================================================================
+// Mock SegmentSizeLookup for testing
+// =============================================================================
+
+// mockSegmentSizeLookup implements SegmentSizeLookup for testing.
+type mockSegmentSizeLookup struct {
+	sizes map[string]int64
+}
+
+func newMockSegmentSizeLookup(sizes map[string]int64) *mockSegmentSizeLookup {
+	return &mockSegmentSizeLookup{sizes: sizes}
+}
+
+func (m *mockSegmentSizeLookup) GetSegmentSize(name string) (int64, bool) {
+	size, ok := m.sizes[name]
+	return size, ok
+}
+
+// =============================================================================
+// trackSegmentFromHTTP Tests
+// =============================================================================
+
+func TestDebugEventParser_TrackSegmentFromHTTP_Basic(t *testing.T) {
+	// Test that HTTP layer tracking completes pending segments
+	tests := []struct {
+		name                   string
+		httpLines              []string
+		delayBetweenLines      time.Duration
+		wantSegmentCount       int64
+		wantMinWallTimeMs      float64
+		wantSegmentBytes       int64 // Only counted if size lookup configured
+		wantThroughputRecorded bool
+	}{
+		{
+			name: "single_segment_completion",
+			httpLines: []string{
+				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading",
+				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading",
+			},
+			delayBetweenLines:      10 * time.Millisecond,
+			wantSegmentCount:       1,
+			wantMinWallTimeMs:      5,  // At least 5ms (with some slack for test timing)
+			wantSegmentBytes:       1281032, // seg03440.ts size
+			wantThroughputRecorded: true,
+		},
+		{
+			name: "multiple_segments",
+			httpLines: []string{
+				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading",
+				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading",
+				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03442.ts' for reading",
+				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03443.ts' for reading",
+			},
+			delayBetweenLines:      5 * time.Millisecond,
+			wantSegmentCount:       3, // First segment starts pending, next 3 complete prev ones
+			wantMinWallTimeMs:      2, // At least 2ms each
+			wantSegmentBytes:       1281032 + 1297764 + 1361120, // First 3 segments
+			wantThroughputRecorded: true,
+		},
+		{
+			name: "segment_with_query_string",
+			httpLines: []string{
+				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts?token=abc123' for reading",
+				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts?token=abc123' for reading",
+			},
+			delayBetweenLines:      10 * time.Millisecond,
+			wantSegmentCount:       1,
+			wantMinWallTimeMs:      5,
+			wantSegmentBytes:       0, // Query string URL won't match "seg03440.ts" exactly
+			wantThroughputRecorded: false,
+		},
+	}
+
+	// Segment sizes matching testdata/segments_for_http_tracking.json
+	segmentSizes := map[string]int64{
+		"seg03440.ts": 1281032,
+		"seg03441.ts": 1297764,
+		"seg03442.ts": 1361120,
+		"seg03443.ts": 1338372,
+		"seg03444.ts": 1341944,
+		"seg03445.ts": 1321640,
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lookup := newMockSegmentSizeLookup(segmentSizes)
+			p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+			for _, line := range tt.httpLines {
+				p.ParseLine(line)
+				if tt.delayBetweenLines > 0 {
+					time.Sleep(tt.delayBetweenLines)
+				}
+			}
+
+			stats := p.Stats()
+
+			if stats.SegmentCount != tt.wantSegmentCount {
+				t.Errorf("SegmentCount = %d, want %d", stats.SegmentCount, tt.wantSegmentCount)
+			}
+
+			if stats.SegmentCount > 0 && stats.SegmentMinMs < tt.wantMinWallTimeMs {
+				t.Errorf("SegmentMinMs = %.2f, want >= %.2f", stats.SegmentMinMs, tt.wantMinWallTimeMs)
+			}
+
+			if stats.SegmentBytesDownloaded != tt.wantSegmentBytes {
+				t.Errorf("SegmentBytesDownloaded = %d, want %d", stats.SegmentBytesDownloaded, tt.wantSegmentBytes)
+			}
+
+			if tt.wantThroughputRecorded && stats.MaxThroughput == 0 {
+				t.Error("Expected MaxThroughput > 0 but got 0")
+			}
+		})
+	}
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_NoDoubleCounting(t *testing.T) {
+	// Test the 1ms heuristic: if HLS event fires just before HTTP event,
+	// the HTTP handler should skip counting (wallTime < 1ms)
+	segmentSizes := map[string]int64{
+		"seg03440.ts": 1281032,
+		"seg03441.ts": 1297764,
+	}
+	lookup := newMockSegmentSizeLookup(segmentSizes)
+	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+	// First HLS request starts pending segment
+	p.ParseLine("[hls @ 0x55c32c0c5700] HLS request for url 'http://10.177.0.10:17080/seg03440.ts', offset 0, playlist 0")
+
+	// HTTP open fires almost immediately (same millisecond) - should detect same segment
+	// This tests that when both HLS and HTTP fire for same segment, we don't double-count
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading")
+
+	// Wait before next segment
+	time.Sleep(10 * time.Millisecond)
+
+	// Next HTTP open should complete the pending seg03440.ts
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading")
+
+	stats := p.Stats()
+
+	// Should have 1 completed segment (seg03440.ts completed by seg03441.ts HTTP open)
+	// The intermediate HTTP open for seg03440.ts shouldn't create extra counts
+	if stats.SegmentCount != 1 {
+		t.Errorf("SegmentCount = %d, want 1 (no double counting)", stats.SegmentCount)
+	}
+
+	// Should track bytes for the completed segment
+	if stats.SegmentBytesDownloaded != 1281032 {
+		t.Errorf("SegmentBytesDownloaded = %d, want 1281032", stats.SegmentBytesDownloaded)
+	}
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_WithoutSizeLookup(t *testing.T) {
+	// Test that tracking works without segment size lookup (no bytes/throughput)
+	p := NewDebugEventParser(1, 2*time.Second, nil) // No size lookup
+
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading")
+	time.Sleep(10 * time.Millisecond)
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading")
+
+	stats := p.Stats()
+
+	// Should still count segments (wall time tracking works)
+	if stats.SegmentCount != 1 {
+		t.Errorf("SegmentCount = %d, want 1", stats.SegmentCount)
+	}
+
+	// But bytes and throughput should be 0
+	if stats.SegmentBytesDownloaded != 0 {
+		t.Errorf("SegmentBytesDownloaded = %d, want 0 (no size lookup)", stats.SegmentBytesDownloaded)
+	}
+	if stats.MaxThroughput != 0 {
+		t.Errorf("MaxThroughput = %f, want 0 (no size lookup)", stats.MaxThroughput)
+	}
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_MixedHLSAndHTTP(t *testing.T) {
+	// Test the real-world scenario: HLS events during ramp-up, HTTP only after steady state
+	segmentSizes := map[string]int64{
+		"seg03440.ts": 1281032,
+		"seg03441.ts": 1297764,
+		"seg03442.ts": 1361120,
+		"seg03443.ts": 1338372,
+	}
+	lookup := newMockSegmentSizeLookup(segmentSizes)
+	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+	// Phase 1: Initial ramp-up - HLS events fire (as per FFmpeg debug output during parsing)
+	p.ParseLine("[hls @ 0x55c32c0c5700] HLS request for url 'http://10.177.0.10:17080/seg03440.ts', offset 0, playlist 0")
+	time.Sleep(10 * time.Millisecond)
+	p.ParseLine("[hls @ 0x55c32c0c5700] HLS request for url 'http://10.177.0.10:17080/seg03441.ts', offset 0, playlist 0")
+
+	// At this point, seg03440.ts should be complete (by HLS handler)
+	stats := p.Stats()
+	if stats.SegmentCount != 1 {
+		t.Errorf("After HLS phase: SegmentCount = %d, want 1", stats.SegmentCount)
+	}
+
+	// Phase 2: Steady state - only HTTP events fire
+	time.Sleep(10 * time.Millisecond)
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03442.ts' for reading")
+	time.Sleep(10 * time.Millisecond)
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03443.ts' for reading")
+
+	stats = p.Stats()
+
+	// Should have:
+	// - seg03440.ts completed by HLS (seg03441.ts request)
+	// - seg03441.ts completed by HTTP (seg03442.ts open)
+	// - seg03442.ts completed by HTTP (seg03443.ts open)
+	// Total: 3 segments
+	if stats.SegmentCount != 3 {
+		t.Errorf("After mixed phase: SegmentCount = %d, want 3", stats.SegmentCount)
+	}
+
+	// Total bytes: seg03440 + seg03441 + seg03442
+	expectedBytes := int64(1281032 + 1297764 + 1361120)
+	if stats.SegmentBytesDownloaded != expectedBytes {
+		t.Errorf("SegmentBytesDownloaded = %d, want %d", stats.SegmentBytesDownloaded, expectedBytes)
+	}
+
+	// Throughput should be recorded
+	if stats.MaxThroughput == 0 {
+		t.Error("Expected MaxThroughput > 0")
+	}
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_ThroughputHistogram(t *testing.T) {
+	// Test that throughput histogram is populated correctly
+	segmentSizes := map[string]int64{
+		"seg03440.ts": 1000000, // 1MB - easy to calculate throughput
+		"seg03441.ts": 1000000,
+		"seg03442.ts": 1000000,
+	}
+	lookup := newMockSegmentSizeLookup(segmentSizes)
+	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+	// Generate multiple segments with consistent timing
+	urls := []string{
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03442.ts' for reading",
+	}
+
+	for _, line := range urls {
+		p.ParseLine(line)
+		time.Sleep(20 * time.Millisecond) // 20ms delay = ~50MB/s throughput with 1MB segments
+	}
+
+	// Drain the histogram
+	buckets := p.DrainThroughputHistogram()
+
+	// Verify some buckets have counts (throughput was recorded)
+	totalSamples := uint64(0)
+	for _, count := range buckets {
+		totalSamples += count
+	}
+
+	// Should have 2 samples (3 HTTP opens = 2 completed segments)
+	if totalSamples != 2 {
+		t.Errorf("Throughput histogram total samples = %d, want 2", totalSamples)
+	}
+
+	// After drain, histogram should be empty
+	bucketsAfterDrain := p.DrainThroughputHistogram()
+	totalAfterDrain := uint64(0)
+	for _, count := range bucketsAfterDrain {
+		totalAfterDrain += count
+	}
+	if totalAfterDrain != 0 {
+		t.Errorf("After drain, total samples = %d, want 0", totalAfterDrain)
+	}
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_NonTsFiles(t *testing.T) {
+	// Verify that non-.ts files (manifests) don't trigger segment tracking
+	p := NewDebugEventParser(1, 2*time.Second, nil)
+
+	// Manifest opens should not trigger segment tracking
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading")
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading")
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading")
+
+	stats := p.Stats()
+
+	// No segment tracking (manifests are tracked separately via handlePlaylistOpen)
+	if stats.SegmentCount != 0 {
+		t.Errorf("SegmentCount = %d, want 0 (manifests shouldn't be counted as segments)", stats.SegmentCount)
+	}
+
+	// HTTPOpenCount should still be tracked
+	if stats.HTTPOpenCount != 3 {
+		t.Errorf("HTTPOpenCount = %d, want 3", stats.HTTPOpenCount)
+	}
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_RapidFireDifferentURLs(t *testing.T) {
+	// This test catches the bug where rapid-fire HTTP Opens with DIFFERENT URLs
+	// would not count segments due to the time-based guard (wallTime < 1ms).
+	// The fix changed from time-based guard to URL-based comparison.
+	segmentSizes := map[string]int64{
+		"seg03440.ts": 1000000,
+		"seg03441.ts": 1000000,
+		"seg03442.ts": 1000000,
+		"seg03443.ts": 1000000,
+		"seg03444.ts": 1000000,
+	}
+	lookup := newMockSegmentSizeLookup(segmentSizes)
+	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+	// Simulate rapid-fire HTTP Opens with NO DELAY (sub-millisecond)
+	// This is what happens when FFmpeg catches up on multiple segments
+	httpLines := []string{
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03442.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03443.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03444.ts' for reading",
+	}
+
+	// NO time.Sleep between calls - rapid fire!
+	for _, line := range httpLines {
+		p.ParseLine(line)
+	}
+
+	stats := p.Stats()
+
+	// With 5 HTTP Opens, we should complete 4 segments (first one starts pending,
+	// each subsequent one completes the previous)
+	// BUG (old code): wallTime < 1ms caused segments to be deleted but not counted
+	// FIX (new code): URL comparison - different URLs always complete the old segment
+	expectedSegmentCount := int64(4)
+	if stats.SegmentCount != expectedSegmentCount {
+		t.Errorf("SegmentCount = %d, want %d (rapid-fire different URLs should all count)",
+			stats.SegmentCount, expectedSegmentCount)
+	}
+
+	// Verify bytes were tracked for completed segments
+	expectedBytes := int64(4 * 1000000) // 4 segments * 1MB each
+	if stats.SegmentBytesDownloaded != expectedBytes {
+		t.Errorf("SegmentBytesDownloaded = %d, want %d", stats.SegmentBytesDownloaded, expectedBytes)
+	}
+
+	// Note: We don't check MaxThroughput here because rapid-fire (0 wall time)
+	// results in division by near-zero, which is correctly skipped by minWallTimeForThroughput guard.
+	// Throughput tracking is tested in other tests with realistic delays.
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_SameURLSkipped(t *testing.T) {
+	// This test verifies that when the SAME URL fires twice (HLS then HTTP),
+	// we don't double-count - only update the timestamp.
+	segmentSizes := map[string]int64{
+		"seg03440.ts": 1000000,
+		"seg03441.ts": 1000000,
+	}
+	lookup := newMockSegmentSizeLookup(segmentSizes)
+	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+	// HLS fires for seg03440.ts
+	p.ParseLine("[hls @ 0x55c32c0c5700] HLS request for url 'http://10.177.0.10:17080/seg03440.ts', offset 0, playlist 0")
+
+	// HTTP fires for SAME seg03440.ts (should be skipped - same URL)
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading")
+
+	// At this point, we should have 0 completed segments (seg03440.ts is still pending)
+	stats := p.Stats()
+	if stats.SegmentCount != 0 {
+		t.Errorf("After same-URL double-fire: SegmentCount = %d, want 0 (no completion yet)", stats.SegmentCount)
+	}
+
+	// Now a DIFFERENT segment arrives - should complete seg03440.ts
+	time.Sleep(10 * time.Millisecond) // Some realistic delay
+	p.ParseLine("[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading")
+
+	stats = p.Stats()
+	if stats.SegmentCount != 1 {
+		t.Errorf("After different URL: SegmentCount = %d, want 1", stats.SegmentCount)
+	}
+	if stats.SegmentBytesDownloaded != 1000000 {
+		t.Errorf("SegmentBytesDownloaded = %d, want 1000000", stats.SegmentBytesDownloaded)
+	}
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_HTTPGetPattern(t *testing.T) {
+	// Test the HTTP GET pattern which fires for EVERY request including keep-alive.
+	// This is critical for steady-state segment tracking after initial parsing.
+	// Format: [http @ 0x...] [debug] request: GET /seg00001.ts HTTP/1.1
+	segmentSizes := map[string]int64{
+		"seg00001.ts": 1000000,
+		"seg00002.ts": 1000000,
+		"seg00003.ts": 1000000,
+		"seg00004.ts": 1000000,
+	}
+	lookup := newMockSegmentSizeLookup(segmentSizes)
+	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+	// Simulate steady-state: only HTTP GET lines (no HLS Request, no HTTP Opening)
+	// This is what happens after keep-alive is established
+	httpGetLines := []string{
+		"[http @ 0x558133033cc0] [debug] request: GET /seg00001.ts HTTP/1.1",
+		"[http @ 0x558133033cc0] [debug] request: GET /seg00002.ts HTTP/1.1",
+		"[http @ 0x558133033cc0] [debug] request: GET /seg00003.ts HTTP/1.1",
+		"[http @ 0x558133033cc0] [debug] request: GET /seg00004.ts HTTP/1.1",
+	}
+
+	// Small delay to get realistic wall times
+	for _, line := range httpGetLines {
+		p.ParseLine(line)
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	stats := p.Stats()
+
+	// 4 GET requests = 3 completed segments (first starts pending)
+	if stats.SegmentCount != 3 {
+		t.Errorf("SegmentCount = %d, want 3 (HTTP GET pattern should track segments)", stats.SegmentCount)
+	}
+
+	// 3 completed segments * 1MB = 3MB
+	if stats.SegmentBytesDownloaded != 3000000 {
+		t.Errorf("SegmentBytesDownloaded = %d, want 3000000", stats.SegmentBytesDownloaded)
+	}
+
+	// Throughput should be recorded
+	if stats.MaxThroughput == 0 {
+		t.Error("Expected MaxThroughput > 0 for HTTP GET pattern")
+	}
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_MixedURLFormats(t *testing.T) {
+	// Test that different URL formats (full URL vs path) are handled correctly.
+	// - HLS Request uses full URL: http://10.177.0.10:17080/seg00001.ts
+	// - HTTP GET uses path: /seg00001.ts
+	// Both should extract to seg00001.ts and be recognized as same segment.
+	segmentSizes := map[string]int64{
+		"seg00001.ts": 1000000,
+		"seg00002.ts": 1000000,
+	}
+	lookup := newMockSegmentSizeLookup(segmentSizes)
+	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+	// Initial: HLS fires with full URL
+	p.ParseLine("[hls @ 0x55c32c0c5700] HLS request for url 'http://10.177.0.10:17080/seg00001.ts', offset 0, playlist 0")
+
+	// HTTP GET fires with path - should recognize as same segment (skip)
+	p.ParseLine("[http @ 0x558133033cc0] [debug] request: GET /seg00001.ts HTTP/1.1")
+
+	// At this point: seg00001.ts is pending, 0 completions
+	stats := p.Stats()
+	if stats.SegmentCount != 0 {
+		t.Errorf("After same segment (different formats): SegmentCount = %d, want 0", stats.SegmentCount)
+	}
+
+	// Next segment via HTTP GET with path
+	time.Sleep(10 * time.Millisecond)
+	p.ParseLine("[http @ 0x558133033cc0] [debug] request: GET /seg00002.ts HTTP/1.1")
+
+	// Now seg00001.ts should be completed
+	stats = p.Stats()
+	if stats.SegmentCount != 1 {
+		t.Errorf("After different segment: SegmentCount = %d, want 1", stats.SegmentCount)
+	}
+	if stats.SegmentBytesDownloaded != 1000000 {
+		t.Errorf("SegmentBytesDownloaded = %d, want 1000000", stats.SegmentBytesDownloaded)
+	}
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_SteadyStateSimulation(t *testing.T) {
+	// Simulate a realistic steady-state scenario:
+	// 1. Initial ramp-up: HLS + HTTP Open + HTTP GET all fire
+	// 2. Steady state: Only HTTP GET fires
+	segmentSizes := map[string]int64{
+		"seg00001.ts": 1000000,
+		"seg00002.ts": 1000000,
+		"seg00003.ts": 1000000,
+		"seg00004.ts": 1000000,
+		"seg00005.ts": 1000000,
+	}
+	lookup := newMockSegmentSizeLookup(segmentSizes)
+	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+	// Phase 1: Initial ramp-up (all three patterns fire for same segment)
+	p.ParseLine("[hls @ 0x55c32c0c5700] HLS request for url 'http://10.177.0.10:17080/seg00001.ts', offset 0, playlist 0")
+	p.ParseLine("[http @ 0x55c32c0d4c00] Opening 'http://10.177.0.10:17080/seg00001.ts' for reading")
+	p.ParseLine("[http @ 0x558133033cc0] [debug] request: GET /seg00001.ts HTTP/1.1")
+
+	// Should have 0 completions (seg00001 still pending, all recognized as same segment)
+	stats := p.Stats()
+	if stats.SegmentCount != 0 {
+		t.Errorf("After ramp-up phase: SegmentCount = %d, want 0", stats.SegmentCount)
+	}
+
+	// Phase 2: Steady state (only HTTP GET fires)
+	time.Sleep(10 * time.Millisecond)
+	p.ParseLine("[http @ 0x558133033cc0] [debug] request: GET /seg00002.ts HTTP/1.1")
+
+	stats = p.Stats()
+	if stats.SegmentCount != 1 {
+		t.Errorf("After first steady-state segment: SegmentCount = %d, want 1", stats.SegmentCount)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	p.ParseLine("[http @ 0x558133033cc0] [debug] request: GET /seg00003.ts HTTP/1.1")
+
+	stats = p.Stats()
+	if stats.SegmentCount != 2 {
+		t.Errorf("After second steady-state segment: SegmentCount = %d, want 2", stats.SegmentCount)
+	}
+
+	// Bytes should be tracked for completed segments
+	if stats.SegmentBytesDownloaded != 2000000 {
+		t.Errorf("SegmentBytesDownloaded = %d, want 2000000", stats.SegmentBytesDownloaded)
+	}
+
+	// Throughput should be recorded
+	if stats.MaxThroughput == 0 {
+		t.Error("Expected MaxThroughput > 0 in steady state")
+	}
+
+	t.Logf("Steady state test: SegmentCount=%d, Bytes=%d, MaxThroughput=%.0f",
+		stats.SegmentCount, stats.SegmentBytesDownloaded, stats.MaxThroughput)
+}
+
+func TestDebugEventParser_TrackSegmentFromHTTP_ConcurrentAccess(t *testing.T) {
+	// Test concurrent HTTP open parsing
+	segmentSizes := map[string]int64{
+		"seg03440.ts": 1000000,
+		"seg03441.ts": 1000000,
+		"seg03442.ts": 1000000,
+		"seg03443.ts": 1000000,
+		"seg03444.ts": 1000000,
+	}
+	lookup := newMockSegmentSizeLookup(segmentSizes)
+	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
+
+	var wg sync.WaitGroup
+	const goroutines = 10
+	const iterationsPerGoroutine = 50
+
+	httpLines := []string{
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03442.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03443.ts' for reading",
+		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03444.ts' for reading",
+	}
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterationsPerGoroutine; j++ {
+				line := httpLines[j%len(httpLines)]
+				p.ParseLine(line)
+			}
+		}()
+	}
+
+	// Concurrently read stats
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_ = p.Stats()
+		}
+	}()
+
+	wg.Wait()
+
+	// Just verify no panics/races occurred
+	stats := p.Stats()
+	t.Logf("Concurrent test: SegmentCount=%d, HTTPOpenCount=%d, SegmentBytes=%d",
+		stats.SegmentCount, stats.HTTPOpenCount, stats.SegmentBytesDownloaded)
+}

@@ -24,12 +24,13 @@ type Orchestrator struct {
 	config *config.Config
 	logger *slog.Logger
 
-	runner        *process.FFmpegRunner
-	clientManager *ClientManager
-	rampScheduler *RampScheduler
-	metrics       *metrics.Collector
-	metricsServer *metrics.Server
-	originScraper *metrics.OriginScraper
+	runner         *process.FFmpegRunner
+	clientManager  *ClientManager
+	rampScheduler  *RampScheduler
+	metrics        *metrics.Collector
+	metricsServer  *metrics.Server
+	originScraper  *metrics.OriginScraper
+	segmentScraper *metrics.SegmentScraper
 
 	startTime time.Time
 }
@@ -85,14 +86,36 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 		)
 	}
 
+	// Initialize segment scraper if configured (for accurate byte tracking)
+	var segmentScraper *metrics.SegmentScraper
+	if cfg.SegmentSizesEnabled() {
+		segmentScraper = metrics.NewSegmentScraper(
+			cfg.ResolveSegmentSizesURL(),
+			cfg.SegmentSizesScrapeInterval,
+			cfg.SegmentSizesScrapeJitter,
+			cfg.SegmentCacheWindow,
+			logger,
+		)
+		logger.Info("segment_scraper_initialized",
+			"url", cfg.ResolveSegmentSizesURL(),
+			"interval", cfg.SegmentSizesScrapeInterval,
+		)
+	} else {
+		logger.Debug("segment_scraper_disabled",
+			"origin_metrics_host", cfg.OriginMetricsHost,
+			"segment_sizes_url", cfg.SegmentSizesURL,
+		)
+	}
+
 	orch := &Orchestrator{
-		config:        cfg,
-		logger:        logger,
-		runner:        runner,
-		rampScheduler: rampScheduler,
-		metrics:       collector,
-		metricsServer: metricsServer,
-		originScraper: originScraper,
+		config:         cfg,
+		logger:         logger,
+		runner:         runner,
+		rampScheduler:  rampScheduler,
+		metrics:        collector,
+		metricsServer:  metricsServer,
+		originScraper:  originScraper,
+		segmentScraper: segmentScraper,
 	}
 
 	// Create client manager with callbacks
@@ -110,6 +133,8 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 		StatsEnabled:       cfg.StatsEnabled,
 		StatsBufferSize:    cfg.StatsBufferSize,
 		StatsDropThreshold: cfg.StatsDropThreshold,
+		// Segment size lookup (for accurate byte tracking)
+		SegmentSizeLookup: segmentScraper, // nil if not configured
 		// FD mode is always enabled when stats are enabled
 		Callbacks: ManagerCallbacks{
 			OnClientStateChange: orch.onStateChange,
@@ -188,6 +213,27 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			"node_exporter", o.config.OriginMetricsURL != "",
 			"nginx_exporter", o.config.NginxMetricsURL != "",
 		)
+	}
+
+	// Start segment scraper if configured (for accurate byte tracking)
+	if o.segmentScraper != nil {
+		// Start background scraper goroutine
+		go o.segmentScraper.Run(ctx)
+
+		// Wait for first scrape to complete (with timeout)
+		// This ensures cache is populated before most clients start requesting segments
+		if err := o.segmentScraper.WaitForFirstScrape(5 * time.Second); err != nil {
+			o.logger.Warn("segment_scraper_cold_start",
+				"error", err,
+				"note", "throughput tracking may show zeros initially")
+		} else {
+			o.logger.Info("segment_scraper_started",
+				"url", o.config.ResolveSegmentSizesURL(),
+				"cache_size", o.segmentScraper.CacheSize(),
+				"interval", o.config.SegmentSizesScrapeInterval,
+				"jitter", o.config.SegmentSizesScrapeJitter,
+			)
+		}
 	}
 
 	// Setup duration timer if configured
@@ -423,8 +469,11 @@ func (o *Orchestrator) statsUpdateLoop(ctx context.Context) {
 				continue
 			}
 
+			// Get debug stats for segment throughput (from segment scraper)
+			debugStats := o.GetDebugStats()
+
 			// Convert stats.AggregatedStats to metrics.AggregatedStatsUpdate
-			update := o.convertToMetricsUpdate(aggStats)
+			update := o.convertToMetricsUpdate(aggStats, &debugStats)
 			o.metrics.RecordStats(update)
 
 			// Also record latency samples to histogram
@@ -436,7 +485,8 @@ func (o *Orchestrator) statsUpdateLoop(ctx context.Context) {
 }
 
 // convertToMetricsUpdate converts stats.AggregatedStats to metrics.AggregatedStatsUpdate.
-func (o *Orchestrator) convertToMetricsUpdate(aggStats *stats.AggregatedStats) *metrics.AggregatedStatsUpdate {
+// debugStats is optional and provides segment throughput data from the segment scraper.
+func (o *Orchestrator) convertToMetricsUpdate(aggStats *stats.AggregatedStats, debugStats *stats.DebugStatsAggregate) *metrics.AggregatedStatsUpdate {
 	update := &metrics.AggregatedStatsUpdate{
 		// Client counts
 		ActiveClients:  aggStats.ActiveClients,
@@ -491,6 +541,17 @@ func (o *Orchestrator) convertToMetricsUpdate(aggStats *stats.AggregatedStats) *
 
 		// Note: Uptime percentiles are tracked separately by metrics.Collector
 		// via RecordExit() calls, not from aggregated stats
+	}
+
+	// Add segment throughput data from debug stats (from segment scraper)
+	if debugStats != nil {
+		update.TotalSegmentBytes = debugStats.TotalSegmentBytes
+		update.SegmentThroughputMax = debugStats.SegmentThroughputMax
+		update.SegmentThroughputP25 = debugStats.SegmentThroughputP25
+		update.SegmentThroughputP50 = debugStats.SegmentThroughputP50
+		update.SegmentThroughputP75 = debugStats.SegmentThroughputP75
+		update.SegmentThroughputP95 = debugStats.SegmentThroughputP95
+		update.SegmentThroughputP99 = debugStats.SegmentThroughputP99
 	}
 
 	// Add per-client stats if enabled

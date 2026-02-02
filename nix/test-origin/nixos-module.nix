@@ -84,6 +84,13 @@ in
       "uid=hls"
       "gid=hls"
       "mode=0755"
+      # Performance: Don't update access time on reads
+      # See: docs/NGINX_HLS_CACHING_DESIGN.md section 9
+      "noatime"
+      # Security: HLS files are data, not executables or devices
+      "nodev"
+      "nosuid"
+      "noexec"
     ];
   };
 
@@ -229,12 +236,19 @@ in
       UMask = "0022";               # Files readable by nginx (world-readable)
 
       # ─────────────────────────────────────────────────────────────────────────
-      # Resource Limits (based on actual measurements: ~68MB RAM, ~9.4% CPU)
+      # Resource Limits (1080p60 encoding needs more resources than 720p30)
       # See: docs/HLS_GENERATOR_SECURITY.md for analysis
+      # Note: Previous limits (512M/400M) caused severe throttling under load.
+      # 1080p60 veryfast with HLS buffering needs ~500-600MB in practice.
+      # Note: 1080p60 libx264 veryfast can need 2-3 cores for realtime encoding
+      # depending on content complexity. Using 300% for headroom.
       # ─────────────────────────────────────────────────────────────────────────
-      MemoryMax = "256M";           # 3.7x actual usage - generous headroom
-      MemoryHigh = "200M";          # Warn before hard limit
-      CPUQuota = "50%";             # 5x actual usage - allows encoding peaks
+      MemoryMax = "1G";             # Hard limit - 1080p60 veryfast + HLS buffers
+      MemoryHigh = "768M";          # Warn before hard limit
+      CPUQuota = "300%";            # 1080p60 veryfast - give 3 cores for headroom
+      Nice = "-10";                 # Higher priority than normal processes (-20 to 19)
+      IOSchedulingClass = "realtime"; # Prioritize disk I/O for segment writes
+      IOSchedulingPriority = 2;     # High priority within realtime class (0-7, lower=higher)
       LimitNOFILE = 256;            # Only needs HLS segment files
       LimitNPROC = 64;              # FFmpeg spawns threads, not processes
 
@@ -256,6 +270,20 @@ in
     recommendedOptimisation = true;
     recommendedProxySettings = true;
 
+    # Use all available CPU cores for nginx workers
+    # Critical for high-throughput HLS serving under load
+    appendConfig = ''
+      worker_processes auto;
+      worker_rlimit_nofile 65535;
+    '';
+
+    # Accept all pending connections at once (better burst handling)
+    # See: docs/NGINX_HLS_CACHING_DESIGN.md section 11.4
+    eventsConfig = ''
+      worker_connections 16384;
+      multi_accept on;
+    '';
+
     # Global HTTP config
     # Note: server_tokens is already set by recommendedOptimisation
     commonHttpConfig = ''
@@ -264,9 +292,14 @@ in
 
     # Append to global http config
     appendHttpConfig = ''
-      # File descriptor caching
-      open_file_cache max=10000 inactive=30s;
-      open_file_cache_valid 10s;
+      # File descriptor caching - see docs/NGINX_HLS_CACHING_DESIGN.md
+      # Dynamic sizing: max=${toString d.openFileCacheMax} = (${toString d.filesPerVariant} files/variant × ${toString d.variantCount} variants + 1 master) × 3
+      #
+      # Tiered caching strategy:
+      # - Segments (.ts): Immutable, use aggressive 10s validity (global default)
+      # - Manifests (.m3u8): Update every 2s, use 500ms validity (per-location override)
+      open_file_cache max=${toString d.openFileCacheMax} inactive=30s;
+      open_file_cache_valid 10s;  # Default for segments (immutable)
       open_file_cache_errors on;
 
       # Free memory faster from dirty client exits
@@ -292,8 +325,18 @@ in
       };
 
       # Variant playlists - immediate delivery for freshness
+      # See docs/NGINX_HLS_CACHING_DESIGN.md for caching strategy
       locations."~ \\.m3u8$" = {
         extraConfig = ''
+          # Override global open_file_cache_valid for manifests
+          # Manifests update every 2s; 1s validity = max 50% staleness
+          # Still cache (serves ~50% of requests), but check freshness frequently
+          # Note: 500ms not supported by nginx - using 1s as fallback
+          open_file_cache_valid 1s;
+
+          # Small output buffer for immediate send (manifests are ~400 bytes)
+          output_buffers 1 4k;
+
           ${nginx.manifestAccessLog};
           tcp_nodelay    on;
           add_header Cache-Control "${nginx.manifestCacheControl}";
@@ -306,6 +349,9 @@ in
       # Segments - throughput optimized with aggressive caching
       locations."~ \\.ts$" = {
         extraConfig = ''
+          # Larger output buffers for throughput (segments are ~1.3MB)
+          output_buffers 2 256k;
+
           ${nginx.segmentAccessLog};
           sendfile       on;
           tcp_nopush     on;
@@ -335,7 +381,19 @@ in
       };
 
       # Directory listing for debugging - verify FFmpeg is writing files
+      # HTML format at /files/ for human browsing
+      # JSON format at /files/json/ for programmatic access
       locations."/files/" = {
+        alias = "/var/hls/";
+        extraConfig = ''
+          autoindex on;
+          autoindex_format html;
+          access_log off;
+          add_header Cache-Control "no-store";
+        '';
+      };
+
+      locations."/files/json/" = {
         alias = "/var/hls/";
         extraConfig = ''
           autoindex on;
@@ -346,6 +404,19 @@ in
         '';
       };
     };
+  };
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Nginx Systemd Ordering
+  # Ensure nginx starts AFTER:
+  # 1. tmpfs is mounted (var-hls.mount)
+  # 2. FFmpeg has started producing files (hls-generator.service)
+  # This prevents 404 errors during startup when clients request files
+  # that don't exist yet.
+  # ═══════════════════════════════════════════════════════════════════════════
+  systemd.services.nginx = {
+    after = [ "var-hls.mount" "hls-generator.service" ];
+    wants = [ "hls-generator.service" ];
   };
 
   # ═══════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,371 @@
+2026-01-30 16:25:36.938 [debug] Splitting the commandline.
+2026-01-30 16:25:36.938 [debug] Reading option '-hide_banner' ... matched as option 'hide_banner' (do not show program banner) with argument '1'.
+2026-01-30 16:25:36.938 [debug] Reading option '-nostdin' ... matched as option 'stdin' (enable or disable interaction on standard input) with argument 0.
+2026-01-30 16:25:36.938 [debug] Reading option '-loglevel' ... matched as option 'loglevel' (set logging level) with argument 'repeat+level+datetime+debug'.
+2026-01-30 16:25:36.938 [debug] Reading option '-reconnect' ... matched as AVOption 'reconnect' with argument '1'.
+2026-01-30 16:25:36.938 [debug] Reading option '-reconnect_streamed' ... matched as AVOption 'reconnect_streamed' with argument '1'.
+2026-01-30 16:25:36.938 [debug] Reading option '-reconnect_on_network_error' ... matched as AVOption 'reconnect_on_network_error' with argument '1'.
+2026-01-30 16:25:36.938 [debug] Reading option '-reconnect_delay_max' ... matched as AVOption 'reconnect_delay_max' with argument '5'.
+2026-01-30 16:25:36.938 [debug] Reading option '-rw_timeout' ... matched as AVOption 'rw_timeout' with argument '15000000'.
+2026-01-30 16:25:36.938 [debug] Reading option '-user_agent' ... matched as AVOption 'user_agent' with argument 'go-ffmpeg-hls-swarm/1.0/client-debug'.
+2026-01-30 16:25:36.938 [debug] Reading option '-seg_max_retry' ... matched as AVOption 'seg_max_retry' with argument '3'.
+2026-01-30 16:25:36.938 [debug] Reading option '-i' ... matched as input url with argument 'http://10.177.0.10:17080/stream.m3u8'.
+2026-01-30 16:25:36.938 [debug] Reading option '-map' ... matched as option 'map' (set input stream mapping) with argument '0:v:0?'.
+2026-01-30 16:25:36.938 [debug] Reading option '-map' ... matched as option 'map' (set input stream mapping) with argument '0:a:0?'.
+2026-01-30 16:25:36.938 [debug] Reading option '-c' ... matched as option 'c' (select encoder/decoder ('copy' to copy stream without reencoding)) with argument 'copy'.
+2026-01-30 16:25:36.938 [debug] Reading option '-f' ... matched as option 'f' (force container format (auto-detected otherwise)) with argument 'null'.
+2026-01-30 16:25:36.938 [debug] Reading option '-' ... matched as output url.
+2026-01-30 16:25:36.938 [debug] Finished splitting the commandline.
+2026-01-30 16:25:36.938 [debug] Parsing a group of options: global .
+2026-01-30 16:25:36.938 [debug] Applying option hide_banner (do not show program banner) with argument 1.
+2026-01-30 16:25:36.938 [debug] Applying option nostdin (enable or disable interaction on standard input) with argument 0.
+2026-01-30 16:25:36.938 [debug] Applying option loglevel (set logging level) with argument repeat+level+datetime+debug.
+2026-01-30 16:25:36.938 [debug] Successfully parsed a group of options.
+2026-01-30 16:25:36.938 [debug] Parsing a group of options: input url http://10.177.0.10:17080/stream.m3u8.
+2026-01-30 16:25:36.938 [debug] Successfully parsed a group of options.
+2026-01-30 16:25:36.939 [debug] Opening an input file: http://10.177.0.10:17080/stream.m3u8.
+2026-01-30 16:25:36.939 [AVFormatContext @ 0x5558f27d1900] [debug] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:36.939 [http @ 0x5558f27d2480] [debug] Setting default whitelist 'http,https,tls,rtp,tcp,udp,crypto,httpproxy,data'
+2026-01-30 16:25:36.939 [tcp @ 0x5558f27d53c0] [debug] Original list of addresses:
+2026-01-30 16:25:36.939 [tcp @ 0x5558f27d53c0] [debug] Address 10.177.0.10 port 17080
+2026-01-30 16:25:36.939 [tcp @ 0x5558f27d53c0] [debug] Interleaved list of addresses:
+2026-01-30 16:25:36.939 [tcp @ 0x5558f27d53c0] [debug] Address 10.177.0.10 port 17080
+2026-01-30 16:25:36.939 [tcp @ 0x5558f27d53c0] [verbose] Starting connection attempt to 10.177.0.10 port 17080
+2026-01-30 16:25:36.939 [tcp @ 0x5558f27d53c0] [verbose] Successfully connected to 10.177.0.10 port 17080
+2026-01-30 16:25:36.939 [http @ 0x5558f27d2480] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: close
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:36.940 [hls @ 0x5558f27d1900] [debug] Format hls probed with size=2048 and score=100
+2026-01-30 16:25:36.940 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:36.940 [hls @ 0x5558f27d1900] [verbose] HLS request for url 'http://10.177.0.10:17080/seg00050.ts', offset 0, playlist 0
+2026-01-30 16:25:36.940 [hls @ 0x5558f27d1900] [info] Opening 'http://10.177.0.10:17080/seg00050.ts' for reading
+2026-01-30 16:25:36.940 [tcp @ 0x5558f27dbb80] [debug] Original list of addresses:
+2026-01-30 16:25:36.940 [tcp @ 0x5558f27dbb80] [debug] Address 10.177.0.10 port 17080
+2026-01-30 16:25:36.940 [tcp @ 0x5558f27dbb80] [debug] Interleaved list of addresses:
+2026-01-30 16:25:36.940 [tcp @ 0x5558f27dbb80] [debug] Address 10.177.0.10 port 17080
+2026-01-30 16:25:36.940 [tcp @ 0x5558f27dbb80] [verbose] Starting connection attempt to 10.177.0.10 port 17080
+2026-01-30 16:25:36.940 [tcp @ 0x5558f27dbb80] [verbose] Successfully connected to 10.177.0.10 port 17080
+2026-01-30 16:25:36.940 [http @ 0x5558f27d8ec0] [debug] request: GET /seg00050.ts HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:36.940 [hls @ 0x5558f27d1900] [verbose] HLS request for url 'http://10.177.0.10:17080/seg00051.ts', offset 0, playlist 0
+2026-01-30 16:25:36.940 [hls @ 0x5558f27d1900] [info] Opening 'http://10.177.0.10:17080/seg00051.ts' for reading
+2026-01-30 16:25:36.940 [tcp @ 0x5558f27dc1c0] [debug] Original list of addresses:
+2026-01-30 16:25:36.941 [tcp @ 0x5558f27dc1c0] [debug] Address 10.177.0.10 port 17080
+2026-01-30 16:25:36.941 [tcp @ 0x5558f27dc1c0] [debug] Interleaved list of addresses:
+2026-01-30 16:25:36.941 [tcp @ 0x5558f27dc1c0] [debug] Address 10.177.0.10 port 17080
+2026-01-30 16:25:36.941 [tcp @ 0x5558f27dc1c0] [verbose] Starting connection attempt to 10.177.0.10 port 17080
+2026-01-30 16:25:36.941 [tcp @ 0x5558f27dc1c0] [verbose] Successfully connected to 10.177.0.10 port 17080
+2026-01-30 16:25:36.941 [http @ 0x5558f27dbe80] [debug] request: GET /seg00051.ts HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:36.941 [debug] Format mpegts probed with size=2048 and score=50
+2026-01-30 16:25:36.943 [mpegts @ 0x5558f27d8200] [debug] stream=0 stream_type=1b pid=100 prog_reg_desc=
+2026-01-30 16:25:36.943 [mpegts @ 0x5558f27d8200] [debug] stream=1 stream_type=f pid=101 prog_reg_desc=
+2026-01-30 16:25:36.943 [hls @ 0x5558f27d1900] [debug] Before avformat_find_stream_info() pos: 374 bytes read:374 seeks:0 nb_streams:2
+2026-01-30 16:25:36.944 [debug] Transform tree:
+2026-01-30 16:25:36.944 [debug]     mdct_pfa_3xM_inv_float_c - type: mdct_float, len: 96, factors[2]: [3, any], flags: [unaligned, out_of_place, inv_only]
+2026-01-30 16:25:36.944 [debug]         fft16_ns_float_fma3 - type: fft_float, len: 16, factor: 2, flags: [aligned, inplace, out_of_place, preshuf]
+2026-01-30 16:25:36.944 [debug] Transform tree:
+2026-01-30 16:25:36.944 [debug]     mdct_inv_float_avx2 - type: mdct_float, len: 120, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+2026-01-30 16:25:36.944 [debug]         fft_pfa_15xM_asm_float_avx2 - type: fft_float, len: 60, factors[2]: [15, 2], flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.944 [debug]             fft4_fwd_asm_float_sse2 - type: fft_float, len: 4, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.944 [debug] Transform tree:
+2026-01-30 16:25:36.944 [debug]     mdct_inv_float_avx2 - type: mdct_float, len: 128, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+2026-01-30 16:25:36.944 [debug]         fft_sr_asm_float_fma3 - type: fft_float, len: 64, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.944 [debug] Transform tree:
+2026-01-30 16:25:36.944 [debug]     mdct_inv_float_avx2 - type: mdct_float, len: 480, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+2026-01-30 16:25:36.944 [debug]         fft_pfa_15xM_asm_float_avx2 - type: fft_float, len: 240, factors[2]: [15, 2], flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.944 [debug]             fft16_asm_float_fma3 - type: fft_float, len: 16, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.944 [debug] Transform tree:
+2026-01-30 16:25:36.944 [debug]     mdct_inv_float_avx2 - type: mdct_float, len: 512, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+2026-01-30 16:25:36.944 [debug]         fft_sr_asm_float_fma3 - type: fft_float, len: 256, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.944 [debug] Transform tree:
+2026-01-30 16:25:36.944 [debug]     mdct_pfa_3xM_inv_float_c - type: mdct_float, len: 768, factors[2]: [3, any], flags: [unaligned, out_of_place, inv_only]
+2026-01-30 16:25:36.944 [debug]         fft_sr_ns_float_fma3 - type: fft_float, len: 128, factor: 2, flags: [aligned, inplace, out_of_place, preshuf]
+2026-01-30 16:25:36.944 [debug] Transform tree:
+2026-01-30 16:25:36.944 [debug]     mdct_inv_float_avx2 - type: mdct_float, len: 960, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+2026-01-30 16:25:36.944 [debug]         fft_pfa_15xM_asm_float_avx2 - type: fft_float, len: 480, factors[2]: [15, 2], flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.944 [debug]             fft32_asm_float_fma3 - type: fft_float, len: 32, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.944 [debug] Transform tree:
+2026-01-30 16:25:36.944 [debug]     mdct_inv_float_avx2 - type: mdct_float, len: 1024, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+2026-01-30 16:25:36.944 [debug]         fft_sr_asm_float_fma3 - type: fft_float, len: 512, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.944 [debug] Transform tree:
+2026-01-30 16:25:36.944 [debug]     mdct_fwd_float_c - type: mdct_float, len: 1024, factors[2]: [2, any], flags: [unaligned, out_of_place, fwd_only]
+2026-01-30 16:25:36.944 [debug]         fft_sr_ns_float_fma3 - type: fft_float, len: 512, factor: 2, flags: [aligned, inplace, out_of_place, preshuf]
+2026-01-30 16:25:36.944 [mpegts @ 0x5558f27d8200] [debug] All programs have pmt, headers found
+2026-01-30 16:25:36.945 [NULL @ 0x5558f281cf40] [debug] Decoding VUI
+2026-01-30 16:25:36.945 [extract_extradata @ 0x5558f2881f80] [debug] nal_unit_type: 9(AUD), nal_ref_idc: 0
+2026-01-30 16:25:36.945 [extract_extradata @ 0x5558f2881f80] [debug] nal_unit_type: 7(SPS), nal_ref_idc: 3
+2026-01-30 16:25:36.945 [extract_extradata @ 0x5558f2881f80] [debug] nal_unit_type: 8(PPS), nal_ref_idc: 3
+2026-01-30 16:25:36.945 [extract_extradata @ 0x5558f2881f80] [debug] nal_unit_type: 5(IDR), nal_ref_idc: 3
+2026-01-30 16:25:36.945 [h264 @ 0x5558f281e380] [debug] nal_unit_type: 9(AUD), nal_ref_idc: 0
+2026-01-30 16:25:36.945 [h264 @ 0x5558f281e380] [debug] nal_unit_type: 7(SPS), nal_ref_idc: 3
+2026-01-30 16:25:36.945 [h264 @ 0x5558f281e380] [debug] nal_unit_type: 8(PPS), nal_ref_idc: 3
+2026-01-30 16:25:36.945 [h264 @ 0x5558f281e380] [debug] nal_unit_type: 5(IDR), nal_ref_idc: 3
+2026-01-30 16:25:36.945 [h264 @ 0x5558f281e380] [debug] Decoding VUI
+2026-01-30 16:25:36.945 [h264 @ 0x5558f281e380] [debug] Format yuv420p chosen by get_format().
+2026-01-30 16:25:36.945 [h264 @ 0x5558f281e380] [verbose] Reinit context to 1920x1088, pix_fmt: yuv420p
+2026-01-30 16:25:36.948 [h264 @ 0x5558f281e380] [debug] no picture 
+2026-01-30 16:25:36.952 [mpegts @ 0x5558f27d8200] [debug] probing stream 1 pp:2500
+2026-01-30 16:25:36.952 [mpegts @ 0x5558f27d8200] [debug] Probe with size=2830, packets=1 detected aac with score=51
+2026-01-30 16:25:36.952 [mpegts @ 0x5558f27d8200] [debug] probed stream 1
+2026-01-30 16:25:36.953 [debug] Transform tree:
+2026-01-30 16:25:36.953 [debug]     mdct_inv_float_avx2 - type: mdct_float, len: 64, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+2026-01-30 16:25:36.953 [debug]         fft32_asm_float_fma3 - type: fft_float, len: 32, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.953 [debug] Transform tree:
+2026-01-30 16:25:36.953 [debug]     mdct_inv_float_avx2 - type: mdct_float, len: 64, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+2026-01-30 16:25:36.953 [debug]         fft32_asm_float_fma3 - type: fft_float, len: 32, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+2026-01-30 16:25:36.954 [hls @ 0x5558f27d1900] [debug] All info found
+2026-01-30 16:25:36.955 [hls @ 0x5558f27d1900] [debug] After avformat_find_stream_info() pos: 374 bytes read:374 seeks:0 frames:37
+2026-01-30 16:25:36.955 [info] Input #0, hls, from 'http://10.177.0.10:17080/stream.m3u8':
+2026-01-30 16:25:36.955 [info]   Duration: N/A, start: 101.401333, bitrate: N/A
+2026-01-30 16:25:36.955 [info]   Program 0 
+2026-01-30 16:25:36.955 [info]     Metadata:
+2026-01-30 16:25:36.955 [info]       variant_bitrate : 0
+2026-01-30 16:25:36.955 [info]   Stream #0:0, 21, 1/90000: Video: h264 (High), 1 reference frame ([27][0][0][0] / 0x001B), yuv420p(left), 1920x1080 [SAR 1:1 DAR 16:9], 0/1, 60 fps, 60 tbr, 90k tbn, start 101.433333
+2026-01-30 16:25:36.955 [info]     Metadata:
+2026-01-30 16:25:36.955 [info]       variant_bitrate : 0
+2026-01-30 16:25:36.955 [info]   Stream #0:1, 16, 1/90000: Audio: aac (LC) ([15][0][0][0] / 0x000F), 48000 Hz, mono, fltp, start 101.401333
+2026-01-30 16:25:36.955 [info]     Metadata:
+2026-01-30 16:25:36.955 [info]       variant_bitrate : 0
+2026-01-30 16:25:36.955 [debug] Successfully opened the file.
+2026-01-30 16:25:36.955 [debug] Parsing a group of options: output url -.
+2026-01-30 16:25:36.955 [debug] Applying option map (set input stream mapping) with argument 0:v:0?.
+2026-01-30 16:25:36.955 [debug] Applying option map (set input stream mapping) with argument 0:a:0?.
+2026-01-30 16:25:36.955 [debug] Applying option c (select encoder/decoder ('copy' to copy stream without reencoding)) with argument copy.
+2026-01-30 16:25:36.955 [debug] Applying option f (force container format (auto-detected otherwise)) with argument null.
+2026-01-30 16:25:36.955 [debug] Successfully parsed a group of options.
+2026-01-30 16:25:36.955 [debug] Opening an output file: -.
+2026-01-30 16:25:36.955 [out#0/null @ 0x5558f28205c0] [verbose] Adding streams from explicit maps...
+2026-01-30 16:25:36.955 [vost#0:0/copy @ 0x5558f28576c0] [verbose] Created video stream from input stream 0:0
+2026-01-30 16:25:36.955 [aost#0:1/copy @ 0x5558f2857940] [verbose] Created audio stream from input stream 0:1
+2026-01-30 16:25:36.955 [debug] Successfully opened the file.
+2026-01-30 16:25:36.955 [info] Stream mapping:
+2026-01-30 16:25:36.955 [info]   Stream #0:0 -> #0:0 (copy)
+2026-01-30 16:25:36.955 [info]   Stream #0:1 -> #0:1 (copy)
+2026-01-30 16:25:36.955 [info] Output #0, null, to 'pipe:':
+2026-01-30 16:25:36.955 [info]   Metadata:
+2026-01-30 16:25:36.955 [info]     encoder         : Lavf62.3.100
+2026-01-30 16:25:36.955 [info]   Stream #0:0, 0, 1/90000: Video: h264 (High), 1 reference frame ([27][0][0][0] / 0x001B), yuv420p(left), 1920x1080 [SAR 1:1 DAR 16:9], 0/1, q=2-31, 60 fps, 60 tbr, 90k tbn
+2026-01-30 16:25:36.955 [info]     Metadata:
+2026-01-30 16:25:36.956 [info]       variant_bitrate : 0
+2026-01-30 16:25:36.956 [info]   Stream #0:1, 0, 1/90000: Audio: aac (LC) ([15][0][0][0] / 0x000F), 48000 Hz, mono, fltp
+2026-01-30 16:25:36.956 [info]     Metadata:
+2026-01-30 16:25:36.956 [info]       variant_bitrate : 0
+2026-01-30 16:25:36.956 [out#0/null @ 0x5558f28205c0] [verbose] Starting thread...
+2026-01-30 16:25:36.956 [in#0/hls @ 0x5558f2797f40] [verbose] Starting thread...
+2026-01-30 16:25:36.963 [hls @ 0x5558f27d1900] [verbose] HLS request for url 'http://10.177.0.10:17080/seg00052.ts', offset 0, playlist 0
+2026-01-30 16:25:36.963 [http @ 0x5558f27d8f80] [info] Opening 'http://10.177.0.10:17080/seg00052.ts' for reading
+2026-01-30 16:25:36.963 [http @ 0x5558f27d8ec0] [debug] request: GET /seg00052.ts HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:36.963 [NULL @ 0x5558f281cf40] [debug] Decoding VUI
+2026-01-30 16:25:36.974 [NULL @ 0x5558f281cf40] [debug] Decoding VUI
+2026-01-30 16:25:37.456 [info] frame=  358 fps=0.0 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=11.9x elapsed=0:00:00.50    2026-01-30 16:25:37.956 [info] frame=  358 fps=358 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=5.96x elapsed=0:00:01.00    2026-01-30 16:25:38.456 [info] frame=  358 fps=239 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=3.98x elapsed=0:00:01.50    2026-01-30 16:25:38.956 [info] frame=  358 fps=179 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=2.98x elapsed=0:00:02.00    2026-01-30 16:25:38.981 [hls @ 0x5558f27d1900] [debug] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:38.981 [tcp @ 0x7f6e640013c0] [debug] Original list of addresses:
+2026-01-30 16:25:38.981 [tcp @ 0x7f6e640013c0] [debug] Address 10.177.0.10 port 17080
+2026-01-30 16:25:38.981 [tcp @ 0x7f6e640013c0] [debug] Interleaved list of addresses:
+2026-01-30 16:25:38.981 [tcp @ 0x7f6e640013c0] [debug] Address 10.177.0.10 port 17080
+2026-01-30 16:25:38.981 [tcp @ 0x7f6e640013c0] [verbose] Starting connection attempt to 10.177.0.10 port 17080
+2026-01-30 16:25:38.982 [tcp @ 0x7f6e640013c0] [verbose] Successfully connected to 10.177.0.10 port 17080
+2026-01-30 16:25:38.982 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:38.982 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:39.456 [info] frame=  358 fps=143 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=2.39x elapsed=0:00:02.50    2026-01-30 16:25:39.956 [info] frame=  358 fps=119 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=1.99x elapsed=0:00:03.00    2026-01-30 16:25:39.983 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:39.983 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:39.983 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:40.456 [info] frame=  358 fps=102 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed= 1.7x elapsed=0:00:03.50    2026-01-30 16:25:40.956 [info] frame=  358 fps= 89 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=1.49x elapsed=0:00:04.00    2026-01-30 16:25:40.984 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:40.984 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:40.984 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:41.457 [info] frame=  358 fps= 80 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=1.33x elapsed=0:00:04.50    2026-01-30 16:25:41.957 [info] frame=  358 fps= 72 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=1.19x elapsed=0:00:05.00    2026-01-30 16:25:41.985 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:41.985 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:41.985 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:42.457 [info] frame=  358 fps= 65 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=1.08x elapsed=0:00:05.50    2026-01-30 16:25:42.957 [info] frame=  358 fps= 60 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.994x elapsed=0:00:06.00    2026-01-30 16:25:42.986 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:42.986 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:42.986 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:43.457 [info] frame=  358 fps= 55 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.918x elapsed=0:00:06.50    2026-01-30 16:25:43.957 [info] frame=  358 fps= 51 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.852x elapsed=0:00:07.00    2026-01-30 16:25:43.987 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:43.987 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:43.987 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:44.457 [info] frame=  358 fps= 48 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.795x elapsed=0:00:07.50    2026-01-30 16:25:44.957 [info] frame=  358 fps= 45 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.746x elapsed=0:00:08.00    2026-01-30 16:25:44.988 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:44.988 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:44.988 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:45.457 [info] frame=  358 fps= 42 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.702x elapsed=0:00:08.50    2026-01-30 16:25:45.957 [info] frame=  358 fps= 40 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.663x elapsed=0:00:09.00    2026-01-30 16:25:45.989 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:45.989 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:45.989 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:46.457 [info] frame=  358 fps= 38 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.628x elapsed=0:00:09.50    2026-01-30 16:25:46.957 [info] frame=  358 fps= 36 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.596x elapsed=0:00:10.00    2026-01-30 16:25:46.990 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:46.990 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:46.990 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:47.458 [info] frame=  358 fps= 34 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.568x elapsed=0:00:10.50    2026-01-30 16:25:47.958 [info] frame=  358 fps= 33 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.542x elapsed=0:00:11.00    2026-01-30 16:25:47.991 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:47.991 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:47.991 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:48.458 [info] frame=  358 fps= 31 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.519x elapsed=0:00:11.50    2026-01-30 16:25:48.958 [info] frame=  358 fps= 30 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.497x elapsed=0:00:12.00    2026-01-30 16:25:48.992 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:48.992 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:48.992 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:49.458 [info] frame=  358 fps= 29 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.477x elapsed=0:00:12.50    2026-01-30 16:25:49.958 [info] frame=  358 fps= 28 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.459x elapsed=0:00:13.00    2026-01-30 16:25:49.993 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:49.993 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:49.993 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:50.458 [info] frame=  358 fps= 27 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.442x elapsed=0:00:13.50    2026-01-30 16:25:50.958 [info] frame=  358 fps= 26 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.426x elapsed=0:00:14.00    2026-01-30 16:25:50.994 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:50.994 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:50.994 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:51.458 [info] frame=  358 fps= 25 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.411x elapsed=0:00:14.50    2026-01-30 16:25:51.958 [info] frame=  358 fps= 24 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.398x elapsed=0:00:15.00    2026-01-30 16:25:51.995 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:51.995 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:51.995 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:52.459 [info] frame=  358 fps= 23 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.385x elapsed=0:00:15.50    2026-01-30 16:25:52.959 [info] frame=  358 fps= 22 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.373x elapsed=0:00:16.00    2026-01-30 16:25:52.996 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:52.996 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:52.996 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:53.459 [info] frame=  358 fps= 22 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.361x elapsed=0:00:16.50    2026-01-30 16:25:53.959 [info] frame=  358 fps= 21 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.351x elapsed=0:00:17.00    2026-01-30 16:25:53.997 [http @ 0x7f6e64004a00] [info] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+2026-01-30 16:25:53.997 [http @ 0x7f6e64003080] [debug] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/client-debug
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+2026-01-30 16:25:53.997 [hls @ 0x5558f27d1900] [verbose] Skip ('#EXT-X-VERSION:3')
+2026-01-30 16:25:54.459 [info] frame=  358 fps= 20 q=-1.0 size=N/A time=00:00:05.96 bitrate=N/A speed=0.341x elapsed=0:00:17.50    

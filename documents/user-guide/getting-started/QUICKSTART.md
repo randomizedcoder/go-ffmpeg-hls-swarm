@@ -130,9 +130,13 @@ Metrics endpoint was: http://0.0.0.0:17091/metrics
 
 ## Using the Test Origin Server
 
-Instead of testing against external streams, you can run a local test origin:
+Instead of testing against external streams, you can run a local test origin. The test origin uses FFmpeg to generate a live HLS stream and Nginx to serve it.
 
-### Terminal 1: Start the test origin
+### Option 1: Local Runner (All Platforms)
+
+The simplest option, works on Linux and macOS:
+
+**Terminal 1: Start the test origin**
 
 ```bash
 make test-origin
@@ -142,12 +146,238 @@ This starts:
 - FFmpeg generating a live HLS stream
 - Nginx serving the stream on port 17080
 
-### Terminal 2: Run load test
+**Terminal 2: Run load test**
 
 ```bash
 ./bin/go-ffmpeg-hls-swarm -clients 50 -tui \
   http://localhost:17080/stream.m3u8
 ```
+
+### Option 2: Container (Docker/Podman)
+
+For isolated testing with containers:
+
+**Terminal 1: Build and run the origin container**
+
+```bash
+# Build the container image
+make container-load
+
+# Run the origin container in background
+make container-run-origin
+```
+
+Or manually with Docker/Podman:
+
+```bash
+# Build
+nix build .#test-origin-container
+docker load < ./result
+
+# Run (detached)
+docker run -d --name hls-origin -p 17080:17080 go-ffmpeg-hls-swarm-test-origin:latest
+```
+
+**Terminal 2: Run load test**
+
+```bash
+./bin/go-ffmpeg-hls-swarm -clients 50 -tui \
+  http://localhost:17080/stream.m3u8
+```
+
+**Cleanup:**
+
+```bash
+docker stop hls-origin && docker rm hls-origin
+```
+
+### Option 3: MicroVM (Linux + KVM)
+
+For production-like testing with full VM isolation and Prometheus exporters:
+
+**Prerequisites:**
+- Linux with KVM enabled
+- Verify with: `make microvm-check-kvm`
+
+**Start the MicroVM origin (background, recommended):**
+
+```bash
+make microvm-start
+```
+
+This builds and starts the VM in the background with health polling. Once ready, you'll see connection info.
+
+The MicroVM includes:
+- FFmpeg generating a live HLS stream
+- Nginx serving the stream on port 17080
+- node_exporter on port 9100 (forwarded to 17100)
+- nginx_exporter on port 9113 (forwarded to 17113)
+
+**Run load test:**
+
+```bash
+./bin/go-ffmpeg-hls-swarm -clients 50 -tui \
+  http://localhost:17080/stream.m3u8
+```
+
+**With origin metrics (recommended):**
+
+```bash
+./bin/go-ffmpeg-hls-swarm -clients 50 -tui \
+  -origin-metrics http://localhost:17100/metrics \
+  -nginx-metrics http://localhost:17113/metrics \
+  http://localhost:17080/stream.m3u8
+```
+
+**Stop the MicroVM:**
+
+```bash
+make microvm-stop
+```
+
+**Alternative: Interactive mode (foreground):**
+
+```bash
+make microvm-origin
+```
+
+> **Note:** Interactive mode runs QEMU in the foreground. To exit: press `Ctrl+A` then release, then press `X`. If the VM hangs, kill it from another terminal with: `pkill -f 'qemu.*hls-origin'`
+
+### Option 4: MicroVM with TAP Networking (High Performance)
+
+For maximum throughput (~10 Gbps) with direct network access. **Recommended for serious load testing.**
+
+**One-time network setup (requires sudo):**
+
+```bash
+make network-setup
+```
+
+This creates:
+- Bridge `hlsbr0` (10.177.0.1/24)
+- TAP device `hlstap0` with multiqueue (owned by your user)
+- nftables rules for NAT
+
+> **Important:** The network setup needs sudo, but it creates the TAP device owned by your regular user. Do NOT use sudo for the subsequent VM start commands.
+
+**Start MicroVM with TAP networking (NO sudo):**
+
+```bash
+# Do NOT use sudo here - your user owns the TAP device
+make microvm-start-tap
+```
+
+The script:
+1. Verifies TAP network is configured
+2. Builds the TAP-enabled VM
+3. Starts it in the background
+4. Polls health endpoint until ready
+5. Shows connection info when ready
+
+The VM gets its own IP address: `10.177.0.10`
+
+**Run load test:**
+
+```bash
+./bin/go-ffmpeg-hls-swarm -clients 100 -tui \
+  -origin-metrics-host 10.177.0.10 \
+  http://10.177.0.10:17080/stream.m3u8
+```
+
+**Stop the MicroVM:**
+
+```bash
+make microvm-stop
+```
+
+**Teardown networking (when done):**
+
+```bash
+make network-teardown
+```
+
+**Alternative: Interactive mode (foreground):**
+
+```bash
+make microvm-origin-tap
+```
+
+> **Note:** Interactive mode runs QEMU in the foreground. To exit: press `Ctrl+A` then release, then press `X`. If the VM hangs, kill it from another terminal with: `pkill -f 'qemu.*hls-origin'`
+
+### MicroVM Troubleshooting
+
+**VM hangs or won't exit:**
+
+```bash
+# Kill from another terminal
+pkill -f 'qemu.*hls-origin'
+
+# Or more forcefully
+pkill -9 -f 'qemu.*hls-origin'
+```
+
+**Ports in use:**
+
+```bash
+# Check what's using the ports
+lsof -i :17080
+lsof -i :17022
+
+# Free ports
+sudo fuser -k 17080/tcp 17022/tcp
+```
+
+**TAP networking not working:**
+
+```bash
+# Verify network setup
+make network-check
+
+# Reset and reconfigure
+make network-teardown
+make network-setup
+```
+
+**"Operation not permitted" on TAP device:**
+
+This happens if you used `sudo` to start the VM, or if the TAP was created with wrong ownership.
+
+```bash
+# Check TAP ownership (should show your username or UID)
+ip tuntap show
+# Should show: hlstap0: tap multi_queue user <your-uid>
+
+# If owned by root, recreate for your user
+sudo make network-teardown
+make network-setup
+
+# Clean up any root-owned temp files
+sudo rm -f /tmp/microvm-origin.log /tmp/microvm-origin.pid
+
+# Start WITHOUT sudo
+make microvm-start-tap
+```
+
+**Check VM logs:**
+
+```bash
+# View log file
+cat /tmp/microvm-origin.log
+
+# Tail recent output
+tail -50 /tmp/microvm-origin.log
+```
+
+### Deployment Comparison
+
+| Option | Platform | Isolation | Metrics | Performance | Setup |
+|--------|----------|-----------|---------|-------------|-------|
+| Local Runner | All | None | No | Good | Easiest |
+| Container | Linux | Container | No | Good | Easy |
+| MicroVM | Linux+KVM | Full VM | Yes | Good | Moderate |
+| MicroVM+TAP | Linux+KVM | Full VM | Yes | Best (~10Gbps) | Advanced |
+
+For quick testing, use the **Local Runner**. For production-like testing with origin metrics, use **MicroVM**.
 
 ---
 

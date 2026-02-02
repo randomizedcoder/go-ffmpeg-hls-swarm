@@ -76,8 +76,14 @@ type Config struct {
 	OriginMetricsInterval time.Duration `json:"origin_metrics_interval"` // Scrape interval
 	OriginMetricsWindow   time.Duration `json:"origin_metrics_window"`   // Rolling window duration for percentiles (default: 30s, max: 300s)
 	OriginMetricsHost     string        `json:"origin_metrics_host"`     // Hostname/IP for metrics (used with port flags)
-	OriginMetricsNodePort int           `json:"origin_metrics_node_port"` // Node exporter port (default: 9100)
-	OriginMetricsNginxPort int          `json:"origin_metrics_nginx_port"` // Nginx exporter port (default: 9113)
+	OriginMetricsNodePort  int `json:"origin_metrics_node_port"`  // Node exporter port (default: 9100)
+	OriginMetricsNginxPort int `json:"origin_metrics_nginx_port"` // Nginx exporter port (default: 9113)
+
+	// Segment Size Tracking (accurate byte counting from origin /files/json/)
+	SegmentSizesURL            string        `json:"segment_sizes_url"`             // URL for segment size JSON (e.g., http://origin:17080/files/json/)
+	SegmentSizesScrapeInterval time.Duration `json:"segment_sizes_scrape_interval"` // Scrape interval (default: 5s)
+	SegmentSizesScrapeJitter   time.Duration `json:"segment_sizes_scrape_jitter"`   // Jitter ± to prevent thundering herd (default: 500ms)
+	SegmentCacheWindow         int64         `json:"segment_cache_window"`          // Number of recent segments to keep in cache (default: 30)
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -133,13 +139,19 @@ func DefaultConfig() *Config {
 		PromClientMetrics: false, // Disabled by default (high cardinality)
 
 		// Origin Metrics
-		OriginMetricsURL:      "",                    // Disabled by default
-		NginxMetricsURL:       "",                    // Disabled by default
-		OriginMetricsInterval: 2 * time.Second,       // Scrape every 2 seconds
-		OriginMetricsWindow:   30 * time.Second,      // Rolling window for percentiles (default: 30s)
-		OriginMetricsHost:     "",                    // Empty by default
-		OriginMetricsNodePort: 9100,                  // Standard node_exporter port
-		OriginMetricsNginxPort: 9113,                 // Standard nginx_exporter port
+		OriginMetricsURL:       "",               // Disabled by default
+		NginxMetricsURL:        "",               // Disabled by default
+		OriginMetricsInterval:  2 * time.Second,  // Scrape every 2 seconds
+		OriginMetricsWindow:    30 * time.Second, // Rolling window for percentiles (default: 30s)
+		OriginMetricsHost:      "",               // Empty by default
+		OriginMetricsNodePort:  9100,             // Standard node_exporter port
+		OriginMetricsNginxPort: 9113,             // Standard nginx_exporter port
+
+		// Segment Size Tracking
+		SegmentSizesURL:            "",                      // Disabled by default (auto-derives from OriginMetricsHost)
+		SegmentSizesScrapeInterval: 5 * time.Second,         // Scrape every 5 seconds
+		SegmentSizesScrapeJitter:   500 * time.Millisecond,  // ±500ms jitter prevents thundering herd
+		SegmentCacheWindow:         30,                      // Keep last 30 segments in cache
 	}
 }
 
@@ -170,4 +182,27 @@ func (c *Config) ResolveOriginMetricsURLs() (nodeURL, nginxURL string) {
 	}
 
 	return nodeURL, nginxURL
+}
+
+// SegmentSizesEnabled returns true if segment size tracking is configured.
+// Segment size tracking enables accurate byte counting by fetching actual segment
+// sizes from the origin server's /files/json/ endpoint.
+func (c *Config) SegmentSizesEnabled() bool {
+	return c.ResolveSegmentSizesURL() != ""
+}
+
+// ResolveSegmentSizesURL returns the segment sizes URL.
+// If SegmentSizesURL is explicitly set, it's returned directly.
+// Otherwise, if OriginMetricsHost is set, the URL is auto-derived using port 17080.
+// Returns empty string if neither is configured.
+func (c *Config) ResolveSegmentSizesURL() string {
+	if c.SegmentSizesURL != "" {
+		return c.SegmentSizesURL
+	}
+	// Auto-derive from origin-metrics-host if set
+	// Uses port 17080 which is the standard HLS server port (see docs/PORTS.md)
+	if c.OriginMetricsHost != "" {
+		return fmt.Sprintf("http://%s:17080/files/json/", c.OriginMetricsHost)
+	}
+	return ""
 }

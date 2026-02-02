@@ -96,12 +96,13 @@ let
           # Network interface configuration
           # ═══════════════════════════════════════════════════════════════════
           interfaces = if useTap then [
-            # TAP networking with multiqueue (high performance)
+            # TAP networking with multiqueue + vhost-net (high performance)
             # Requires: make network-setup (creates hlsbr0 bridge + hlstap0 TAP with multi_queue)
             {
               type = "tap";
               id = net.tap.device;
               mac = net.tap.mac;
+              tap.vhost = true;  # Enable vhost-net for ~10 Gbps throughput
             }
           ] else [
             # User-mode networking (default, zero config)
@@ -178,6 +179,21 @@ let
         # Optimizations for minimal footprint
         documentation.enable = false;
 
+        # Debug tools for performance analysis
+        environment.systemPackages = with pkgs; [
+          btop       # Interactive process viewer
+          htop       # Alternative process viewer
+          below      # Facebook's system monitoring tool (cgroup-aware)
+          iotop      # I/O monitoring
+          iftop      # Network bandwidth monitoring
+          tcpdump    # Packet capture
+          strace     # System call tracing
+          lsof       # List open files
+          perf-tools # Linux perf tools wrapper
+          ethtool    # Network interface diagnostics
+          iproute2   # ip/ss commands for network debugging
+        ];
+
         # NSS configuration - disable nscd but keep NSS working
         # (nscd is not needed in a minimal VM)
         system.nssModules = lib.mkForce [];
@@ -215,6 +231,7 @@ in {
     echo "║ Nginx:    http://${net.staticIp}:9113/metrics                           ║"
     echo "║ Node:     http://${net.staticIp}:9100/metrics                           ║"
     echo "║ SSH:      ssh root@${net.staticIp}                                      ║"
+    echo "║ SSH:      ssh -o StrictHostKeyChecking=no root@${net.staticIp}                                      ║"
     '' else ''
     echo "║ Stream:   http://localhost:${toString config.server.port}/${config.hls.playlistName}                               ║"
     echo "║ Health:   http://localhost:${toString config.server.port}/health                                      ║"

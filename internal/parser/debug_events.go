@@ -2,6 +2,7 @@
 package parser
 
 import (
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,6 +12,12 @@ import (
 
 	"github.com/influxdata/tdigest"
 )
+
+// SegmentSizeLookup is the interface for looking up segment sizes.
+// Implemented by metrics.SegmentScraper.
+type SegmentSizeLookup interface {
+	GetSegmentSize(name string) (int64, bool)
+}
 
 // DebugEventType identifies debug log events from FFmpeg -loglevel debug.
 type DebugEventType int
@@ -126,6 +133,12 @@ var (
 	// [http @ 0x55...] header: Content-Length: 12345
 	// Tracks bytes downloaded from HTTP responses (critical for live streams where total_size=N/A)
 	reContentLength = regexp.MustCompile(`(?i)\[http @ 0x[0-9a-f]+\] (?:\[(?:trace|debug|verbose|info)\] )?header:.*Content-Length:\s*(\d+)`)
+
+	// [http @ 0x55...] request: GET /seg00001.ts HTTP/1.1
+	// Logged for EVERY HTTP request including keep-alive connections.
+	// This is critical for tracking segment requests after initial parsing.
+	// Captures the URL path (e.g., /seg00001.ts)
+	reHTTPRequestGET = regexp.MustCompile(`\[http @ 0x[0-9a-f]+\] (?:\[(?:debug|verbose|info)\] )?request: GET ([^\s]+) HTTP/`)
 )
 
 // timestampLayout is the format FFmpeg uses with -loglevel datetime
@@ -253,6 +266,18 @@ type DebugEventParser struct {
 	// Critical for live streams where progress total_size=N/A
 	bytesDownloaded atomic.Int64
 
+	// Segment size lookup (injected dependency for accurate byte tracking)
+	segmentSizeLookup SegmentSizeLookup
+
+	// Segment bytes tracking (from segment scraper, accurate sizes)
+	// This tracks bytes from COMPLETED segment downloads only
+	segmentBytesDownloaded atomic.Int64
+
+	// Throughput tracking (lock-free histogram for high performance)
+	// TDigest merging happens at aggregator level to reduce lock contention
+	throughputHist *ThroughputHistogram
+	maxThroughput  atomic.Uint64 // Atomic max (stored as bits via math.Float64bits)
+
 	// Parser stats
 	linesProcessed atomic.Int64
 }
@@ -260,7 +285,20 @@ type DebugEventParser struct {
 const (
 	// defaultRingSize is the number of samples to keep for percentile calculations.
 	defaultRingSize = 100
+
+	// minWallTimeForThroughput is the minimum wall time to avoid division by zero or Inf values.
+	// 100µs guards against clock resolution issues and tiny segments.
+	minWallTimeForThroughput = 100 * time.Microsecond
 )
+
+// extractSegmentName extracts the filename from a segment URL.
+// Example: "http://10.177.0.10:17080/seg00017.ts" -> "seg00017.ts"
+func extractSegmentName(url string) string {
+	if idx := strings.LastIndex(url, "/"); idx >= 0 {
+		return url[idx+1:]
+	}
+	return url
+}
 
 // NewDebugEventParser creates a new debug event parser.
 //
@@ -269,24 +307,37 @@ const (
 //   - targetDuration: Expected HLS segment duration (for jitter calculation)
 //   - callback: Called for each parsed event (can be nil)
 func NewDebugEventParser(clientID int, targetDuration time.Duration, callback DebugEventCallback) *DebugEventParser {
+	return NewDebugEventParserWithSizeLookup(clientID, targetDuration, callback, nil)
+}
+
+// NewDebugEventParserWithSizeLookup creates a new debug event parser with segment size lookup.
+//
+// Parameters:
+//   - clientID: Client identifier for logging
+//   - targetDuration: Expected HLS segment duration (for jitter calculation)
+//   - callback: Called for each parsed event (can be nil)
+//   - sizeLookup: Segment size lookup for accurate byte tracking (can be nil)
+func NewDebugEventParserWithSizeLookup(clientID int, targetDuration time.Duration, callback DebugEventCallback, sizeLookup SegmentSizeLookup) *DebugEventParser {
 	if targetDuration <= 0 {
 		targetDuration = 2 * time.Second // HLS default
 	}
 	return &DebugEventParser{
-		clientID:              clientID,
-		callback:              callback,
-		targetDuration:        targetDuration,
-		pendingSegments:       make(map[string]time.Time),
-		segmentWallTimes:      make([]time.Duration, 0, defaultRingSize),
-		pendingTCPConnect:     make(map[string]time.Time),
-		tcpConnectSamples:     make([]time.Duration, 0, defaultRingSize),
-		pendingHTTPOpen:       make(map[string]time.Time),
-		segmentWallTimeMin:    -1, // -1 = unset
-		tcpConnectMin:         -1, // -1 = unset
-		segmentWallTimeDigest: tdigest.NewWithCompression(100), // ~100 centroids, ~10KB
-		pendingManifests:      make(map[string]time.Time),
-		manifestWallTimeMin:   -1, // -1 = unset
+		clientID:               clientID,
+		callback:               callback,
+		targetDuration:         targetDuration,
+		pendingSegments:        make(map[string]time.Time),
+		segmentWallTimes:       make([]time.Duration, 0, defaultRingSize),
+		pendingTCPConnect:      make(map[string]time.Time),
+		tcpConnectSamples:      make([]time.Duration, 0, defaultRingSize),
+		pendingHTTPOpen:        make(map[string]time.Time),
+		segmentWallTimeMin:     -1, // -1 = unset
+		tcpConnectMin:          -1, // -1 = unset
+		segmentWallTimeDigest:  tdigest.NewWithCompression(100), // ~100 centroids, ~10KB
+		pendingManifests:       make(map[string]time.Time),
+		manifestWallTimeMin:    -1, // -1 = unset
 		manifestWallTimeDigest: tdigest.NewWithCompression(100), // ~100 centroids, ~10KB
+		segmentSizeLookup:      sizeLookup,
+		throughputHist:         NewThroughputHistogram(),
 	}
 }
 
@@ -336,9 +387,17 @@ func (p *DebugEventParser) ParseLine(line string) {
 		return
 	}
 
-	// 3. HTTP Open (for HTTP-level timing)
+	// 3. HTTP Open (for HTTP-level timing, mainly for new connections)
 	if m := reHTTPOpen.FindStringSubmatch(line); m != nil {
 		p.handleHTTPOpen(now, m[1])
+		return
+	}
+
+	// 3b. HTTP GET request (for ALL requests including keep-alive)
+	// This is critical for steady-state segment tracking after initial parsing.
+	// The "Opening" line only fires for new connections, but "request: GET" fires for every request.
+	if m := reHTTPRequestGET.FindStringSubmatch(line); m != nil {
+		p.handleHTTPRequestGET(now, m[1])
 		return
 	}
 
@@ -550,6 +609,23 @@ func (p *DebugEventParser) handleHLSRequest(now time.Time, url string) {
 			p.segmentWallTimeDigestMu.Lock()
 			p.segmentWallTimeDigest.Add(float64(wallTime.Nanoseconds()), 1)
 			p.segmentWallTimeDigestMu.Unlock()
+
+			// Track segment bytes from scraper (accurate sizes for completed downloads)
+			// Design decision: Count bytes only on "segment complete" to ensure
+			// bytes represent successful downloads only (see SEGMENT_SIZE_TRACKING_DESIGN.md)
+			if p.segmentSizeLookup != nil {
+				segmentName := extractSegmentName(oldestURL)
+				if size, ok := p.segmentSizeLookup.GetSegmentSize(segmentName); ok {
+					p.segmentBytesDownloaded.Add(size)
+
+					// Calculate throughput if we have sufficient wall time
+					// Guard against div-by-zero and Inf values
+					if wallTime >= minWallTimeForThroughput {
+						throughput := float64(size) / wallTime.Seconds()
+						p.recordThroughput(throughput)
+					}
+				}
+			}
 		}
 	}
 
@@ -702,8 +778,20 @@ func (p *DebugEventParser) handleSequenceChange(now time.Time, oldSeq, newSeq in
 
 // handleHTTPOpen is called when HTTP protocol opens a URL.
 // This is useful for measuring HTTP-level timing separate from HLS-level.
+//
+// IMPORTANT: FFmpeg only logs "HLS request for url" during initial playlist parsing.
+// After that, segment downloads are only visible at HTTP layer. So we ALSO track
+// segment completions here for .ts files to ensure throughput tracking works
+// throughout the test, not just during ramp-up.
 func (p *DebugEventParser) handleHTTPOpen(now time.Time, url string) {
 	p.httpOpenCount.Add(1)
+
+	// Track segment downloads from HTTP layer (backup for HLS layer)
+	// FFmpeg logs "HLS request for url" only during initial parsing, but continues
+	// logging HTTP opens for all subsequent segment fetches.
+	if strings.HasSuffix(url, ".ts") || strings.Contains(url, ".ts?") {
+		p.trackSegmentFromHTTP(now, url)
+	}
 
 	// Track HTTP open for potential timing (from HLS request to HTTP open)
 	p.mu.Lock()
@@ -717,6 +805,102 @@ func (p *DebugEventParser) handleHTTPOpen(now time.Time, url string) {
 			URL:       url,
 		})
 	}
+}
+
+// handleHTTPRequestGET is called for HTTP GET requests.
+// This fires for EVERY HTTP request including keep-alive connections.
+// Critical for tracking segment requests in steady state after initial parsing.
+func (p *DebugEventParser) handleHTTPRequestGET(now time.Time, path string) {
+	// Track segment downloads from HTTP layer
+	// The path is like /seg00001.ts or /stream.m3u8
+	if strings.HasSuffix(path, ".ts") || strings.Contains(path, ".ts?") {
+		p.trackSegmentFromHTTP(now, path)
+	}
+
+	// Note: We don't increment httpOpenCount here to avoid double-counting
+	// with handleHTTPOpen for the same request on new connections.
+}
+
+// trackSegmentFromHTTP tracks segment completions based on HTTP events.
+// This mirrors handleHLSRequest logic but triggers from HTTP layer.
+// Needed because FFmpeg only logs HLS-specific events during initial playlist parsing.
+func (p *DebugEventParser) trackSegmentFromHTTP(now time.Time, url string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Complete oldest pending segment (if any) before starting new one
+	if len(p.pendingSegments) > 0 {
+		var oldestURL string
+		var oldestTime time.Time
+		for u, t := range p.pendingSegments {
+			if oldestTime.IsZero() || t.Before(oldestTime) {
+				oldestURL = u
+				oldestTime = t
+			}
+		}
+		if oldestURL != "" {
+			// Compare segment NAMES instead of raw URLs to handle different URL formats:
+			// - HLS Request: http://10.177.0.10:17080/seg00001.ts (full URL)
+			// - HTTP Open:   http://10.177.0.10:17080/seg00001.ts (full URL)
+			// - HTTP GET:    /seg00001.ts (path only)
+			// All extract to "seg00001.ts" via extractSegmentName
+			oldestSegment := extractSegmentName(oldestURL)
+			newSegment := extractSegmentName(url)
+
+			// Skip if this is the SAME segment (double-fire: HLS then HTTP for same segment)
+			// But ALWAYS complete if it's a DIFFERENT segment (new segment arriving)
+			if oldestSegment == newSegment {
+				// Same segment - likely HLS/HTTP Open event just fired, skip to avoid double-counting
+				// Just update the timestamp and URL to the latest event
+				delete(p.pendingSegments, oldestURL)
+				p.pendingSegments[url] = now
+				return
+			}
+
+			// Different segment - complete the old one
+			wallTime := now.Sub(oldestTime)
+			delete(p.pendingSegments, oldestURL)
+
+			ns := int64(wallTime)
+			p.segmentCount.Add(1)
+			p.segmentWallTimeSum += ns
+
+			if p.segmentWallTimeMin < 0 || ns < p.segmentWallTimeMin {
+				p.segmentWallTimeMin = ns
+			}
+			if ns > p.segmentWallTimeMax {
+				p.segmentWallTimeMax = ns
+			}
+
+			// Ring buffer for wall times
+			if len(p.segmentWallTimes) < defaultRingSize {
+				p.segmentWallTimes = append(p.segmentWallTimes, wallTime)
+			} else {
+				p.segmentWallTimes[p.segmentWallTimeP0] = wallTime
+				p.segmentWallTimeP0 = (p.segmentWallTimeP0 + 1) % defaultRingSize
+			}
+
+			// Add to T-Digest for percentile calculation
+			p.segmentWallTimeDigestMu.Lock()
+			p.segmentWallTimeDigest.Add(float64(wallTime.Nanoseconds()), 1)
+			p.segmentWallTimeDigestMu.Unlock()
+
+			// Track segment bytes and throughput from scraper
+			if p.segmentSizeLookup != nil {
+				segmentName := extractSegmentName(oldestURL)
+				if size, ok := p.segmentSizeLookup.GetSegmentSize(segmentName); ok {
+					p.segmentBytesDownloaded.Add(size)
+					if wallTime >= minWallTimeForThroughput {
+						throughput := float64(size) / wallTime.Seconds()
+						p.recordThroughput(throughput)
+					}
+				}
+			}
+		}
+	}
+
+	// Start tracking new segment
+	p.pendingSegments[url] = now
 }
 
 // handleHTTPError is called when HTTP 4xx/5xx error occurs.
@@ -825,6 +1009,36 @@ func (p *DebugEventParser) recordTCPConnect(d time.Duration) {
 		p.tcpConnectSamples[p.tcpConnectP0] = d
 		p.tcpConnectP0 = (p.tcpConnectP0 + 1) % defaultRingSize
 	}
+}
+
+// recordThroughput adds a throughput sample to the histogram.
+// Uses lock-free atomic histogram for high-performance per-client tracking.
+// TDigest merging happens at the aggregator level every 500ms.
+func (p *DebugEventParser) recordThroughput(bytesPerSec float64) {
+	// Record to atomic histogram (lock-free, O(1))
+	if p.throughputHist != nil {
+		p.throughputHist.Record(bytesPerSec)
+	}
+
+	// Track max with CAS loop (lock-free)
+	// NOTE: We store float64 as uint64 bits for atomic operations
+	newBits := math.Float64bits(bytesPerSec)
+	for {
+		oldBits := p.maxThroughput.Load()
+		oldVal := math.Float64frombits(oldBits)
+		if bytesPerSec <= oldVal {
+			break // Current value is already >= new value
+		}
+		if p.maxThroughput.CompareAndSwap(oldBits, newBits) {
+			break // Successfully updated
+		}
+		// CAS failed, another goroutine updated - retry
+	}
+}
+
+// loadMaxThroughput returns the max throughput observed (bytes/sec).
+func (p *DebugEventParser) loadMaxThroughput() float64 {
+	return math.Float64frombits(p.maxThroughput.Load())
 }
 
 // CompleteSegment records segment wall time when segment download completes.
@@ -951,6 +1165,13 @@ type DebugStats struct {
 	// Bytes downloaded (from HTTP Content-Length headers)
 	// Critical for live streams where progress total_size=N/A
 	BytesDownloaded int64
+
+	// Segment bytes downloaded (from segment scraper, accurate sizes)
+	// Only counts bytes from completed segment downloads (not failed attempts)
+	SegmentBytesDownloaded int64
+
+	// Throughput tracking (bytes per second)
+	MaxThroughput float64 // Max throughput observed (bytes/sec)
 }
 
 // Stats returns aggregated debug parser statistics.
@@ -982,8 +1203,10 @@ func (p *DebugEventParser) Stats() DebugStats {
 		SegmentSkippedCount: p.segmentSkippedCount.Load(),
 		PlaylistFailedCount: p.playlistFailedCount.Load(),
 		SegmentsExpiredSum:  p.segmentsExpiredSum.Load(),
-		HTTPOpenCount:       p.httpOpenCount.Load(),
-		BytesDownloaded:     p.bytesDownloaded.Load(),
+		HTTPOpenCount:          p.httpOpenCount.Load(),
+		BytesDownloaded:        p.bytesDownloaded.Load(),
+		SegmentBytesDownloaded: p.segmentBytesDownloaded.Load(),
+		MaxThroughput:          p.loadMaxThroughput(),
 	}
 
 	// Segment wall time averages
@@ -1068,4 +1291,15 @@ func (p *DebugEventParser) GetManifestBandwidth() int64 {
 // ClientID returns the client ID for this parser.
 func (p *DebugEventParser) ClientID() int {
 	return p.clientID
+}
+
+// DrainThroughputHistogram drains and returns the throughput histogram buckets.
+// This resets the histogram counters atomically, ensuring each aggregation window
+// only contains samples since the last drain.
+// Returns nil if no histogram is configured.
+func (p *DebugEventParser) DrainThroughputHistogram() [64]uint64 {
+	if p.throughputHist == nil {
+		return [64]uint64{}
+	}
+	return p.throughputHist.Drain()
 }

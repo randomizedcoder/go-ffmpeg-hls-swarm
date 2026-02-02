@@ -198,7 +198,8 @@ make microvm-start-tap        # Run VM with direct network access
 curl http://10.177.0.10:17080/health     # HLS origin
 curl http://10.177.0.10:9100/metrics     # Node exporter (system metrics)
 curl http://10.177.0.10:9113/metrics     # Nginx exporter
-ssh root@10.177.0.10                      # SSH (empty password)
+ssh root@10.177.0.10                     # SSH (empty password)
+ssh -o StrictHostKeyChecking=no 10.177.0.10 # Or SSH
 ```
 
 **Reset and rebuild** (clean slate for testing):

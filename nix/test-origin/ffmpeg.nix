@@ -41,6 +41,7 @@ let
     width ? v.width,
     height ? v.height,
     bitrate ? v.bitrate,
+    minrate ? v.minrate or v.bitrate,  # Default to bitrate if not set
     maxrate ? v.maxrate,
     bufsize ? v.bufsize,
     audioBitrate ? v.audioBitrate,
@@ -74,6 +75,7 @@ let
     "-keyint_min" (toString gopSize)
     "-sc_threshold" "0"
     "-b:v" bitrate
+    "-minrate" minrate
     "-maxrate" maxrate
     "-bufsize" bufsize
     "-c:a" "aac"

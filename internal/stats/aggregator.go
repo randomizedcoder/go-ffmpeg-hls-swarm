@@ -141,10 +141,20 @@ type DebugStatsAggregate struct {
 	ClientsWithDebugStats int
 
 	// Instantaneous rates (per second) - calculated from last snapshot (Phase 7.4)
-	InstantSegmentsRate   float64 // Segments downloaded per second
-	InstantPlaylistsRate  float64 // Playlists refreshed per second
+	InstantSegmentsRate     float64 // Segments downloaded per second
+	InstantPlaylistsRate    float64 // Playlists refreshed per second
 	InstantHTTPRequestsRate float64 // HTTP requests per second
-	InstantTCPConnectsRate float64 // TCP connections per second
+	InstantTCPConnectsRate  float64 // TCP connections per second
+
+	// Segment Bytes & Throughput (from segment size tracking)
+	TotalSegmentBytes       int64   // Total bytes downloaded (from segment scraper)
+	SegmentThroughputMax    float64 // Max throughput observed (bytes/sec)
+	SegmentThroughputP25    float64 // 25th percentile throughput (bytes/sec)
+	SegmentThroughputP50    float64 // 50th percentile throughput (bytes/sec)
+	SegmentThroughputP75    float64 // 75th percentile throughput (bytes/sec)
+	SegmentThroughputP95    float64 // 95th percentile throughput (bytes/sec)
+	SegmentThroughputP99    float64 // 99th percentile throughput (bytes/sec)
+	SegmentThroughputBuckets [64]uint64 // Merged histogram buckets (for computing percentiles)
 }
 
 // StatsAggregator aggregates stats from multiple clients.

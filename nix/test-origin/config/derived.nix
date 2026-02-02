@@ -22,6 +22,12 @@ let
                  else 1;
   totalStorageMB = storagePerVariantMB * variantCount;
   playlistWindowSec = h.listSize * h.segmentDuration;
+
+  # Calculate optimal open_file_cache size for nginx
+  # Total files = (segments + manifest per variant) × variants + master playlist
+  totalHlsFiles = filesPerVariant * variantCount + 1;
+  openFileCacheMax = totalHlsFiles * 3;  # 3x safety margin for rotation
+
   recommendedTmpfsMB = let
     bitrateBytes = totalBitrateKbps / 8;  # KB/s
     windowBytes = bitrateBytes * playlistWindowSec;  # KB
@@ -41,4 +47,7 @@ in {
   variantCount = variantCount;
   totalStorageMB = totalStorageMB;
   recommendedTmpfsMB = recommendedTmpfsMB;
+
+  # Nginx open_file_cache sizing
+  inherit totalHlsFiles openFileCacheMax;
 }

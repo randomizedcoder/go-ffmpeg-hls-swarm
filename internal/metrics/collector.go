@@ -131,6 +131,44 @@ var (
 	)
 )
 
+// --- Panel 2b: Segment Throughput (from accurate segment sizes) ---
+var (
+	hlsSegmentBytesDownloadedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hls_swarm_segment_bytes_downloaded_total",
+			Help: "Total bytes downloaded from segments (based on actual segment sizes from origin)",
+		},
+	)
+
+	hlsSegmentThroughputMaxBytesPerSec = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "hls_swarm_segment_throughput_max_bytes_per_second",
+			Help: "Maximum observed segment download throughput (bytes/sec)",
+		},
+	)
+
+	hlsSegmentThroughputP50BytesPerSec = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "hls_swarm_segment_throughput_p50_bytes_per_second",
+			Help: "Segment download throughput 50th percentile (bytes/sec)",
+		},
+	)
+
+	hlsSegmentThroughputP95BytesPerSec = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "hls_swarm_segment_throughput_p95_bytes_per_second",
+			Help: "Segment download throughput 95th percentile (bytes/sec)",
+		},
+	)
+
+	hlsSegmentThroughputP99BytesPerSec = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "hls_swarm_segment_throughput_p99_bytes_per_second",
+			Help: "Segment download throughput 99th percentile (bytes/sec)",
+		},
+	)
+)
+
 // --- Panel 3: Latency Distribution ---
 var (
 	// Histogram for heatmaps and histogram_quantile()
@@ -420,6 +458,7 @@ type Collector struct {
 	prevInitReqs         int64
 	prevUnknownReqs      int64
 	prevBytes            int64
+	prevSegmentBytes     int64 // From segment scraper (accurate sizes)
 	prevTimeouts         int64
 	prevReconnections    int64
 	prevHTTPErrors       map[int]int64
@@ -489,6 +528,13 @@ func NewCollectorWithRegistry(cfg CollectorConfig, registry prometheus.Registere
 		hlsManifestRequestsPerSec,
 		hlsSegmentRequestsPerSec,
 		hlsThroughputBytesPerSec,
+
+		// Panel 2b: Segment Throughput (from accurate segment sizes)
+		hlsSegmentBytesDownloadedTotal,
+		hlsSegmentThroughputMaxBytesPerSec,
+		hlsSegmentThroughputP50BytesPerSec,
+		hlsSegmentThroughputP95BytesPerSec,
+		hlsSegmentThroughputP99BytesPerSec,
 
 		// Panel 3: Latency
 		hlsInferredLatencySeconds,
@@ -602,6 +648,15 @@ type AggregatedStatsUpdate struct {
 	UptimeP95 time.Duration
 	UptimeP99 time.Duration
 
+	// Segment-specific (from accurate segment sizes via segment scraper)
+	TotalSegmentBytes       int64
+	SegmentThroughputMax    float64
+	SegmentThroughputP25    float64
+	SegmentThroughputP50    float64
+	SegmentThroughputP75    float64
+	SegmentThroughputP95    float64
+	SegmentThroughputP99    float64
+
 	// Per-client (only if enabled)
 	PerClientStats []PerClientStatsUpdate
 }
@@ -679,6 +734,18 @@ func (c *Collector) RecordStats(stats *AggregatedStatsUpdate) {
 	hlsManifestRequestsPerSec.Set(stats.ManifestReqRate)
 	hlsSegmentRequestsPerSec.Set(stats.SegmentReqRate)
 	hlsThroughputBytesPerSec.Set(stats.ThroughputBytesPerSec)
+
+	// --- Panel 2b: Segment Throughput (from accurate segment sizes) ---
+	segmentBytesDelta := stats.TotalSegmentBytes - c.prevSegmentBytes
+	if segmentBytesDelta > 0 {
+		hlsSegmentBytesDownloadedTotal.Add(float64(segmentBytesDelta))
+	}
+	c.prevSegmentBytes = stats.TotalSegmentBytes
+
+	hlsSegmentThroughputMaxBytesPerSec.Set(stats.SegmentThroughputMax)
+	hlsSegmentThroughputP50BytesPerSec.Set(stats.SegmentThroughputP50)
+	hlsSegmentThroughputP95BytesPerSec.Set(stats.SegmentThroughputP95)
+	hlsSegmentThroughputP99BytesPerSec.Set(stats.SegmentThroughputP99)
 
 	// --- Panel 3: Latency ---
 	hlsLatencyP50Seconds.Set(stats.InferredLatencyP50.Seconds())

@@ -64,6 +64,9 @@ Orchestration Flags:
 		fmt.Fprintf(os.Stderr, "\nOrigin Metrics:\n")
 		printFlagCategory([]string{"origin-metrics", "nginx-metrics", "origin-metrics-interval", "origin-metrics-window"})
 
+		fmt.Fprintf(os.Stderr, "\nSegment Size Tracking:\n")
+		printFlagCategory([]string{"segment-sizes-url", "segment-sizes-interval", "segment-sizes-jitter", "segment-cache-window"})
+
 		fmt.Fprintf(os.Stderr, `
 Flag Convention:
   Single-dash flags (-clients, -resolve) are normal options.
@@ -163,6 +166,19 @@ Examples:
 	flag.IntVar(&cfg.OriginMetricsNginxPort, "origin-metrics-nginx-port", cfg.OriginMetricsNginxPort,
 		"Nginx exporter port (used with -origin-metrics-host). "+
 			"Default: 9113 (standard nginx_exporter port).")
+
+	// Segment Size Tracking
+	flag.StringVar(&cfg.SegmentSizesURL, "segment-sizes-url", cfg.SegmentSizesURL,
+		"URL for segment size JSON (e.g., http://origin:17080/files/json/). "+
+			"If not set, auto-derives from -origin-metrics-host. "+
+			"Enables accurate segment byte tracking and throughput calculation.")
+	flag.DurationVar(&cfg.SegmentSizesScrapeInterval, "segment-sizes-interval", cfg.SegmentSizesScrapeInterval,
+		"Interval for scraping segment sizes. Default: 5s.")
+	flag.DurationVar(&cfg.SegmentSizesScrapeJitter, "segment-sizes-jitter", cfg.SegmentSizesScrapeJitter,
+		"Jitter ± for scrape interval to prevent thundering herd. Default: 500ms.")
+	flag.Int64Var(&cfg.SegmentCacheWindow, "segment-cache-window", cfg.SegmentCacheWindow,
+		"Number of recent segments to keep in cache. "+
+			"Keeps exactly N segments [highest-N+1, highest]. Default: 30.")
 
 	// Parse
 	flag.Parse()

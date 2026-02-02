@@ -23,6 +23,7 @@ let
   c = config.cache;
   h = config.hls;
   log = config.logging;
+  d = config.derived;
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Build Cache-Control header values (dynamically from config)
@@ -131,9 +132,11 @@ in rec {
         # Free memory faster from dirty client exits
         reset_timedout_connection on;
 
-        # File descriptor caching (reduces stat() syscalls)
-        open_file_cache          max=10000 inactive=30s;
-        open_file_cache_valid    10s;
+        # File descriptor caching - see docs/NGINX_HLS_CACHING_DESIGN.md
+        # Dynamic sizing: max=${toString d.openFileCacheMax} = (${toString d.filesPerVariant} files/variant × ${toString d.variantCount} variants + 1 master) × 3
+        # Tiered strategy: aggressive for segments (10s), frequent for manifests (500ms per-location)
+        open_file_cache          max=${toString d.openFileCacheMax} inactive=30s;
+        open_file_cache_valid    10s;   # Default for segments (immutable)
         open_file_cache_min_uses 1;
         open_file_cache_errors   on;
 
@@ -185,6 +188,11 @@ in rec {
             # - tcp_nodelay for freshness over throughput
             # ═══════════════════════════════════════════════════════════
             location ~ \.m3u8$ {
+                # Override global open_file_cache_valid for manifests (1s vs 10s)
+                # Note: 500ms not supported by nginx - using 1s as fallback
+                open_file_cache_valid 1s;
+                # Small output buffer for immediate send (manifests are ~400 bytes)
+                output_buffers 1 4k;
                 ${manifestAccessLog};
                 tcp_nodelay    on;  # Immediate delivery for freshness
                 add_header Cache-Control "${manifestCacheControl}";
@@ -201,6 +209,8 @@ in rec {
             # - tcp_nopush for throughput (fill packets)
             # ═══════════════════════════════════════════════════════════
             location ~ \.ts$ {
+                # Larger output buffers for throughput (segments are ~1.3MB)
+                output_buffers 2 256k;
                 ${segmentAccessLog};
                 sendfile       on;
                 tcp_nopush     on;   # Fill packets for throughput

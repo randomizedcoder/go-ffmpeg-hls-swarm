@@ -17,14 +17,11 @@
     # - delete_segments: Remove old .ts files automatically
     # - omit_endlist: Live stream (no #EXT-X-ENDLIST)
     # - temp_file: Atomic writes (write to .tmp then rename)
-    # - strftime: Required for second_level_segment_index (enables strftime in segment filenames)
-    # - second_level_segment_index: Better segment indexing for ABR (requires strftime)
+    # Note: strftime and second_level_segment_index removed - not supported in FFmpeg 8.0
     flags = [
       "delete_segments"
       "omit_endlist"
       "temp_file"
-      "strftime"
-      "second_level_segment_index"
     ];
   };
 
@@ -41,16 +38,18 @@
     sampleRate = 48000;
   };
 
-  # Use smptebars - testsrc2 has issues with -re and duration=0 (produces 0 frames)
-  testPattern = "smptebars";
+  # Use testsrc2 for more complex video that's harder to compress
+  testPattern = "testsrc2";
 
   # Video settings (single bitrate)
+  # 1080p60 generates more data and is harder to compress
   video = {
-    width = 1280;
-    height = 720;
-    bitrate = "2000k";
-    maxrate = "2200k";
-    bufsize = "4000k";
+    width = 1920;
+    height = 1080;
+    bitrate = "5000k";
+    minrate = "5000k";   # Force minimum bitrate (prevents underrun on simple content)
+    maxrate = "5500k";
+    bufsize = "10000k";
     audioBitrate = "128k";
   };
 
@@ -77,12 +76,13 @@
   ];
 
   # Encoder settings
+  # 30fps is much more manageable for CPU - 60fps requires ~2-3 cores
   encoder = {
-    framerate = 30;
-    preset = "ultrafast";
-    tune = "zerolatency";
-    profile = "baseline";
-    level = "3.1";
+    framerate = 30;       # Changed from 60 - halves encoding load
+    preset = "veryfast";  # Better quality than ultrafast, still fast
+    tune = "film";        # Changed from zerolatency - allows proper rate control
+    profile = "high";     # Better compression efficiency
+    level = "4.1";        # 4.1 is sufficient for 1080p30 (4.2 was for 1080p60)
   };
 
   # ═══════════════════════════════════════════════════════════════════════════

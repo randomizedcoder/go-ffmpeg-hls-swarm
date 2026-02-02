@@ -249,7 +249,7 @@ func (m Model) renderLatencyStats() string {
 		return ""
 	}
 
-	var leftCol, rightCol []string
+	var leftCol, middleCol, rightCol []string
 
 	// === LEFT COLUMN: Manifest Latency ===
 	if m.debugStats.ManifestWallTimeP50 > 0 {
@@ -267,10 +267,10 @@ func (m Model) renderLatencyStats() string {
 		leftCol = append(leftCol, dimStyle.Render("  (no data)"))
 	}
 
-	// === RIGHT COLUMN: Segment Latency ===
+	// === MIDDLE COLUMN: Segment Latency ===
 	if m.debugStats.SegmentWallTimeP50 > 0 {
-		rightCol = append(rightCol, sectionHeaderStyle.Render("Segment Latency *"))
-		rightCol = append(rightCol,
+		middleCol = append(middleCol, sectionHeaderStyle.Render("Segment Latency *"))
+		middleCol = append(middleCol,
 			renderLatencyRow("P25", m.debugStats.SegmentWallTimeP25),
 			renderLatencyRow("P50 (median)", m.debugStats.SegmentWallTimeP50),
 			renderLatencyRow("P75", m.debugStats.SegmentWallTimeP75),
@@ -279,18 +279,33 @@ func (m Model) renderLatencyStats() string {
 			renderLatencyRow("Max", time.Duration(m.debugStats.SegmentWallTimeMax*float64(time.Millisecond))),
 		)
 	} else {
-		rightCol = append(rightCol, sectionHeaderStyle.Render("Segment Latency *"))
+		middleCol = append(middleCol, sectionHeaderStyle.Render("Segment Latency *"))
+		middleCol = append(middleCol, dimStyle.Render("  (no data)"))
+	}
+
+	// === RIGHT COLUMN: Segment Throughput ===
+	if m.debugStats.SegmentThroughputP50 > 0 {
+		rightCol = append(rightCol, sectionHeaderStyle.Render("Segment Throughput *"))
+		rightCol = append(rightCol,
+			renderThroughputRow("P25", m.debugStats.SegmentThroughputP25),
+			renderThroughputRow("P50 (median)", m.debugStats.SegmentThroughputP50),
+			renderThroughputRow("P75", m.debugStats.SegmentThroughputP75),
+			renderThroughputRow("P95", m.debugStats.SegmentThroughputP95),
+			renderThroughputRow("P99", m.debugStats.SegmentThroughputP99),
+			renderThroughputRow("Max", m.debugStats.SegmentThroughputMax),
+		)
+	} else {
+		rightCol = append(rightCol, sectionHeaderStyle.Render("Segment Throughput *"))
 		rightCol = append(rightCol, dimStyle.Render("  (no data)"))
 	}
 
-	// Render two columns side-by-side
-	// Available width: m.width - 2 (borders) - 2 (padding) = m.width - 4
-	twoColContent := renderTwoColumns(leftCol, rightCol, m.width-4)
+	// Render three columns side-by-side
+	threeColContent := renderThreeColumns(leftCol, middleCol, rightCol, m.width-4)
 
-	// Note about accurate timestamps
-	note := dimStyle.Render("* Using accurate FFmpeg timestamps")
+	// Note about accurate timestamps and segment sizes
+	note := dimStyle.Render("* Using accurate FFmpeg timestamps and segment sizes from origin")
 
-	content := lipgloss.JoinVertical(lipgloss.Left, twoColContent, note)
+	content := lipgloss.JoinVertical(lipgloss.Left, threeColContent, note)
 
 	return boxStyle.Width(m.width - 2).Render(content)
 }
@@ -306,6 +321,29 @@ func renderLatencyRow(label string, d time.Duration) string {
 		labelStyle.Render(label+":"),
 		style.Render(value),
 	)
+}
+
+// renderThroughputRow renders a throughput row (bytes/sec formatted as MB/s)
+func renderThroughputRow(label string, bytesPerSec float64) string {
+	value := formatBytesRate(bytesPerSec)
+	return lipgloss.JoinHorizontal(lipgloss.Left,
+		labelStyle.Render(label+":"),
+		valueStyle.Render(value),
+	)
+}
+
+// formatBytesRate formats bytes/sec as human-readable rate
+func formatBytesRate(bytesPerSec float64) string {
+	if bytesPerSec >= 1_000_000_000 {
+		return fmt.Sprintf("%.1f GB/s", bytesPerSec/1_000_000_000)
+	}
+	if bytesPerSec >= 1_000_000 {
+		return fmt.Sprintf("%.1f MB/s", bytesPerSec/1_000_000)
+	}
+	if bytesPerSec >= 1_000 {
+		return fmt.Sprintf("%.1f KB/s", bytesPerSec/1_000)
+	}
+	return fmt.Sprintf("%.0f B/s", bytesPerSec)
 }
 
 // =============================================================================
@@ -1208,6 +1246,34 @@ func renderTwoColumns(left, right []string, totalWidth int) string {
 	separator := mutedStyle.Render(" │ ")
 	return lipgloss.JoinHorizontal(lipgloss.Top,
 		leftStyle.Render(leftContent),
+		separator,
+		rightStyle.Render(rightContent),
+	)
+}
+
+// renderThreeColumns renders three columns side-by-side with separators.
+// Used for latency + throughput display: Manifest Latency | Segment Latency | Segment Throughput
+func renderThreeColumns(left, middle, right []string, totalWidth int) string {
+	// Narrower columns for 3-column layout
+	const (
+		colWidth       = 30
+		separatorWidth = 3 // " │ "
+	)
+
+	leftContent := lipgloss.JoinVertical(lipgloss.Left, left...)
+	middleContent := lipgloss.JoinVertical(lipgloss.Left, middle...)
+	rightContent := lipgloss.JoinVertical(lipgloss.Left, right...)
+
+	leftStyle := lipgloss.NewStyle().Width(colWidth)
+	middleStyle := lipgloss.NewStyle().Width(colWidth)
+	rightStyle := lipgloss.NewStyle().Width(colWidth)
+
+	separator := mutedStyle.Render(" │ ")
+
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		leftStyle.Render(leftContent),
+		separator,
+		middleStyle.Render(middleContent),
 		separator,
 		rightStyle.Render(rightContent),
 	)
