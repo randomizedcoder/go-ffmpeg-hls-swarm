@@ -1,0 +1,116 @@
+# Comprehensive FFmpeg Debug Output Test Fixture
+# This file contains representative debug log lines for parser testing.
+# Patterns are extracted from real FFmpeg -loglevel debug output.
+
+# === Initial Connection ===
+[AVFormatContext @ 0x558f5f5da200] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+[http @ 0x558f5f5da980] Setting default whitelist 'http,https,tls,rtp,tcp,udp,crypto,httpproxy,data'
+[tcp @ 0x558f5f5ddbc0] Original list of addresses:
+[tcp @ 0x558f5f5ddbc0] Address 10.177.0.10 port 17080
+[tcp @ 0x558f5f5ddbc0] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5ddbc0] Successfully connected to 10.177.0.10 port 17080
+[hls @ 0x558f5f5da200] Format hls probed with size=2048 and score=100
+[hls @ 0x558f5f5da200] Skip ('#EXT-X-VERSION:3')
+
+# === First Segment Request ===
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00001.ts', offset 0, playlist 0
+[hls @ 0x558f5f5da200] Opening 'http://10.177.0.10:17080/seg00001.ts' for reading
+[tcp @ 0x558f5f5e43c0] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e43c0] Successfully connected to 10.177.0.10 port 17080
+[http @ 0x558f5f5e1640] request: GET /seg00001.ts HTTP/1.1
+
+# === Second Segment (keep-alive, no new TCP) ===
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00002.ts', offset 0, playlist 0
+[http @ 0x558f5f5e1700] Opening 'http://10.177.0.10:17080/seg00002.ts' for reading
+[http @ 0x558f5f5e1640] request: GET /seg00002.ts HTTP/1.1
+
+# === Third Segment (new connection needed) ===
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00003.ts', offset 0, playlist 0
+[hls @ 0x558f5f5da200] Opening 'http://10.177.0.10:17080/seg00003.ts' for reading
+[tcp @ 0x558f5f5e4a40] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e4a40] Successfully connected to 10.177.0.10 port 17080
+
+# === Manifest Refresh ===
+[hls @ 0x558f5f5da200] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+[tcp @ 0x7f6fd4001880] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x7f6fd4001880] Successfully connected to 10.177.0.10 port 17080
+[http @ 0x7f6fd4001e80] request: GET /stream.m3u8 HTTP/1.1
+[hls @ 0x558f5f5da200] Skip ('#EXT-X-VERSION:3')
+
+# === Media Sequence Change (normal increment) ===
+[hls @ 0x558f5f5da200] Media sequence change (100 -> 101) reflected in first_timestamp
+
+# === More Segments ===
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00004.ts', offset 0, playlist 0
+[http @ 0x558f5f5e1640] request: GET /seg00004.ts HTTP/1.1
+
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00005.ts', offset 0, playlist 0
+[http @ 0x558f5f5e1640] request: GET /seg00005.ts HTTP/1.1
+
+# === Second Manifest Refresh ===
+[hls @ 0x558f5f5da200] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+[tcp @ 0x7f6fd4002880] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x7f6fd4002880] Successfully connected to 10.177.0.10 port 17080
+
+# === Media Sequence Change (normal) ===
+[hls @ 0x558f5f5da200] Media sequence change (101 -> 102) reflected in first_timestamp
+
+# === More Segments ===
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00006.ts', offset 0, playlist 0
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00007.ts', offset 0, playlist 0
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00008.ts', offset 0, playlist 0
+
+# === Third Manifest Refresh ===
+[hls @ 0x558f5f5da200] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+[tcp @ 0x7f6fd4003880] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x7f6fd4003880] Successfully connected to 10.177.0.10 port 17080
+
+# === Media Sequence Skip (discontinuity - segments missed) ===
+[hls @ 0x558f5f5da200] Media sequence change (102 -> 105) reflected in first_timestamp
+
+# === TCP Connection Failure Scenarios ===
+[tcp @ 0x558f5f5e5000] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e5000] Connection refused
+[tcp @ 0x558f5f5e5100] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e5100] Connection timed out
+[tcp @ 0x558f5f5e5200] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e5200] Failed to connect to 10.177.0.10 port 17080
+
+# === Recovery After Failures ===
+[tcp @ 0x558f5f5e5300] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e5300] Successfully connected to 10.177.0.10 port 17080
+
+# === More Segments After Recovery ===
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00009.ts', offset 0, playlist 0
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg00010.ts', offset 0, playlist 0
+
+# === Manifest with BANDWIDTH (variant stream) ===
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720
+variant_720p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=854x480
+variant_480p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360
+variant_360p.m3u8
+
+# === Progress Output Lines (should be skipped by fast path) ===
+frame=17878 fps=178 q=-1.0 size=N/A time=00:00:05.93 bitrate=N/A speed=5.93x
+fps=177.99
+stream_0_0_q=-1.0
+bitrate=N/A
+total_size=N/A
+out_time_us=5933333
+out_time=00:00:05.933333
+speed=5.93x
+progress=continue
+
+# === Codec Info (should be skipped) ===
+[mpegts @ 0x558f5f5e0980] stream=0 stream_type=1b pid=100 prog_reg_desc=
+[mpegts @ 0x558f5f5e0980] stream=1 stream_type=f pid=101 prog_reg_desc=
+[h264 @ 0x558f5f626b80] nal_unit_type: 9(AUD), nal_ref_idc: 0
+[h264 @ 0x558f5f626b80] nal_unit_type: 7(SPS), nal_ref_idc: 3
+[h264 @ 0x558f5f626b80] Format yuv420p chosen by get_format().
+
+# === Final Stats (should be skipped) ===
+[out#0/null @ 0x558f5f628dc0] Output file #0 (pipe:):
+[out#0/null @ 0x558f5f628dc0]   Output stream #0:0 (video): 480 packets muxed (63312 bytes);
+[AVIOContext @ 0x558f5f5d7980] Statistics: 258688 bytes read, 0 seeks

@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  test-origin-enhanced:
+    image: go-ffmpeg-hls-swarm-test-origin-enhanced:latest
+    build:
+      context: .
+      # Note: Build with: nix build .#test-origin-container-enhanced
+      # Then: docker load < ./result
+    ports:
+      - "8080:17080"  # HLS origin server (config.server.port)
+      - "9100:9100"   # Metrics (node exporter)
+      - "9113:9113"   # Nginx exporter
+    cap_add:
+      - SYS_ADMIN
+    tmpfs:
+      - /tmp
+      - /run
+      - /run/lock
+    environment:
+      - PROFILE=default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:17080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3

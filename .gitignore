@@ -15,6 +15,7 @@ result-*
 
 # Binary (at repo root only)
 /go-ffmpeg-hls-swarm
+bin/go-ffmpeg-hls-swarm
 
 # IDE
 .vscode/

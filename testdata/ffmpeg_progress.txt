@@ -1,0 +1,85 @@
+# FFmpeg Progress Output Test Fixture
+#
+# Tested with:
+#   ffmpeg version 8.0 Copyright (c) 2000-2025 the FFmpeg developers
+#   built with gcc 15.2.0 (GCC)
+#   libavutil      60.  8.100
+#   libavcodec     62. 11.100
+#   libavformat    62.  3.100
+#
+# Generated via: ffmpeg -progress pipe:1 -stats_period 1 -i <stream> -f null -
+#
+# If parsing breaks after FFmpeg upgrade, compare output format changes.
+#
+frame=0
+fps=0.00
+stream_0_0_q=-1.0
+bitrate=N/A
+total_size=0
+out_time_us=0
+out_time_ms=0
+out_time=00:00:00.000000
+dup_frames=0
+drop_frames=0
+speed=N/A
+progress=continue
+frame=30
+fps=30.00
+stream_0_0_q=-1.0
+bitrate=512.0kbits/s
+total_size=51324
+out_time_us=2000000
+out_time_ms=2000
+out_time=00:00:02.000000
+dup_frames=0
+drop_frames=0
+speed=1.00x
+progress=continue
+frame=60
+fps=30.00
+stream_0_0_q=-1.0
+bitrate=500.5kbits/s
+total_size=102648
+out_time_us=4000000
+out_time_ms=4000
+out_time=00:00:04.000000
+dup_frames=0
+drop_frames=0
+speed=1.01x
+progress=continue
+frame=90
+fps=29.97
+stream_0_0_q=-1.0
+bitrate=498.2kbits/s
+total_size=153972
+out_time_us=6000000
+out_time_ms=6000
+out_time=00:00:06.000000
+dup_frames=0
+drop_frames=0
+speed=0.85x
+progress=continue
+frame=120
+fps=30.00
+stream_0_0_q=-1.0
+bitrate=502.1kbits/s
+total_size=205296
+out_time_us=8000000
+out_time_ms=8000
+out_time=00:00:08.000000
+dup_frames=0
+drop_frames=0
+speed=1.02x
+progress=continue
+frame=150
+fps=30.00
+stream_0_0_q=-1.0
+bitrate=501.0kbits/s
+total_size=256620
+out_time_us=10000000
+out_time_ms=10000
+out_time=00:00:10.000000
+dup_frames=0
+drop_frames=0
+speed=1.00x
+progress=end

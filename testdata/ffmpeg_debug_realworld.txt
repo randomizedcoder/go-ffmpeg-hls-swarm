@@ -1,0 +1,201 @@
+Splitting the commandline.
+Reading option '-hide_banner' ... matched as option 'hide_banner' (do not show program banner) with argument '1'.
+Reading option '-nostdin' ... matched as option 'stdin' (enable or disable interaction on standard input) with argument 0.
+Reading option '-loglevel' ... matched as option 'loglevel' (set logging level) with argument 'debug'.
+Reading option '-reconnect' ... matched as AVOption 'reconnect' with argument '1'.
+Reading option '-reconnect_streamed' ... matched as AVOption 'reconnect_streamed' with argument '1'.
+Reading option '-reconnect_on_network_error' ... matched as AVOption 'reconnect_on_network_error' with argument '1'.
+Reading option '-rw_timeout' ... matched as AVOption 'rw_timeout' with argument '15000000'.
+Reading option '-user_agent' ... matched as AVOption 'user_agent' with argument 'go-ffmpeg-hls-swarm/1.0/testdata-collector'.
+Reading option '-i' ... matched as input url with argument 'http://10.177.0.10:17080/stream.m3u8'.
+Reading option '-map' ... matched as option 'map' (set input stream mapping) with argument '0'.
+Reading option '-c' ... matched as option 'c' (select encoder/decoder ('copy' to copy stream without reencoding)) with argument 'copy'.
+Reading option '-f' ... matched as option 'f' (force container format (auto-detected otherwise)) with argument 'null'.
+Reading option '-' ... matched as output url.
+Finished splitting the commandline.
+Parsing a group of options: global .
+Applying option hide_banner (do not show program banner) with argument 1.
+Applying option nostdin (enable or disable interaction on standard input) with argument 0.
+Applying option loglevel (set logging level) with argument debug.
+Successfully parsed a group of options.
+Parsing a group of options: input url http://10.177.0.10:17080/stream.m3u8.
+Successfully parsed a group of options.
+Opening an input file: http://10.177.0.10:17080/stream.m3u8.
+[AVFormatContext @ 0x558f5f5da200] Opening 'http://10.177.0.10:17080/stream.m3u8' for reading
+[http @ 0x558f5f5da980] Setting default whitelist 'http,https,tls,rtp,tcp,udp,crypto,httpproxy,data'
+[tcp @ 0x558f5f5ddbc0] Original list of addresses:
+[tcp @ 0x558f5f5ddbc0] Address 10.177.0.10 port 17080
+[tcp @ 0x558f5f5ddbc0] Interleaved list of addresses:
+[tcp @ 0x558f5f5ddbc0] Address 10.177.0.10 port 17080
+[tcp @ 0x558f5f5ddbc0] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5ddbc0] Successfully connected to 10.177.0.10 port 17080
+[http @ 0x558f5f5da980] request: GET /stream.m3u8 HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/testdata-collector
+Accept: */*
+Range: bytes=0-
+Connection: close
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+[hls @ 0x558f5f5da200] Format hls probed with size=2048 and score=100
+[hls @ 0x558f5f5da200] Skip ('#EXT-X-VERSION:3')
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg08233.ts', offset 0, playlist 0
+[hls @ 0x558f5f5da200] Opening 'http://10.177.0.10:17080/seg08233.ts' for reading
+[tcp @ 0x558f5f5e43c0] Original list of addresses:
+[tcp @ 0x558f5f5e43c0] Address 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e43c0] Interleaved list of addresses:
+[tcp @ 0x558f5f5e43c0] Address 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e43c0] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e43c0] Successfully connected to 10.177.0.10 port 17080
+[http @ 0x558f5f5e1640] request: GET /seg08233.ts HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/testdata-collector
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg08234.ts', offset 0, playlist 0
+[hls @ 0x558f5f5da200] Opening 'http://10.177.0.10:17080/seg08234.ts' for reading
+[tcp @ 0x558f5f5e4a40] Original list of addresses:
+[tcp @ 0x558f5f5e4a40] Address 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e4a40] Interleaved list of addresses:
+[tcp @ 0x558f5f5e4a40] Address 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e4a40] Starting connection attempt to 10.177.0.10 port 17080
+[tcp @ 0x558f5f5e4a40] Successfully connected to 10.177.0.10 port 17080
+[http @ 0x558f5f5e4700] request: GET /seg08234.ts HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/testdata-collector
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+
+Format mpegts probed with size=2048 and score=50
+[mpegts @ 0x558f5f5e0980] stream=0 stream_type=1b pid=100 prog_reg_desc=
+[mpegts @ 0x558f5f5e0980] stream=1 stream_type=f pid=101 prog_reg_desc=
+[hls @ 0x558f5f5da200] Before avformat_find_stream_info() pos: 376 bytes read:376 seeks:0 nb_streams:2
+Transform tree:
+    mdct_pfa_3xM_inv_float_c - type: mdct_float, len: 96, factors[2]: [3, any], flags: [unaligned, out_of_place, inv_only]
+        fft16_ns_float_fma3 - type: fft_float, len: 16, factor: 2, flags: [aligned, inplace, out_of_place, preshuf]
+Transform tree:
+    mdct_inv_float_avx2 - type: mdct_float, len: 120, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+        fft_pfa_15xM_asm_float_avx2 - type: fft_float, len: 60, factors[2]: [15, 2], flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+            fft4_fwd_asm_float_sse2 - type: fft_float, len: 4, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+Transform tree:
+    mdct_inv_float_avx2 - type: mdct_float, len: 128, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+        fft_sr_asm_float_fma3 - type: fft_float, len: 64, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+Transform tree:
+    mdct_inv_float_avx2 - type: mdct_float, len: 480, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+        fft_pfa_15xM_asm_float_avx2 - type: fft_float, len: 240, factors[2]: [15, 2], flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+            fft16_asm_float_fma3 - type: fft_float, len: 16, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+Transform tree:
+    mdct_inv_float_avx2 - type: mdct_float, len: 512, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+        fft_sr_asm_float_fma3 - type: fft_float, len: 256, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+Transform tree:
+    mdct_pfa_3xM_inv_float_c - type: mdct_float, len: 768, factors[2]: [3, any], flags: [unaligned, out_of_place, inv_only]
+        fft_sr_ns_float_fma3 - type: fft_float, len: 128, factor: 2, flags: [aligned, inplace, out_of_place, preshuf]
+Transform tree:
+    mdct_inv_float_avx2 - type: mdct_float, len: 960, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+        fft_pfa_15xM_asm_float_avx2 - type: fft_float, len: 480, factors[2]: [15, 2], flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+            fft32_asm_float_fma3 - type: fft_float, len: 32, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+Transform tree:
+    mdct_inv_float_avx2 - type: mdct_float, len: 1024, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+        fft_sr_asm_float_fma3 - type: fft_float, len: 512, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+Transform tree:
+    mdct_fwd_float_c - type: mdct_float, len: 1024, factors[2]: [2, any], flags: [unaligned, out_of_place, fwd_only]
+        fft_sr_ns_float_fma3 - type: fft_float, len: 512, factor: 2, flags: [aligned, inplace, out_of_place, preshuf]
+[mpegts @ 0x558f5f5e0980] All programs have pmt, headers found
+[NULL @ 0x558f5f625740] Decoding VUI
+[extract_extradata @ 0x558f5f6a5c80] nal_unit_type: 9(AUD), nal_ref_idc: 0
+[extract_extradata @ 0x558f5f6a5c80] nal_unit_type: 7(SPS), nal_ref_idc: 3
+[extract_extradata @ 0x558f5f6a5c80] nal_unit_type: 8(PPS), nal_ref_idc: 3
+[extract_extradata @ 0x558f5f6a5c80] nal_unit_type: 5(IDR), nal_ref_idc: 3
+    Last message repeated 3 times
+[h264 @ 0x558f5f626b80] nal_unit_type: 9(AUD), nal_ref_idc: 0
+[h264 @ 0x558f5f626b80] nal_unit_type: 7(SPS), nal_ref_idc: 3
+[h264 @ 0x558f5f626b80] nal_unit_type: 8(PPS), nal_ref_idc: 3
+[h264 @ 0x558f5f626b80] nal_unit_type: 5(IDR), nal_ref_idc: 3
+    Last message repeated 3 times
+[h264 @ 0x558f5f626b80] Decoding VUI
+[h264 @ 0x558f5f626b80] Format yuv420p chosen by get_format().
+[h264 @ 0x558f5f626b80] Reinit context to 1280x720, pix_fmt: yuv420p
+[h264 @ 0x558f5f626b80] nal_unit_type: 9(AUD), nal_ref_idc: 0
+[h264 @ 0x558f5f626b80] nal_unit_type: 1(Coded slice of a non-IDR picture), nal_ref_idc: 2
+    Last message repeated 3 times
+[h264 @ 0x558f5f626b80] nal_unit_type: 9(AUD), nal_ref_idc: 0
+[h264 @ 0x558f5f626b80] nal_unit_type: 1(Coded slice of a non-IDR picture), nal_ref_idc: 2
+    Last message repeated 3 times
+[h264 @ 0x558f5f626b80] nal_unit_type: 9(AUD), nal_ref_idc: 0
+[h264 @ 0x558f5f626b80] nal_unit_type: 1(Coded slice of a non-IDR picture), nal_ref_idc: 2
+    Last message repeated 3 times
+[mpegts @ 0x558f5f5e0980] probing stream 1 pp:2500
+[mpegts @ 0x558f5f5e0980] Probe with size=2787, packets=1 detected aac with score=51
+[mpegts @ 0x558f5f5e0980] probed stream 1
+Transform tree:
+    mdct_inv_float_avx2 - type: mdct_float, len: 64, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+        fft32_asm_float_fma3 - type: fft_float, len: 32, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+Transform tree:
+    mdct_inv_float_avx2 - type: mdct_float, len: 64, factors[2]: [2, any], flags: [aligned, out_of_place, inv_only]
+        fft32_asm_float_fma3 - type: fft_float, len: 32, factor: 2, flags: [aligned, inplace, out_of_place, preshuf, asm_call]
+[h264 @ 0x558f5f626b80] nal_unit_type: 9(AUD), nal_ref_idc: 0
+[h264 @ 0x558f5f626b80] nal_unit_type: 1(Coded slice of a non-IDR picture), nal_ref_idc: 2
+    Last message repeated 3 times
+[h264 @ 0x558f5f626b80] nal_unit_type: 9(AUD), nal_ref_idc: 0
+[h264 @ 0x558f5f626b80] nal_unit_type: 1(Coded slice of a non-IDR picture), nal_ref_idc: 2
+    Last message repeated 3 times
+[h264 @ 0x558f5f626b80] nal_unit_type: 9(AUD), nal_ref_idc: 0
+[h264 @ 0x558f5f626b80] nal_unit_type: 1(Coded slice of a non-IDR picture), nal_ref_idc: 2
+    Last message repeated 3 times
+[hls @ 0x558f5f5da200] All info found
+[hls @ 0x558f5f5da200] After avformat_find_stream_info() pos: 376 bytes read:376 seeks:0 frames:53
+Input #0, hls, from 'http://10.177.0.10:17080/stream.m3u8':
+  Duration: N/A, start: 16467.421333, bitrate: N/A
+  Program 0 
+    Metadata:
+      variant_bitrate : 0
+  Stream #0:0, 21, 1/90000: Video: h264 (Constrained Baseline), 1 reference frame ([27][0][0][0] / 0x001B), yuv420p(tv, bt470bg/unknown/unknown, left), 1280x720 [SAR 1:1 DAR 16:9], 0/1, 30 fps, 30 tbr, 90k tbn, start 16467.421333
+    Metadata:
+      variant_bitrate : 0
+  Stream #0:1, 32, 1/90000: Audio: aac (LC) ([15][0][0][0] / 0x000F), 48000 Hz, mono, fltp, start 16467.426667
+    Metadata:
+      variant_bitrate : 0
+Successfully opened the file.
+Parsing a group of options: output url -.
+Applying option map (set input stream mapping) with argument 0.
+Applying option c (select encoder/decoder ('copy' to copy stream without reencoding)) with argument copy.
+Applying option f (force container format (auto-detected otherwise)) with argument null.
+Successfully parsed a group of options.
+Opening an output file: -.
+[out#0/null @ 0x558f5f628dc0] Adding streams from explicit maps...
+[vost#0:0/copy @ 0x558f5f65ff00] Created video stream from input stream 0:0
+[aost#0:1/copy @ 0x558f5f660180] Created audio stream from input stream 0:1
+Successfully opened the file.
+Stream mapping:
+  Stream #0:0 -> #0:0 (copy)
+  Stream #0:1 -> #0:1 (copy)
+Output #0, null, to 'pipe:':
+  Metadata:
+    encoder         : Lavf62.3.100
+  Stream #0:0, 0, 1/90000: Video: h264 (Constrained Baseline), 1 reference frame ([27][0][0][0] / 0x001B), yuv420p(tv, bt470bg/unknown/unknown, left), 1280x720 [SAR 1:1 DAR 16:9], 0/1, q=2-31, 30 fps, 30 tbr, 90k tbn
+    Metadata:
+      variant_bitrate : 0
+  Stream #0:1, 0, 1/90000: Audio: aac (LC) ([15][0][0][0] / 0x000F), 48000 Hz, mono, fltp
+    Metadata:
+      variant_bitrate : 0
+[out#0/null @ 0x558f5f628dc0] Starting thread...
+[in#0/hls @ 0x558f5f5a0f40] Starting thread...
+[hls @ 0x558f5f5da200] HLS request for url 'http://10.177.0.10:17080/seg08235.ts', offset 0, playlist 0
+[http @ 0x558f5f5e1700] Opening 'http://10.177.0.10:17080/seg08235.ts' for reading
+[http @ 0x558f5f5e1640] request: GET /seg08235.ts HTTP/1.1
+User-Agent: go-ffmpeg-hls-swarm/1.0/testdata-collector
+Accept: */*
+Range: bytes=0-
+Connection: keep-alive
+Host: 10.177.0.10:17080
+Icy-MetaData: 1
+
+

@@ -14,6 +14,67 @@ rec {
   runtimeDeps = with pkgs; [ ffmpeg-full ];
   devUtils = with pkgs; [ curl jq nil ];
 
+  # Deep merge two attribute sets, recursively merging nested sets
+  # Used for merging base config, profile config, and overrides
+  deepMerge = base: overlay:
+    let
+      mergeAttr = name:
+        if builtins.isAttrs (base.${name} or null) && builtins.isAttrs (overlay.${name} or null)
+        then deepMerge base.${name} overlay.${name}
+        else overlay.${name} or base.${name} or null;
+      allKeys = builtins.attrNames (base // overlay);
+    in builtins.listToAttrs (map (name: { inherit name; value = mergeAttr name; }) allKeys);
+
+  # Generic profile system builder
+  # Creates a reusable profile framework for components
+  #
+  # Usage:
+  #   profileSystem = lib.mkProfileSystem {
+  #     base = { ... };  # Base configuration
+  #     profiles = { default = { ... }; low-latency = { ... }; ... };
+  #   };
+  #   config = profileSystem.getConfig "default" {};
+  #
+  mkProfileSystem = { base, profiles }:
+    rec {
+      # Get config for a profile with optional overrides
+      getConfig = profile: overrides:
+        let
+          available = builtins.attrNames profiles;
+          profileConfig = profiles.${profile} or (
+            throw ''
+              Unknown profile: ${profile}
+
+              Available profiles:
+              ${lib.concatMapStringsSep "\n" (p: "  - ${p}") available}
+            ''
+          );
+          merged = deepMerge (deepMerge base profileConfig) overrides;
+        in merged // {
+          _profile = {
+            name = profile;
+            availableProfiles = available;
+          };
+        };
+
+      # List all available profiles
+      listProfiles = builtins.attrNames profiles;
+
+      # Validate profile exists
+      validateProfile = profile:
+        let
+          available = builtins.attrNames profiles;
+        in
+        if builtins.hasAttr profile profiles
+        then true
+        else throw ''
+          Unknown profile: ${profile}
+
+          Available profiles:
+          ${lib.concatMapStringsSep "\n" (p: "  - ${p}") available}
+        '';
+    };
+
   # Check derivation helper
   mkGoCheck =
     { src, name, script }:
