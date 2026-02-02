@@ -284,19 +284,36 @@ func (m Model) renderLatencyStats() string {
 	}
 
 	// === RIGHT COLUMN: Segment Throughput ===
-	if m.debugStats.SegmentThroughputP50 > 0 {
-		rightCol = append(rightCol, sectionHeaderStyle.Render("Segment Throughput *"))
+	rightCol = append(rightCol, sectionHeaderStyle.Render("Segment Throughput *"))
+	if m.debugStats.TotalSegmentBytes > 0 {
 		rightCol = append(rightCol,
-			renderThroughputRow("P25", m.debugStats.SegmentThroughputP25),
-			renderThroughputRow("P50 (median)", m.debugStats.SegmentThroughputP50),
-			renderThroughputRow("P75", m.debugStats.SegmentThroughputP75),
-			renderThroughputRow("P95", m.debugStats.SegmentThroughputP95),
-			renderThroughputRow("P99", m.debugStats.SegmentThroughputP99),
-			renderThroughputRow("Max", m.debugStats.SegmentThroughputMax),
+			renderThroughputRow("Last 1s", m.debugStats.SegmentThroughputAvg1s),
+			renderThroughputRow("Last 30s", m.debugStats.SegmentThroughputAvg30s),
+			renderThroughputRow("Last 60s", m.debugStats.SegmentThroughputAvg60s),
+			renderThroughputRow("Last 5m", m.debugStats.SegmentThroughputAvg300s),
+			renderThroughputRow("Overall", m.debugStats.SegmentThroughputAvgOverall),
+			renderBytesRow("Total", m.debugStats.TotalSegmentBytes),
 		)
+		// Show lookup success rate (diagnostic for throughput discrepancy)
+		if m.debugStats.SegmentSizeLookupAttempts > 0 {
+			successRate := float64(m.debugStats.SegmentSizeLookupSuccesses) / float64(m.debugStats.SegmentSizeLookupAttempts) * 100
+			lookupStyle := valueGoodStyle
+			if successRate < 80 {
+				lookupStyle = valueWarnStyle
+			}
+			if successRate < 50 {
+				lookupStyle = valueBadStyle
+			}
+			rightCol = append(rightCol,
+				lipgloss.JoinHorizontal(lipgloss.Left,
+					labelStyle.Render("Lookup:"),
+					lookupStyle.Render(fmt.Sprintf("%.0f%%", successRate)),
+					dimStyle.Render(fmt.Sprintf(" (%d/%d)", m.debugStats.SegmentSizeLookupSuccesses, m.debugStats.SegmentSizeLookupAttempts)),
+				),
+			)
+		}
 	} else {
-		rightCol = append(rightCol, sectionHeaderStyle.Render("Segment Throughput *"))
-		rightCol = append(rightCol, dimStyle.Render("  (no data)"))
+		rightCol = append(rightCol, dimStyle.Render("  (warming up)"))
 	}
 
 	// Render three columns side-by-side
@@ -326,6 +343,15 @@ func renderLatencyRow(label string, d time.Duration) string {
 // renderThroughputRow renders a throughput row (bytes/sec formatted as MB/s)
 func renderThroughputRow(label string, bytesPerSec float64) string {
 	value := formatBytesRate(bytesPerSec)
+	return lipgloss.JoinHorizontal(lipgloss.Left,
+		labelStyle.Render(label+":"),
+		valueStyle.Render(value),
+	)
+}
+
+// renderBytesRow renders a bytes row (formatted as human-readable size)
+func renderBytesRow(label string, bytes int64) string {
+	value := formatBytesRaw(bytes)
 	return lipgloss.JoinHorizontal(lipgloss.Left,
 		labelStyle.Render(label+":"),
 		valueStyle.Render(value),

@@ -10,6 +10,7 @@ import (
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/parser"
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/stats"
 	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/supervisor"
+	"github.com/randomizedcoder/go-ffmpeg-hls-swarm/internal/timeseries"
 )
 
 // debugRateSnapshot holds values for calculating instantaneous rates for debug stats.
@@ -21,11 +22,8 @@ type debugRateSnapshot struct {
 	tcpConnects  int64
 }
 
-// cachedDebugStatsEntry holds cached debug stats to avoid double-drain.
-// Problem: Both TUI (500ms tick) and statsUpdateLoop (1s tick) call GetDebugStats().
-// GetDebugStats() drains throughput histograms, so whichever runs first gets the data
-// and the other gets empty histograms (P50=0).
-// Solution: Cache the result for 1 second so both consumers see the same data.
+// cachedDebugStatsEntry holds cached debug stats to avoid redundant computation.
+// Both TUI (500ms tick) and statsUpdateLoop (1s tick) call GetDebugStats().
 type cachedDebugStatsEntry struct {
 	stats     stats.DebugStatsAggregate
 	timestamp time.Time
@@ -65,12 +63,15 @@ type ClientManager struct {
 	// Rate tracking for debug stats (Phase 7.4) - Lock-free using atomic.Value
 	prevDebugSnapshot atomic.Value // *debugRateSnapshot
 
-	// Cached debug stats to avoid double-drain race condition
-	// Both TUI (500ms) and statsUpdateLoop (1s) call GetDebugStats().
-	// Without caching, one consumer always gets empty histogram data.
-	cachedDebugStats    atomic.Value // *cachedDebugStatsEntry
-	debugStatsCacheTTL  time.Duration
-	debugStatsCacheMu   sync.Mutex // Protects cache refresh to prevent double-drain race
+	// Throughput tracking (rolling time-window averages)
+	// Replaces histogram-based tracking to fix TUI flashing issue
+	throughputTracker     *timeseries.ThroughputTracker
+	prevTotalBytes        atomic.Int64 // For delta calculation
+	throughputSamplerDone chan struct{}
+
+	// Cached debug stats to avoid redundant computation
+	cachedDebugStats   atomic.Value  // *cachedDebugStatsEntry
+	debugStatsCacheTTL time.Duration
 
 	// Per-client stats (Phase 4/5)
 	// Maps clientID -> ClientStats
@@ -163,13 +164,17 @@ func NewClientManager(cfg ManagerConfig) *ClientManager {
 		debugParsers:       make(map[int]*parser.DebugEventParser),
 		clientStats:        make(map[int]*stats.ClientStats),
 		aggregator:         stats.NewStatsAggregator(threshold),
-		configSeed:         time.Now().UnixNano(),
-		// Cache TTL for debug stats to avoid double-drain race
-		// 1 second matches the Prometheus statsUpdateLoop interval
-		debugStatsCacheTTL: time.Second,
+		configSeed:            time.Now().UnixNano(),
+		throughputTracker:     timeseries.NewThroughputTracker(),
+		throughputSamplerDone: make(chan struct{}),
+		debugStatsCacheTTL:    time.Second, // Cache TTL for debug stats
 	}
 	// Initialize atomic.Value with first snapshot (lock-free)
 	cm.prevDebugSnapshot.Store(&debugRateSnapshot{timestamp: time.Now()})
+
+	// Start throughput sampler goroutine
+	go cm.throughputSamplerLoop()
+
 	return cm
 }
 
@@ -572,27 +577,10 @@ func (m *ClientManager) createDebugEventCallback(clientID int, clientStats *stat
 
 // GetDebugStats returns aggregated debug statistics across all clients.
 // This is the primary method for the layered TUI dashboard (Phase 7).
-//
-// IMPORTANT: This method uses caching to avoid double-drain race condition.
-// Both TUI (500ms tick) and statsUpdateLoop (1s tick) call this method.
-// Without caching, DrainThroughputHistogram() would be called multiple times,
-// causing one consumer to get empty histogram data (P50=0).
-// The cache TTL (1s) ensures both consumers see the same aggregated data.
+// Uses caching to avoid redundant computation when both TUI and Prometheus
+// call this method within a short time window.
 func (m *ClientManager) GetDebugStats() stats.DebugStatsAggregate {
 	// Check cache first (lock-free read)
-	if cached := m.cachedDebugStats.Load(); cached != nil {
-		entry := cached.(*cachedDebugStatsEntry)
-		if time.Since(entry.timestamp) < m.debugStatsCacheTTL {
-			return entry.stats
-		}
-	}
-
-	// Cache stale - need to refresh, but use mutex to prevent double-drain race
-	// If multiple goroutines hit this simultaneously, only one computes
-	m.debugStatsCacheMu.Lock()
-	defer m.debugStatsCacheMu.Unlock()
-
-	// Double-check after acquiring lock (another goroutine may have refreshed)
 	if cached := m.cachedDebugStats.Load(); cached != nil {
 		entry := cached.(*cachedDebugStatsEntry)
 		if time.Since(entry.timestamp) < m.debugStatsCacheTTL {
@@ -604,8 +592,7 @@ func (m *ClientManager) GetDebugStats() stats.DebugStatsAggregate {
 	return m.computeDebugStats()
 }
 
-// computeDebugStats aggregates debug statistics and updates the cache.
-// This is the actual implementation that drains histograms.
+// computeDebugStats aggregates debug statistics.
 func (m *ClientManager) computeDebugStats() stats.DebugStatsAggregate {
 	m.debugMu.RLock()
 	defer m.debugMu.RUnlock()
@@ -618,13 +605,7 @@ func (m *ClientManager) computeDebugStats() stats.DebugStatsAggregate {
 	var totalSegWallTime, totalTCPConnect float64
 	var segWallTimeCount, tcpConnectCount int64
 
-	// Collect throughput histograms from all clients for merging
-	drainedHistograms := make([][64]uint64, 0, len(m.debugParsers))
-
 	for _, dp := range m.debugParsers {
-		// Drain throughput histogram from each parser (before Stats() to avoid double-counting)
-		drained := dp.DrainThroughputHistogram()
-		drainedHistograms = append(drainedHistograms, drained)
 		stats := dp.Stats()
 
 		// HLS Layer
@@ -738,11 +719,12 @@ func (m *ClientManager) computeDebugStats() stats.DebugStatsAggregate {
 		agg.TimestampsUsed += stats.TimestampsUsed
 		agg.LinesProcessed += stats.LinesProcessed
 
-		// Segment bytes and throughput (from segment size tracking)
+		// Segment bytes (from segment size tracking)
 		agg.TotalSegmentBytes += stats.SegmentBytesDownloaded
-		if stats.MaxThroughput > agg.SegmentThroughputMax {
-			agg.SegmentThroughputMax = stats.MaxThroughput
-		}
+
+		// Segment size lookup diagnostics
+		agg.SegmentSizeLookupAttempts += stats.SegmentSizeLookupAttempts
+		agg.SegmentSizeLookupSuccesses += stats.SegmentSizeLookupSuccesses
 	}
 
 	// Calculate averages
@@ -767,15 +749,13 @@ func (m *ClientManager) computeDebugStats() stats.DebugStatsAggregate {
 		agg.ErrorRate = float64(totalErrors) / float64(agg.HTTPOpenCount)
 	}
 
-	// Merge throughput histograms and calculate percentiles
-	if len(drainedHistograms) > 0 {
-		agg.SegmentThroughputBuckets = parser.MergeBuckets(drainedHistograms...)
-		agg.SegmentThroughputP25 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.25)
-		agg.SegmentThroughputP50 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.50)
-		agg.SegmentThroughputP75 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.75)
-		agg.SegmentThroughputP95 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.95)
-		agg.SegmentThroughputP99 = parser.PercentileFromBuckets(agg.SegmentThroughputBuckets, 0.99)
-	}
+	// Get throughput stats from rolling time-window tracker
+	throughputStats := m.throughputTracker.GetStats()
+	agg.SegmentThroughputAvg1s = throughputStats.Avg1s
+	agg.SegmentThroughputAvg30s = throughputStats.Avg30s
+	agg.SegmentThroughputAvg60s = throughputStats.Avg60s
+	agg.SegmentThroughputAvg300s = throughputStats.Avg300s
+	agg.SegmentThroughputAvgOverall = throughputStats.AvgOverall
 
 	// Calculate instantaneous rates (Phase 7.4) - Lock-free using atomic.Value
 	now := time.Now()
@@ -808,6 +788,46 @@ func (m *ClientManager) computeDebugStats() stats.DebugStatsAggregate {
 	})
 
 	return agg
+}
+
+// throughputSamplerLoop runs every second to sample bytes from parsers
+// and feed them into the ThroughputTracker for rolling average calculation.
+func (m *ClientManager) throughputSamplerLoop() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.throughputSamplerDone:
+			return
+		case <-ticker.C:
+			m.sampleThroughput()
+		}
+	}
+}
+
+// sampleThroughput reads total bytes from all parsers and feeds delta to tracker.
+func (m *ClientManager) sampleThroughput() {
+	m.debugMu.RLock()
+	var currentTotal int64
+	for _, dp := range m.debugParsers {
+		stats := dp.Stats()
+		currentTotal += stats.SegmentBytesDownloaded
+	}
+	m.debugMu.RUnlock()
+
+	// Calculate delta since last sample
+	prevTotal := m.prevTotalBytes.Load()
+	delta := currentTotal - prevTotal
+
+	// Only add if positive (should always be, but guard against weirdness)
+	if delta > 0 {
+		m.throughputTracker.AddBytes(delta)
+		m.prevTotalBytes.Store(currentTotal)
+	}
+
+	// Record the sample for time-windowed calculations
+	m.throughputTracker.RecordSample()
 }
 
 // GetClientDebugStats returns debug statistics for a specific client.

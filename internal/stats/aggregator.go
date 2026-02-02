@@ -147,14 +147,16 @@ type DebugStatsAggregate struct {
 	InstantTCPConnectsRate  float64 // TCP connections per second
 
 	// Segment Bytes & Throughput (from segment size tracking)
-	TotalSegmentBytes       int64   // Total bytes downloaded (from segment scraper)
-	SegmentThroughputMax    float64 // Max throughput observed (bytes/sec)
-	SegmentThroughputP25    float64 // 25th percentile throughput (bytes/sec)
-	SegmentThroughputP50    float64 // 50th percentile throughput (bytes/sec)
-	SegmentThroughputP75    float64 // 75th percentile throughput (bytes/sec)
-	SegmentThroughputP95    float64 // 95th percentile throughput (bytes/sec)
-	SegmentThroughputP99    float64 // 99th percentile throughput (bytes/sec)
-	SegmentThroughputBuckets [64]uint64 // Merged histogram buckets (for computing percentiles)
+	TotalSegmentBytes           int64   // Total bytes downloaded (from segment scraper)
+	SegmentThroughputAvg1s      float64 // bytes/sec over last 1 second
+	SegmentThroughputAvg30s     float64 // bytes/sec over last 30 seconds
+	SegmentThroughputAvg60s     float64 // bytes/sec over last 60 seconds
+	SegmentThroughputAvg300s    float64 // bytes/sec over last 300 seconds (5 min)
+	SegmentThroughputAvgOverall float64 // bytes/sec since start
+
+	// Segment size lookup diagnostics
+	SegmentSizeLookupAttempts  int64 // Total lookup attempts
+	SegmentSizeLookupSuccesses int64 // Successful lookups
 }
 
 // StatsAggregator aggregates stats from multiple clients.

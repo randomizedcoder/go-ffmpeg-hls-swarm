@@ -77,10 +77,10 @@ func NewSegmentScraper(url string, interval, jitter time.Duration, windowSize in
 		logger = slog.Default()
 	}
 	if windowSize <= 0 {
-		windowSize = 30
+		windowSize = 300
 	}
 	if interval <= 0 {
-		interval = 5 * time.Second
+		interval = 1 * time.Second
 	}
 	if jitter <= 0 {
 		jitter = 500 * time.Millisecond

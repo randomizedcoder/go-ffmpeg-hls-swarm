@@ -2,7 +2,6 @@
 package parser
 
 import (
-	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -273,10 +272,9 @@ type DebugEventParser struct {
 	// This tracks bytes from COMPLETED segment downloads only
 	segmentBytesDownloaded atomic.Int64
 
-	// Throughput tracking (lock-free histogram for high performance)
-	// TDigest merging happens at aggregator level to reduce lock contention
-	throughputHist *ThroughputHistogram
-	maxThroughput  atomic.Uint64 // Atomic max (stored as bits via math.Float64bits)
+	// Segment size lookup diagnostics
+	segmentSizeLookupAttempts  atomic.Int64 // Total lookup attempts
+	segmentSizeLookupSuccesses atomic.Int64 // Successful lookups (size found)
 
 	// Parser stats
 	linesProcessed atomic.Int64
@@ -285,10 +283,6 @@ type DebugEventParser struct {
 const (
 	// defaultRingSize is the number of samples to keep for percentile calculations.
 	defaultRingSize = 100
-
-	// minWallTimeForThroughput is the minimum wall time to avoid division by zero or Inf values.
-	// 100µs guards against clock resolution issues and tiny segments.
-	minWallTimeForThroughput = 100 * time.Microsecond
 )
 
 // extractSegmentName extracts the filename from a segment URL.
@@ -337,7 +331,6 @@ func NewDebugEventParserWithSizeLookup(clientID int, targetDuration time.Duratio
 		manifestWallTimeMin:    -1, // -1 = unset
 		manifestWallTimeDigest: tdigest.NewWithCompression(100), // ~100 centroids, ~10KB
 		segmentSizeLookup:      sizeLookup,
-		throughputHist:         NewThroughputHistogram(),
 	}
 }
 
@@ -615,15 +608,10 @@ func (p *DebugEventParser) handleHLSRequest(now time.Time, url string) {
 			// bytes represent successful downloads only (see SEGMENT_SIZE_TRACKING_DESIGN.md)
 			if p.segmentSizeLookup != nil {
 				segmentName := extractSegmentName(oldestURL)
+				p.segmentSizeLookupAttempts.Add(1)
 				if size, ok := p.segmentSizeLookup.GetSegmentSize(segmentName); ok {
 					p.segmentBytesDownloaded.Add(size)
-
-					// Calculate throughput if we have sufficient wall time
-					// Guard against div-by-zero and Inf values
-					if wallTime >= minWallTimeForThroughput {
-						throughput := float64(size) / wallTime.Seconds()
-						p.recordThroughput(throughput)
-					}
+					p.segmentSizeLookupSuccesses.Add(1)
 				}
 			}
 		}
@@ -885,15 +873,13 @@ func (p *DebugEventParser) trackSegmentFromHTTP(now time.Time, url string) {
 			p.segmentWallTimeDigest.Add(float64(wallTime.Nanoseconds()), 1)
 			p.segmentWallTimeDigestMu.Unlock()
 
-			// Track segment bytes and throughput from scraper
+			// Track segment bytes from scraper (accurate sizes for completed downloads)
 			if p.segmentSizeLookup != nil {
 				segmentName := extractSegmentName(oldestURL)
+				p.segmentSizeLookupAttempts.Add(1)
 				if size, ok := p.segmentSizeLookup.GetSegmentSize(segmentName); ok {
 					p.segmentBytesDownloaded.Add(size)
-					if wallTime >= minWallTimeForThroughput {
-						throughput := float64(size) / wallTime.Seconds()
-						p.recordThroughput(throughput)
-					}
+					p.segmentSizeLookupSuccesses.Add(1)
 				}
 			}
 		}
@@ -1009,36 +995,6 @@ func (p *DebugEventParser) recordTCPConnect(d time.Duration) {
 		p.tcpConnectSamples[p.tcpConnectP0] = d
 		p.tcpConnectP0 = (p.tcpConnectP0 + 1) % defaultRingSize
 	}
-}
-
-// recordThroughput adds a throughput sample to the histogram.
-// Uses lock-free atomic histogram for high-performance per-client tracking.
-// TDigest merging happens at the aggregator level every 500ms.
-func (p *DebugEventParser) recordThroughput(bytesPerSec float64) {
-	// Record to atomic histogram (lock-free, O(1))
-	if p.throughputHist != nil {
-		p.throughputHist.Record(bytesPerSec)
-	}
-
-	// Track max with CAS loop (lock-free)
-	// NOTE: We store float64 as uint64 bits for atomic operations
-	newBits := math.Float64bits(bytesPerSec)
-	for {
-		oldBits := p.maxThroughput.Load()
-		oldVal := math.Float64frombits(oldBits)
-		if bytesPerSec <= oldVal {
-			break // Current value is already >= new value
-		}
-		if p.maxThroughput.CompareAndSwap(oldBits, newBits) {
-			break // Successfully updated
-		}
-		// CAS failed, another goroutine updated - retry
-	}
-}
-
-// loadMaxThroughput returns the max throughput observed (bytes/sec).
-func (p *DebugEventParser) loadMaxThroughput() float64 {
-	return math.Float64frombits(p.maxThroughput.Load())
 }
 
 // CompleteSegment records segment wall time when segment download completes.
@@ -1170,8 +1126,9 @@ type DebugStats struct {
 	// Only counts bytes from completed segment downloads (not failed attempts)
 	SegmentBytesDownloaded int64
 
-	// Throughput tracking (bytes per second)
-	MaxThroughput float64 // Max throughput observed (bytes/sec)
+	// Segment size lookup diagnostics
+	SegmentSizeLookupAttempts  int64 // Total lookup attempts
+	SegmentSizeLookupSuccesses int64 // Successful lookups
 }
 
 // Stats returns aggregated debug parser statistics.
@@ -1203,10 +1160,11 @@ func (p *DebugEventParser) Stats() DebugStats {
 		SegmentSkippedCount: p.segmentSkippedCount.Load(),
 		PlaylistFailedCount: p.playlistFailedCount.Load(),
 		SegmentsExpiredSum:  p.segmentsExpiredSum.Load(),
-		HTTPOpenCount:          p.httpOpenCount.Load(),
-		BytesDownloaded:        p.bytesDownloaded.Load(),
-		SegmentBytesDownloaded: p.segmentBytesDownloaded.Load(),
-		MaxThroughput:          p.loadMaxThroughput(),
+		HTTPOpenCount:              p.httpOpenCount.Load(),
+		BytesDownloaded:            p.bytesDownloaded.Load(),
+		SegmentBytesDownloaded:     p.segmentBytesDownloaded.Load(),
+		SegmentSizeLookupAttempts:  p.segmentSizeLookupAttempts.Load(),
+		SegmentSizeLookupSuccesses: p.segmentSizeLookupSuccesses.Load(),
 	}
 
 	// Segment wall time averages
@@ -1291,15 +1249,4 @@ func (p *DebugEventParser) GetManifestBandwidth() int64 {
 // ClientID returns the client ID for this parser.
 func (p *DebugEventParser) ClientID() int {
 	return p.clientID
-}
-
-// DrainThroughputHistogram drains and returns the throughput histogram buckets.
-// This resets the histogram counters atomically, ensuring each aggregation window
-// only contains samples since the last drain.
-// Returns nil if no histogram is configured.
-func (p *DebugEventParser) DrainThroughputHistogram() [64]uint64 {
-	if p.throughputHist == nil {
-		return [64]uint64{}
-	}
-	return p.throughputHist.Drain()
 }

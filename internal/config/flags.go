@@ -135,7 +135,7 @@ Examples:
 		"Enable FFmpeg -loglevel debug for detailed segment timing (safe with FD-based progress)")
 
 	// TUI (Terminal User Interface)
-	flag.BoolVar(&cfg.TUIEnabled, "tui", cfg.TUIEnabled, "Enable live terminal dashboard")
+	flag.BoolVar(&cfg.TUIEnabled, "tui", cfg.TUIEnabled, "Enable live terminal dashboard (default: true, use -tui=false to disable)")
 
 	// Prometheus
 	flag.BoolVar(&cfg.PromClientMetrics, "prom-client-metrics", cfg.PromClientMetrics,
@@ -173,12 +173,12 @@ Examples:
 			"If not set, auto-derives from -origin-metrics-host. "+
 			"Enables accurate segment byte tracking and throughput calculation.")
 	flag.DurationVar(&cfg.SegmentSizesScrapeInterval, "segment-sizes-interval", cfg.SegmentSizesScrapeInterval,
-		"Interval for scraping segment sizes. Default: 5s.")
+		"Interval for scraping segment sizes. Default: 1s.")
 	flag.DurationVar(&cfg.SegmentSizesScrapeJitter, "segment-sizes-jitter", cfg.SegmentSizesScrapeJitter,
 		"Jitter ± for scrape interval to prevent thundering herd. Default: 500ms.")
 	flag.Int64Var(&cfg.SegmentCacheWindow, "segment-cache-window", cfg.SegmentCacheWindow,
 		"Number of recent segments to keep in cache. "+
-			"Keeps exactly N segments [highest-N+1, highest]. Default: 30.")
+			"Keeps exactly N segments [highest-N+1, highest]. Default: 300.")
 
 	// Parse
 	flag.Parse()

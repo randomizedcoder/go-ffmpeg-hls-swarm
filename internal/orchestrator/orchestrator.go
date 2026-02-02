@@ -546,12 +546,10 @@ func (o *Orchestrator) convertToMetricsUpdate(aggStats *stats.AggregatedStats, d
 	// Add segment throughput data from debug stats (from segment scraper)
 	if debugStats != nil {
 		update.TotalSegmentBytes = debugStats.TotalSegmentBytes
-		update.SegmentThroughputMax = debugStats.SegmentThroughputMax
-		update.SegmentThroughputP25 = debugStats.SegmentThroughputP25
-		update.SegmentThroughputP50 = debugStats.SegmentThroughputP50
-		update.SegmentThroughputP75 = debugStats.SegmentThroughputP75
-		update.SegmentThroughputP95 = debugStats.SegmentThroughputP95
-		update.SegmentThroughputP99 = debugStats.SegmentThroughputP99
+		update.SegmentThroughputAvg1s = debugStats.SegmentThroughputAvg1s
+		update.SegmentThroughputAvg30s = debugStats.SegmentThroughputAvg30s
+		update.SegmentThroughputAvg60s = debugStats.SegmentThroughputAvg60s
+		update.SegmentThroughputAvg300s = debugStats.SegmentThroughputAvg300s
 	}
 
 	// Add per-client stats if enabled

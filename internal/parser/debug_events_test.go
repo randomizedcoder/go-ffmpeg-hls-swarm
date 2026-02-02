@@ -949,13 +949,12 @@ func (m *mockSegmentSizeLookup) GetSegmentSize(name string) (int64, bool) {
 func TestDebugEventParser_TrackSegmentFromHTTP_Basic(t *testing.T) {
 	// Test that HTTP layer tracking completes pending segments
 	tests := []struct {
-		name                   string
-		httpLines              []string
-		delayBetweenLines      time.Duration
-		wantSegmentCount       int64
-		wantMinWallTimeMs      float64
-		wantSegmentBytes       int64 // Only counted if size lookup configured
-		wantThroughputRecorded bool
+		name              string
+		httpLines         []string
+		delayBetweenLines time.Duration
+		wantSegmentCount  int64
+		wantMinWallTimeMs float64
+		wantSegmentBytes  int64 // Only counted if size lookup configured
 	}{
 		{
 			name: "single_segment_completion",
@@ -963,11 +962,10 @@ func TestDebugEventParser_TrackSegmentFromHTTP_Basic(t *testing.T) {
 				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading",
 				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading",
 			},
-			delayBetweenLines:      10 * time.Millisecond,
-			wantSegmentCount:       1,
-			wantMinWallTimeMs:      5,  // At least 5ms (with some slack for test timing)
-			wantSegmentBytes:       1281032, // seg03440.ts size
-			wantThroughputRecorded: true,
+			delayBetweenLines: 10 * time.Millisecond,
+			wantSegmentCount:  1,
+			wantMinWallTimeMs: 5,       // At least 5ms (with some slack for test timing)
+			wantSegmentBytes:  1281032, // seg03440.ts size
 		},
 		{
 			name: "multiple_segments",
@@ -977,11 +975,10 @@ func TestDebugEventParser_TrackSegmentFromHTTP_Basic(t *testing.T) {
 				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03442.ts' for reading",
 				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03443.ts' for reading",
 			},
-			delayBetweenLines:      5 * time.Millisecond,
-			wantSegmentCount:       3, // First segment starts pending, next 3 complete prev ones
-			wantMinWallTimeMs:      2, // At least 2ms each
-			wantSegmentBytes:       1281032 + 1297764 + 1361120, // First 3 segments
-			wantThroughputRecorded: true,
+			delayBetweenLines: 5 * time.Millisecond,
+			wantSegmentCount:  3, // First segment starts pending, next 3 complete prev ones
+			wantMinWallTimeMs: 2, // At least 2ms each
+			wantSegmentBytes:  1281032 + 1297764 + 1361120, // First 3 segments
 		},
 		{
 			name: "segment_with_query_string",
@@ -989,11 +986,10 @@ func TestDebugEventParser_TrackSegmentFromHTTP_Basic(t *testing.T) {
 				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts?token=abc123' for reading",
 				"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts?token=abc123' for reading",
 			},
-			delayBetweenLines:      10 * time.Millisecond,
-			wantSegmentCount:       1,
-			wantMinWallTimeMs:      5,
-			wantSegmentBytes:       0, // Query string URL won't match "seg03440.ts" exactly
-			wantThroughputRecorded: false,
+			delayBetweenLines: 10 * time.Millisecond,
+			wantSegmentCount:  1,
+			wantMinWallTimeMs: 5,
+			wantSegmentBytes:  0, // Query string URL won't match "seg03440.ts" exactly
 		},
 	}
 
@@ -1031,10 +1027,6 @@ func TestDebugEventParser_TrackSegmentFromHTTP_Basic(t *testing.T) {
 
 			if stats.SegmentBytesDownloaded != tt.wantSegmentBytes {
 				t.Errorf("SegmentBytesDownloaded = %d, want %d", stats.SegmentBytesDownloaded, tt.wantSegmentBytes)
-			}
-
-			if tt.wantThroughputRecorded && stats.MaxThroughput == 0 {
-				t.Error("Expected MaxThroughput > 0 but got 0")
 			}
 		})
 	}
@@ -1092,12 +1084,9 @@ func TestDebugEventParser_TrackSegmentFromHTTP_WithoutSizeLookup(t *testing.T) {
 		t.Errorf("SegmentCount = %d, want 1", stats.SegmentCount)
 	}
 
-	// But bytes and throughput should be 0
+	// But bytes should be 0 (no size lookup)
 	if stats.SegmentBytesDownloaded != 0 {
 		t.Errorf("SegmentBytesDownloaded = %d, want 0 (no size lookup)", stats.SegmentBytesDownloaded)
-	}
-	if stats.MaxThroughput != 0 {
-		t.Errorf("MaxThroughput = %f, want 0 (no size lookup)", stats.MaxThroughput)
 	}
 }
 
@@ -1144,58 +1133,6 @@ func TestDebugEventParser_TrackSegmentFromHTTP_MixedHLSAndHTTP(t *testing.T) {
 	expectedBytes := int64(1281032 + 1297764 + 1361120)
 	if stats.SegmentBytesDownloaded != expectedBytes {
 		t.Errorf("SegmentBytesDownloaded = %d, want %d", stats.SegmentBytesDownloaded, expectedBytes)
-	}
-
-	// Throughput should be recorded
-	if stats.MaxThroughput == 0 {
-		t.Error("Expected MaxThroughput > 0")
-	}
-}
-
-func TestDebugEventParser_TrackSegmentFromHTTP_ThroughputHistogram(t *testing.T) {
-	// Test that throughput histogram is populated correctly
-	segmentSizes := map[string]int64{
-		"seg03440.ts": 1000000, // 1MB - easy to calculate throughput
-		"seg03441.ts": 1000000,
-		"seg03442.ts": 1000000,
-	}
-	lookup := newMockSegmentSizeLookup(segmentSizes)
-	p := NewDebugEventParserWithSizeLookup(1, 2*time.Second, nil, lookup)
-
-	// Generate multiple segments with consistent timing
-	urls := []string{
-		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03440.ts' for reading",
-		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03441.ts' for reading",
-		"[http @ 0x55c32c0d7ac0] Opening 'http://10.177.0.10:17080/seg03442.ts' for reading",
-	}
-
-	for _, line := range urls {
-		p.ParseLine(line)
-		time.Sleep(20 * time.Millisecond) // 20ms delay = ~50MB/s throughput with 1MB segments
-	}
-
-	// Drain the histogram
-	buckets := p.DrainThroughputHistogram()
-
-	// Verify some buckets have counts (throughput was recorded)
-	totalSamples := uint64(0)
-	for _, count := range buckets {
-		totalSamples += count
-	}
-
-	// Should have 2 samples (3 HTTP opens = 2 completed segments)
-	if totalSamples != 2 {
-		t.Errorf("Throughput histogram total samples = %d, want 2", totalSamples)
-	}
-
-	// After drain, histogram should be empty
-	bucketsAfterDrain := p.DrainThroughputHistogram()
-	totalAfterDrain := uint64(0)
-	for _, count := range bucketsAfterDrain {
-		totalAfterDrain += count
-	}
-	if totalAfterDrain != 0 {
-		t.Errorf("After drain, total samples = %d, want 0", totalAfterDrain)
 	}
 }
 
@@ -1267,10 +1204,6 @@ func TestDebugEventParser_TrackSegmentFromHTTP_RapidFireDifferentURLs(t *testing
 	if stats.SegmentBytesDownloaded != expectedBytes {
 		t.Errorf("SegmentBytesDownloaded = %d, want %d", stats.SegmentBytesDownloaded, expectedBytes)
 	}
-
-	// Note: We don't check MaxThroughput here because rapid-fire (0 wall time)
-	// results in division by near-zero, which is correctly skipped by minWallTimeForThroughput guard.
-	// Throughput tracking is tested in other tests with realistic delays.
 }
 
 func TestDebugEventParser_TrackSegmentFromHTTP_SameURLSkipped(t *testing.T) {
@@ -1346,11 +1279,6 @@ func TestDebugEventParser_TrackSegmentFromHTTP_HTTPGetPattern(t *testing.T) {
 	// 3 completed segments * 1MB = 3MB
 	if stats.SegmentBytesDownloaded != 3000000 {
 		t.Errorf("SegmentBytesDownloaded = %d, want 3000000", stats.SegmentBytesDownloaded)
-	}
-
-	// Throughput should be recorded
-	if stats.MaxThroughput == 0 {
-		t.Error("Expected MaxThroughput > 0 for HTTP GET pattern")
 	}
 }
 
@@ -1439,13 +1367,8 @@ func TestDebugEventParser_TrackSegmentFromHTTP_SteadyStateSimulation(t *testing.
 		t.Errorf("SegmentBytesDownloaded = %d, want 2000000", stats.SegmentBytesDownloaded)
 	}
 
-	// Throughput should be recorded
-	if stats.MaxThroughput == 0 {
-		t.Error("Expected MaxThroughput > 0 in steady state")
-	}
-
-	t.Logf("Steady state test: SegmentCount=%d, Bytes=%d, MaxThroughput=%.0f",
-		stats.SegmentCount, stats.SegmentBytesDownloaded, stats.MaxThroughput)
+	t.Logf("Steady state test: SegmentCount=%d, Bytes=%d",
+		stats.SegmentCount, stats.SegmentBytesDownloaded)
 }
 
 func TestDebugEventParser_TrackSegmentFromHTTP_ConcurrentAccess(t *testing.T) {

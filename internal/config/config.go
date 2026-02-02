@@ -133,7 +133,7 @@ func DefaultConfig() *Config {
 		DebugLogging: false, // Disabled by default
 
 		// TUI
-		TUIEnabled: false, // Disabled by default (use -tui to enable)
+		TUIEnabled: true, // Enabled by default (use -no-tui to disable)
 
 		// Prometheus
 		PromClientMetrics: false, // Disabled by default (high cardinality)
@@ -149,9 +149,9 @@ func DefaultConfig() *Config {
 
 		// Segment Size Tracking
 		SegmentSizesURL:            "",                      // Disabled by default (auto-derives from OriginMetricsHost)
-		SegmentSizesScrapeInterval: 5 * time.Second,         // Scrape every 5 seconds
+		SegmentSizesScrapeInterval: 1 * time.Second,         // Scrape every 1 second (fast enough for high client counts)
 		SegmentSizesScrapeJitter:   500 * time.Millisecond,  // ±500ms jitter prevents thundering herd
-		SegmentCacheWindow:         30,                      // Keep last 30 segments in cache
+		SegmentCacheWindow:         300,                     // Keep last 300 segments in cache (handles 300+ clients)
 	}
 }
 
