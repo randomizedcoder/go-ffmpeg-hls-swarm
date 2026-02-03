@@ -10,7 +10,12 @@
 #
 # Build: nix build .#swarm-client-container
 # Load:  docker load < ./result
-# Run:   docker run --rm -e STREAM_URL=http://origin:8080/stream.m3u8 swarm-client
+#
+# Run (CLI mode - pass arguments directly):
+#   docker run --rm go-ffmpeg-hls-swarm -clients 300 http://origin:8080/stream.m3u8
+#
+# Run (Environment variable mode - configure via env vars):
+#   docker run --rm -e STREAM_URL=http://origin:8080/stream.m3u8 -e CLIENTS=300 go-ffmpeg-hls-swarm
 #
 { pkgs, lib, config, swarmBinary }:
 
@@ -61,8 +66,15 @@ let
     text = ''
       set -euo pipefail
 
-      # Required environment variable
-      : "''${STREAM_URL:?STREAM_URL environment variable is required}"
+      # CLI mode: if arguments were passed, forward them directly to the binary
+      # This allows: docker run image -clients 300 http://origin/stream.m3u8
+      if [ $# -gt 0 ]; then
+        exec go-ffmpeg-hls-swarm "$@"
+      fi
+
+      # Environment variable mode: require STREAM_URL and build command from env vars
+      # This allows: docker run -e STREAM_URL=http://origin/stream.m3u8 image
+      : "''${STREAM_URL:?STREAM_URL environment variable is required (or pass URL as argument)}"
 
       # Optional with defaults from config profile
       CLIENTS="''${CLIENTS:-${toString config.clients}}"

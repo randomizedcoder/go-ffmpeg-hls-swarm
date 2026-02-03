@@ -134,7 +134,9 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 		StatsBufferSize:    cfg.StatsBufferSize,
 		StatsDropThreshold: cfg.StatsDropThreshold,
 		// Segment size lookup (for accurate byte tracking)
-		SegmentSizeLookup: segmentScraper, // nil if not configured
+		// NOTE: Only set if non-nil to avoid Go's nil interface gotcha
+		// (a nil pointer in an interface makes interface != nil but method calls panic)
+		SegmentSizeLookup: nil, // Set below if configured
 		// FD mode is always enabled when stats are enabled
 		Callbacks: ManagerCallbacks{
 			OnClientStateChange: orch.onStateChange,
@@ -142,6 +144,10 @@ func New(cfg *config.Config, logger *slog.Logger) *Orchestrator {
 			OnClientExit:        orch.onExit,
 			OnClientRestart:     orch.onRestart,
 		},
+	}
+	// Only set SegmentSizeLookup if scraper is configured (avoid nil interface gotcha)
+	if segmentScraper != nil {
+		managerCfg.SegmentSizeLookup = segmentScraper
 	}
 	orch.clientManager = NewClientManager(managerCfg)
 

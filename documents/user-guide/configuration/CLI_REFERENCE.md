@@ -149,7 +149,7 @@ Stall threshold = 2x target-duration (default: 12s without progress = stalled).
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `-tui` | bool | false | Enable live terminal dashboard |
+| `-tui` | bool | true | Enable live terminal dashboard (use `-tui=false` to disable) |
 | `-prom-client-metrics` | bool | false | Enable per-client Prometheus metrics (high cardinality!) |
 
 > **Warning**: `-prom-client-metrics` creates high cardinality. Only use with <200 clients.
@@ -184,6 +184,38 @@ Scrape metrics from the HLS origin server for integrated monitoring:
 -origin-metrics-host 10.177.0.10 \
 -origin-metrics-node-port 19100 \
 -origin-metrics-nginx-port 19113
+```
+
+---
+
+## Segment Size Tracking
+
+Track accurate segment sizes by polling the origin server's `/files/json/` endpoint:
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-segment-sizes-url` | string | "" | URL for segment size JSON (auto-derives from -origin-metrics-host if not set) |
+| `-segment-sizes-interval` | duration | 1s | Interval for scraping segment sizes |
+| `-segment-sizes-jitter` | duration | 500ms | Jitter ± for scrape interval to prevent thundering herd |
+| `-segment-cache-window` | int | 300 | Number of recent segments to keep in cache |
+
+**How it works:**
+1. Polls the origin's `/files/json/` endpoint to get actual segment file sizes
+2. Maintains a rolling cache of the N most recent segments
+3. When clients download segments, looks up actual size for accurate throughput calculation
+4. The cache evicts segments older than `highest_seen - cache_window`
+
+**Example:**
+
+```bash
+# Auto-derive from origin-metrics-host (recommended)
+-origin-metrics-host 10.177.0.10
+
+# Explicit URL
+-segment-sizes-url http://10.177.0.10:17080/files/json/
+
+# Tuned for high-concurrency tests
+-segment-sizes-interval 500ms -segment-cache-window 500
 ```
 
 ---

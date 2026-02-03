@@ -20,6 +20,10 @@ let
   d = config.derived;
   log = config.logging;
 
+  # Escape % as %% for systemd specifier handling
+  # See: https://www.freedesktop.org/software/systemd/man/systemd.unit.html#Specifiers
+  escapeSystemdPercent = s: builtins.replaceStrings ["%"] ["%%"] s;
+
   # Use the mkFfmpegArgs helper for clean argument building
   # This makes it easy to override in tests without rewriting strings
   ffmpegArgs = ffmpeg.mkFfmpegArgs {
@@ -252,7 +256,8 @@ in
       LimitNOFILE = 256;            # Only needs HLS segment files
       LimitNPROC = 64;              # FFmpeg spawns threads, not processes
 
-      ExecStart = "${pkgs.ffmpeg-full}/bin/ffmpeg ${lib.concatStringsSep " " (map lib.escapeShellArg ffmpegArgs)}";
+      # Escape % as %% for systemd, then escape for shell
+      ExecStart = "${pkgs.ffmpeg-full}/bin/ffmpeg ${lib.concatStringsSep " " (map (a: lib.escapeShellArg (escapeSystemdPercent a)) ffmpegArgs)}";
       Restart = "always";
       RestartSec = 2;
     };

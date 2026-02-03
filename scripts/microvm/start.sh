@@ -615,6 +615,10 @@ main() {
     echo "To stop: ./scripts/microvm/stop.sh"
     echo "To test: make load-test-300-microvm"
     echo ""
+    echo "make microvm-stop"
+    echo "rm -rf result-tap"
+    echo "make microvm-start-tap"
+    echo ""
 }
 
 main "$@"
