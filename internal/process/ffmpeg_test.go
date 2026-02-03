@@ -119,7 +119,7 @@ func TestFFmpegRunner_buildArgs_StatsEnabled(t *testing.T) {
 			statsEnabled:  true,
 			statsLogLevel: "",
 			wantProgress:  true,
-			wantLogLevel:  "repeat+level+datetime+verbose", // Timestamped, defaults to verbose
+			wantLogLevel:  "repeat+level+datetime+debug", // Timestamped, defaults to debug (for manifest tracking)
 		},
 		{
 			name:          "stats enabled verbose",
@@ -618,7 +618,7 @@ func TestFFmpegRunner_DebugLogging(t *testing.T) {
 		}
 	})
 
-	t.Run("debug_logging_disabled_uses_normal_level", func(t *testing.T) {
+	t.Run("debug_logging_disabled_uses_default_debug_level", func(t *testing.T) {
 		cfg := DefaultFFmpegConfig("http://example.com/stream.m3u8")
 		cfg.StatsEnabled = true
 		cfg.DebugLogging = false
@@ -627,13 +627,10 @@ func TestFFmpegRunner_DebugLogging(t *testing.T) {
 
 		args := runner.buildArgs()
 		cmdStr := strings.Join(args, " ")
-		// Without debug logging, should use timestamped debug (default for stats)
-		if !strings.Contains(cmdStr, "datetime+debug") {
-			t.Error("With stats enabled, should use debug level by default for manifest tracking")
-		}
-		// Should still use timestamped logging when stats enabled
-		if !strings.Contains(cmdStr, "repeat+level+datetime+verbose") {
-			t.Errorf("Should use timestamped verbose level, got: %s", cmdStr)
+		// Without debug logging flag, should still use timestamped debug
+		// (default for stats to capture manifest refreshes)
+		if !strings.Contains(cmdStr, "repeat+level+datetime+debug") {
+			t.Errorf("With stats enabled, should use timestamped debug level by default, got: %s", cmdStr)
 		}
 	})
 }

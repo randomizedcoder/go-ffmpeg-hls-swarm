@@ -92,6 +92,11 @@ func NewOriginScraper(nodeExporterURL, nginxExporterURL string, interval, window
 		return nil // Feature disabled
 	}
 
+	// Default interval if not specified (prevents NewTicker panic)
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+
 	// Clamp window size for safety (validation also done in config.Validate())
 	if windowSize < 10*time.Second {
 		windowSize = 10 * time.Second

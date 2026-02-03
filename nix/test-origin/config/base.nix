@@ -8,8 +8,9 @@
     segmentDuration = 2;
     listSize = 10;
     deleteThreshold = 5;  # INCREASED: Safe buffer for SWR/CDN lag
-    # Note: %% is required for systemd unit files (% is a specifier)
-    segmentPattern = "seg%%05d.ts";
+    # Note: Use single % here. Systemd escaping (if needed) should be handled
+    # in systemd-specific code, not in the base config.
+    segmentPattern = "seg%05d.ts";
     playlistName = "stream.m3u8";
     masterPlaylist = "master.m3u8";
 

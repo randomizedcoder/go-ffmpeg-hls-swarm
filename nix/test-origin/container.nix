@@ -111,8 +111,11 @@ pkgs.dockerTools.buildLayeredImage {
   # - Directories created here are visible to fakeRootCommands via relative paths
   extraCommands = ''
     mkdir -p var/hls tmp var/log/nginx var/cache/nginx
+    # Nginx temp directories (required for nginx to start)
+    mkdir -p tmp/nginx_client_body tmp/nginx_proxy tmp/nginx_fastcgi tmp/nginx_uwsgi tmp/nginx_scgi
     # Set permissions (ownership will be set in fakeRootCommands)
     chmod 755 var/hls var/log/nginx var/cache/nginx
+    chmod 1777 tmp tmp/nginx_client_body tmp/nginx_proxy tmp/nginx_fastcgi tmp/nginx_uwsgi tmp/nginx_scgi
   '';
 
   # Context: fakeRootCommands runs as root in build sandbox
@@ -128,5 +131,7 @@ pkgs.dockerTools.buildLayeredImage {
     # FFmpeg runs as nginx user and needs to write segments, nginx reads them
     chown root:${gid} var/hls
     chmod 775 var/hls
+    # Nginx temp directories - owned by nginx user
+    chown -R ${uid}:${gid} tmp/nginx_client_body tmp/nginx_proxy tmp/nginx_fastcgi tmp/nginx_uwsgi tmp/nginx_scgi
   '';
 }

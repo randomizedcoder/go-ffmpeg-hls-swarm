@@ -13,6 +13,10 @@ let
   h = cfg.hls;
   v = cfg.video;
 
+  # Escape % as %% for systemd specifier handling
+  # See: https://www.freedesktop.org/software/systemd/man/systemd.unit.html#Specifiers
+  escapeSystemdPercent = s: builtins.replaceStrings ["%"] ["%%"] s;
+
   # ═══════════════════════════════════════════════════════════════════════════
   # mkFfmpegArgs: Modular argument builder for FFmpeg HLS generation
   # ═══════════════════════════════════════════════════════════════════════════
@@ -214,6 +218,7 @@ in rec {
   '';
 
   # Systemd service configuration
+  # Note: escapeSystemdPercent (defined in let block) escapes % as %% for systemd
   systemdService = {
     description = "FFmpeg HLS Test Stream Generator (${if cfg.multibitrate then "${toString numVariants} variants" else "single bitrate"})";
     after = [ "network.target" ];
@@ -226,7 +231,8 @@ in rec {
           ${lib.concatMapStringsSep "\n" (vr: "mkdir -p ${cfg.server.hlsDir}/${vr.name}") variants}
         ''}
       '';
-      ExecStart = "${pkgs.ffmpeg-full}/bin/ffmpeg ${lib.concatStringsSep " " (map lib.escapeShellArg ffmpegArgs)}";
+      # Escape % as %% for systemd specifier handling, then escape for shell
+      ExecStart = "${pkgs.ffmpeg-full}/bin/ffmpeg ${lib.concatStringsSep " " (map (a: lib.escapeShellArg (escapeSystemdPercent a)) ffmpegArgs)}";
       Restart = "always";
       RestartSec = 2;
     };

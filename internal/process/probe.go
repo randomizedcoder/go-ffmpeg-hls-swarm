@@ -120,11 +120,13 @@ func (r *FFmpegRunner) probe(ctx context.Context) ([]ProgramInfo, error) {
 // findFFprobe returns the path to ffprobe.
 // It looks in the same directory as ffmpeg, or falls back to PATH.
 func (r *FFmpegRunner) findFFprobe() string {
-	// If ffmpeg path is explicit, try ffprobe in same directory
-	if r.config.BinaryPath != "ffmpeg" {
+	// If ffmpeg path is explicit and ends with "ffmpeg", try ffprobe in same directory
+	const ffmpegSuffix = "ffmpeg"
+	if len(r.config.BinaryPath) > len(ffmpegSuffix) &&
+		r.config.BinaryPath[len(r.config.BinaryPath)-len(ffmpegSuffix):] == ffmpegSuffix {
 		// Replace ffmpeg with ffprobe in path
 		// e.g., /usr/local/bin/ffmpeg -> /usr/local/bin/ffprobe
-		dir := r.config.BinaryPath[:len(r.config.BinaryPath)-6] // Remove "ffmpeg"
+		dir := r.config.BinaryPath[:len(r.config.BinaryPath)-len(ffmpegSuffix)]
 		ffprobePath := dir + "ffprobe"
 		if _, err := exec.LookPath(ffprobePath); err == nil {
 			return ffprobePath

@@ -68,6 +68,19 @@ func newSleepBuilder(duration time.Duration) *mockBuilder {
 	}
 }
 
+// newFDEchoBuilder creates a builder that writes to the progress FD.
+// This simulates FFmpeg writing progress output to pipe:3.
+func newFDEchoBuilder(output string) *mockBuilder {
+	m := &mockBuilder{}
+	m.buildFn = func(ctx context.Context, clientID int) (*exec.Cmd, error) {
+		// Write to FD 3 (ExtraFiles[0]) using bash redirection
+		// The supervisor passes the progress pipe as FD 3
+		cmd := exec.CommandContext(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >&3", output))
+		return cmd, nil
+	}
+	return m
+}
+
 // newFailingBuilder creates a builder that always fails to build.
 func newFailingBuilder(err error) *mockBuilder {
 	return &mockBuilder{buildError: err}
@@ -666,7 +679,7 @@ func TestSupervisor_StatsEnabled_CreatesPipes(t *testing.T) {
 
 	sup := New(Config{
 		ClientID:       1,
-		Builder:        newEchoBuilder("progress line"),
+		Builder:        newFDEchoBuilder("progress line"), // Use FD echo builder
 		Backoff:        newTestBackoff(),
 		Logger:         newTestLogger(),
 		MaxRestarts:    1,
@@ -677,7 +690,7 @@ func TestSupervisor_StatsEnabled_CreatesPipes(t *testing.T) {
 
 	_ = sup.Run(ctx)
 
-	// Progress parser should have received the echo output
+	// Progress parser should have received the echo output on FD 3
 	if progressParser.LineCount() == 0 {
 		t.Error("progressParser received no lines")
 	}
@@ -728,7 +741,7 @@ func TestSupervisor_PipelineStats(t *testing.T) {
 
 	sup := New(Config{
 		ClientID:       1,
-		Builder:        newEchoBuilder("line1\nline2\nline3"),
+		Builder:        newFDEchoBuilder("line1\\nline2\\nline3"), // Use FD echo builder
 		Backoff:        newTestBackoff(),
 		Logger:         newTestLogger(),
 		MaxRestarts:    1,
@@ -740,7 +753,7 @@ func TestSupervisor_PipelineStats(t *testing.T) {
 
 	progressRead, progressDropped, stderrRead, stderrDropped := sup.PipelineStats()
 
-	// Should have read some lines
+	// Should have read some lines on FD 3
 	if progressRead == 0 {
 		t.Error("progressRead should be > 0")
 	}
