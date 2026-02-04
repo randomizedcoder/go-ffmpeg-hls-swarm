@@ -61,6 +61,7 @@ RESET := \033[0m
 .PHONY: ffmpeg-debug-capture
 .PHONY: lint fmt fmt-nix check check-nix
 .PHONY: test-origin test-origin-low-latency test-origin-4k-abr test-origin-stress test-origin-logged test-origin-debug
+.PHONY: nginx-config
 .PHONY: container container-load container-run container-run-origin swarm-container-run-100 container-full-test
 .PHONY: swarm-client swarm-client-stress swarm-client-gentle swarm-client-burst swarm-client-extreme
 .PHONY: swarm-container swarm-container-load swarm-container-run
@@ -92,6 +93,9 @@ help: ## Show this help message
 	@echo ""
 	@echo "$(GREEN)Test Origin Server:$(RESET)"
 	@grep -E '^test-origin[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
+	@echo ""
+	@echo "$(GREEN)Nginx Config Generator:$(RESET)"
+	@grep -E '^nginx-config[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(GREEN)Swarm Client (Load Tester):$(RESET)"
 	@grep -E '^swarm-[^:]*:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  $(CYAN)%-28s$(RESET) %s\n", $$1, $$2}'
@@ -254,6 +258,18 @@ test-origin-logged: ## Run test origin with logging (512k buffer, segments only)
 
 test-origin-debug: ## Run test origin with full logging (all requests, gzip)
 	PORT=$(ORIGIN_PORT) $(NIX_RUN) .#test-origin-debug
+
+# ============================================================================
+# Nginx Config Generator
+# View the generated nginx config for the test origin server.
+# Override the profile with NGINX_PROFILE (default, low-latency, 4k-abr, stress, logged, debug).
+# Example: make nginx-config NGINX_PROFILE=low-latency
+# ============================================================================
+
+NGINX_PROFILE ?= default
+
+nginx-config: ## Show origin server nginx config (use NGINX_PROFILE= to change profile)
+	@$(NIX_RUN) .#nginx-config -- $(NGINX_PROFILE)
 
 # ============================================================================
 # Swarm Client targets
